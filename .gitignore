@@ -1,0 +1,17 @@
+.env
+hehe.sh
+.venv/
+
+
+markdown/
+HUB/
+bin/
+checkpoints/
+results/
+data/
+exp_data/
+
+*.csv
+*.png
+*.jar
+__pycache__/
