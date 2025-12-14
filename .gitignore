@@ -8,10 +8,14 @@ HUB/
 bin/
 checkpoints/
 results/
-data/
+datasets/
 exp_data/
 
 *.csv
 *.png
 *.jar
 __pycache__/
+output/
+
+de/
+tools/

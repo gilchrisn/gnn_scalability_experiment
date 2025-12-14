@@ -17,6 +17,7 @@ def check_imports():
         ("KMV Kernel", "from src.kernels import KMVSketchingKernel"),
         ("C++ Bridge", "from src.bridge import CppBridge, PyGToCppAdapter"),
         ("AnyBURL", "from src.bridge import AnyBURLRunner"),
+        ("Disk Sampler", "from src.sampling.disk import HNESnowballDiskSampler"),
         ("Utils", "from src.utils import generate_random_metapath"),
         ("Models", "from src.models import get_model"),
     ]
@@ -26,9 +27,9 @@ def check_imports():
     for name, import_stmt in checks:
         try:
             exec(import_stmt)
-            print(f"✓ {name:20s} - OK")
+            print(f"✅ {name:20s} - OK")
         except Exception as e:
-            print(f"✗ {name:20s} - FAILED: {e}")
+            print(f"❌ {name:20s} - FAILED: {e}")
             failed.append((name, str(e)))
     
     return failed
@@ -41,6 +42,7 @@ def check_directories():
         "src/data",
         "src/kernels",
         "src/bridge",
+        "src/sampling",
         "output",
         "output/intermediate",
         "output/models",
@@ -51,7 +53,7 @@ def check_directories():
     
     for dir_path in required_dirs:
         exists = os.path.exists(dir_path)
-        status = "✓" if exists else "✗"
+        status = "✅" if exists else "❌"
         print(f"{status} {dir_path}")
         if not exists:
             missing.append(dir_path)
@@ -78,13 +80,14 @@ def check_files():
         "src/bridge/__init__.py",
         "src/bridge/cpp_adapter.py",
         "src/bridge/anyburl.py",
+        "src/sampling/disk.py",
     ]
     
     missing = []
     
     for file_path in required_files:
         exists = os.path.exists(file_path)
-        status = "✓" if exists else "✗"
+        status = "✅" if exists else "❌"
         print(f"{status} {file_path}")
         if not exists:
             missing.append(file_path)
@@ -113,28 +116,28 @@ def main():
     all_ok = not (missing_files or missing_dirs or failed_imports)
     
     if missing_files:
-        print(f"\n✗ Missing {len(missing_files)} files:")
+        print(f"\n❌ Missing {len(missing_files)} files:")
         for f in missing_files:
             print(f"  - {f}")
     
     if missing_dirs:
-        print(f"\n✗ Missing {len(missing_dirs)} directories:")
+        print(f"\n❌ Missing {len(missing_dirs)} directories:")
         for d in missing_dirs:
             print(f"  - {d}")
     
     if failed_imports:
-        print(f"\n✗ {len(failed_imports)} import failures:")
+        print(f"\n❌ {len(failed_imports)} import failures:")
         for name, error in failed_imports:
             print(f"  - {name}: {error}")
     
     if all_ok:
-        print("\n✓ All checks passed! The refactored codebase is ready.")
+        print("\n✅ All checks passed! The refactored codebase is ready.")
         print("\nNext steps:")
         print("  1. Run: python main.py list")
-        print("  2. Try: python main.py benchmark --dataset HGB_DBLP --method exact")
+        print("  2. Try: python main.py mine --dataset HNE_DBLP --sample-method snowball")
         return 0
     else:
-        print("\n✗ Some checks failed. Please review the errors above.")
+        print("\n❌ Some checks failed. Please review the errors above.")
         return 1
 
 if __name__ == "__main__":

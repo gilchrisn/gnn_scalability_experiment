@@ -42,7 +42,7 @@ class Config:
         
         # Paths
         self.PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.DATA_DIR = os.path.join(self.PROJECT_ROOT, "data")
+        self.DATA_DIR = os.path.join(self.PROJECT_ROOT, "datasets")
         self.OUTPUT_DIR = os.path.join(self.PROJECT_ROOT, "output")
         self.TEMP_DIR = os.path.join(self.OUTPUT_DIR, "intermediate")
         self.MODEL_DIR = os.path.join(self.OUTPUT_DIR, "models")
