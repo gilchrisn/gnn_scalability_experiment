@@ -14,6 +14,7 @@ class DatasetConfig:
     source: str  # 'HGB', 'OGB', 'PyG', 'HNE'
     dataset_name: str  # 'DBLP', 'IMDB', etc.
     target_node: str  # Target node type for prediction
+    suggested_paths: List[str] = field(default_factory=list)
     
     def __str__(self) -> str:
         return f"{self.source}_{self.dataset_name}"
@@ -73,20 +74,64 @@ class Config:
         Config._initialized = True
     
     def _init_datasets(self) -> Dict[str, DatasetConfig]:
-        """Initialize dataset registry."""
+        """Initialize dataset registry with high-quality semantic meta-paths."""
         return {
-            'HGB_DBLP': DatasetConfig('HGB', 'DBLP', 'author'),
-            'HGB_ACM': DatasetConfig('HGB', 'ACM', 'paper'),
-            'HGB_IMDB': DatasetConfig('HGB', 'IMDB', 'movie'),
-            'HGB_Freebase': DatasetConfig('HGB', 'Freebase', 'book'),
-            'OGB_MAG': DatasetConfig('OGB', 'ogbn-mag', 'paper'),
-            'PyG_IMDB': DatasetConfig('PyG', 'IMDB', 'movie'),
-            'PyG_DBLP': DatasetConfig('PyG', 'DBLP', 'author'),
-            'PyG_AMiner': DatasetConfig('PyG', 'AMiner', 'author'),
-            'HNE_DBLP': DatasetConfig('HNE', 'DBLP', 'author'),
-            'HNE_Yelp': DatasetConfig('HNE', 'Yelp', 'user'),
-            'HNE_PubMed': DatasetConfig('HNE', 'PubMed', 'paper'),
-            'HNE_Freebase': DatasetConfig('HNE', 'Freebase', 'entity'),
+            # HGB DATASETS
+            'HGB_DBLP': DatasetConfig('HGB', 'DBLP', 'author', [
+                "author_to_paper,paper_to_author",             # APA (Co-authorship)
+                "author_to_paper,paper_to_conf,conf_to_paper,paper_to_author" # APCPA (Venue similarity)
+            ]),
+            'HGB_ACM': DatasetConfig('HGB', 'ACM', 'paper', [
+                "paper_to_author,author_to_paper",             # PAP (Shared Authors)
+                "paper_to_subject,subject_to_paper"            # PSP (Shared Subject)
+            ]),
+            'HGB_IMDB': DatasetConfig('HGB', 'IMDB', 'movie', [
+                "movie_to_actor,actor_to_movie",               # MAM (Shared Actor)
+                "movie_to_director,director_to_movie"          # MDM (Shared Director)
+            ]),
+            'HGB_Freebase': DatasetConfig('HGB', 'Freebase', 'book', [
+                "book_to_author,author_to_book",               # BAB
+                "book_to_genre,genre_to_book"                  # BGB
+            ]),
+
+            # OGB DATASETS
+            'OGB_MAG': DatasetConfig('OGB', 'ogbn-mag', 'paper', [
+                "paper_to_author,author_to_paper",             # PAP
+                "paper_to_field,field_to_paper",               # PFP
+                "paper_to_venue,venue_to_paper"                # PVP
+            ]),
+
+            # PyG DATASETS
+            'PyG_IMDB': DatasetConfig('PyG', 'IMDB', 'movie', [
+                "movie_to_actor,actor_to_movie", 
+                "movie_to_director,director_to_movie"
+            ]),
+            'PyG_DBLP': DatasetConfig('PyG', 'DBLP', 'author', [
+                "author_to_paper,paper_to_author", 
+                "author_to_paper,paper_to_conf,conf_to_paper,paper_to_author"
+            ]),
+            'PyG_AMiner': DatasetConfig('PyG', 'AMiner', 'author', [
+                "author_to_paper,paper_to_author",
+                "author_to_paper,paper_to_ref,ref_to_paper,paper_to_author" # APRPA (Citation-based similarity)
+            ]),
+
+            # HNE DATASETS (Standard naming conventions)
+            'HNE_DBLP': DatasetConfig('HNE', 'DBLP', 'author', [
+                "author_to_paper,paper_to_author", 
+                "author_to_paper,paper_to_conf,conf_to_paper,paper_to_author"
+            ]),
+            'HNE_Yelp': DatasetConfig('HNE', 'Yelp', 'user', [
+                "user_to_business,business_to_user",           # UBU (Shared visitation)
+                "user_to_business,business_to_service,service_to_business,business_to_user" # UBSBU
+            ]),
+            'HNE_PubMed': DatasetConfig('HNE', 'PubMed', 'paper', [
+                "paper_to_author,author_to_paper", 
+                "paper_to_journal,journal_to_paper"
+            ]),
+            'HNE_Freebase': DatasetConfig('HNE', 'Freebase', 'entity', [
+                "entity_to_relation,relation_to_entity",       # ERE
+                "entity_to_type,type_to_entity"                # ETE
+            ]),
         }
     
     def _ensure_directories(self) -> None:
@@ -169,6 +214,10 @@ class Config:
             f"k_values={self.K_VALUES})"
         )
 
+    def get_model_path(self, dataset_key: str, model_type: str) -> str:
+        """Standardized path for saving/loading models."""
+        filename = f"{dataset_key}_{model_type.lower()}.pt"
+        return os.path.join(self.MODEL_DIR, filename)
 
 # Global configuration instance
 config = Config()

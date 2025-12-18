@@ -1,33 +1,77 @@
 """
 Concrete implementations of graph data loaders.
-Each loader implements the Strategy pattern for specific dataset sources.
+Standardizes edge names and ensures bidirectional connectivity.
 """
 import os
 import pandas as pd
 import torch
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List
 import torch_geometric.data as tg_data
 from torch_geometric.datasets import HGBDataset, OGB_MAG, DBLP, IMDB, AMiner
 
 from .base import BaseGraphLoader
 
+class GraphStandardizer:
+    """Helper to rename generic edges and add reverse edges."""
+    
+    @staticmethod
+    def standardize(g: tg_data.HeteroData) -> None:
+        # 1. Collect all edges first to avoid runtime modification issues
+        original_edges = list(g.edge_types)
+        new_edge_store = {}
+
+        # 2. Rename generic edges (e.g. 'to' -> 'author_to_paper')
+        for src, rel, dst in original_edges:
+            edge_index = g[src, rel, dst].edge_index
+            
+            # Determine standard name
+            if rel in ['to', 'adj', 'link'] or rel == 'to':
+                std_rel = f"{src}_to_{dst}"
+            else:
+                std_rel = rel
+            
+            # Store forward edge with standard name
+            new_edge_store[(src, std_rel, dst)] = edge_index
+
+            # 3. Create Reverse Edge immediately
+            if "_to_" in std_rel:
+                parts = std_rel.split("_to_")
+                if len(parts) == 2:
+                    rev_rel = f"{parts[1]}_to_{parts[0]}"
+                else:
+                    rev_rel = f"rev_{std_rel}"
+            else:
+                rev_rel = f"rev_{std_rel}"
+
+            rev_key = (dst, rev_rel, src)
+            rev_index = torch.stack([edge_index[1], edge_index[0]], dim=0)
+            
+            # Store reverse edge (if not duplicate)
+            if rev_key not in new_edge_store:
+                new_edge_store[rev_key] = rev_index
+
+        # 4. Clear and Rebuild Graph
+        # We delete old generic edges and replace with the standardized set
+        for src, rel, dst in original_edges:
+            del g[src, rel, dst]
+            
+        for (src, rel, dst), index in new_edge_store.items():
+            g[src, rel, dst].edge_index = index
+            
+        print(f"    [Standardized] Graph now has {len(g.edge_types)} edge types (Forward + Reverse).")
+
 
 class HGBLoader(BaseGraphLoader):
-    """Loader for THUDM's Heterogeneous Graph Benchmark datasets."""
-    
     def load(self, dataset_name: str, target_ntype: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
         print(f"[HGBLoader] Loading {dataset_name}...")
-        
-        dataset = HGBDataset(root=f'./data/HGB_{dataset_name}', name=dataset_name)
+        dataset = HGBDataset(root=f'./datasets/HGB_{dataset_name}', name=dataset_name)
         g = dataset[0]
         
-        # Create or extract masks
-        train_mask = g[target_ntype].train_mask if hasattr(g[target_ntype], 'train_mask') else None
-        train_mask, val_mask, test_mask = self._create_random_masks(
-            g[target_ntype].num_nodes, train_mask
-        )
+        # FIX: Standardize Names & Add Reverse Edges
+        GraphStandardizer.standardize(g)
         
-        # Extract labels and features
+        train_mask = g[target_ntype].train_mask if hasattr(g[target_ntype], 'train_mask') else None
+        train_mask, val_mask, test_mask = self._create_random_masks(g[target_ntype].num_nodes, train_mask)
         labels, num_classes = self._extract_labels(g, target_ntype)
         features = self._ensure_features(g, target_ntype)
         
@@ -36,61 +80,41 @@ class HGBLoader(BaseGraphLoader):
 
 
 class OGBLoader(BaseGraphLoader):
-    """Loader for Open Graph Benchmark datasets."""
-    
     def load(self, dataset_name: str, target_ntype: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
         print(f"[OGBLoader] Loading {dataset_name}...")
-        
         if dataset_name.lower() not in ['ogbn-mag', 'mag']:
-            raise ValueError(f"OGBLoader only supports 'ogbn-mag', got '{dataset_name}'")
+            raise ValueError(f"OGBLoader only supports 'ogbn-mag'")
         
-        dataset = OGB_MAG(root='./data/OGB', preprocess='metapath2vec')
+        dataset = OGB_MAG(root='./datasets/OGB', preprocess='metapath2vec')
         g = dataset[0]
         
-        if not hasattr(g[target_ntype], 'train_mask'):
-            raise ValueError(f"Target node '{target_ntype}' in {dataset_name} has no masks!")
+        # FIX: Standardize Names & Add Reverse Edges
+        GraphStandardizer.standardize(g)
         
-        # OGB provides masks and labels
         labels, num_classes = self._extract_labels(g, target_ntype)
         features = g[target_ntype].x
         
-        info = self.create_info_dict(
-            features, labels,
-            g[target_ntype].train_mask,
-            g[target_ntype].val_mask,
-            g[target_ntype].test_mask,
-            num_classes
-        )
+        info = self.create_info_dict(features, labels, g[target_ntype].train_mask, 
+                                   g[target_ntype].val_mask, g[target_ntype].test_mask, num_classes)
         return g, info
 
 
 class PyGStandardLoader(BaseGraphLoader):
-    """Loader for standard PyTorch Geometric datasets (DBLP, IMDB, AMiner)."""
-    
-    DATASET_MAPPING = {
-        'DBLP': DBLP,
-        'IMDB': IMDB,
-        'AMiner': AMiner
-    }
+    DATASET_MAPPING = {'DBLP': DBLP, 'IMDB': IMDB, 'AMiner': AMiner}
     
     def load(self, dataset_name: str, target_ntype: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
         print(f"[PyGLoader] Loading {dataset_name}...")
-        
         if dataset_name not in self.DATASET_MAPPING:
-            raise ValueError(
-                f"Unknown PyG dataset: {dataset_name}. "
-                f"Available: {list(self.DATASET_MAPPING.keys())}"
-            )
+            raise ValueError(f"Unknown PyG dataset: {dataset_name}")
         
-        path = f'./data/PyG_{dataset_name}'
-        dataset_class = self.DATASET_MAPPING[dataset_name]
-        dataset = dataset_class(root=path)
+        path = f'./datasets/PyG_{dataset_name}'
+        dataset = self.DATASET_MAPPING[dataset_name](root=path)
         g = dataset[0]
         
-        # Create random masks
-        train_mask, val_mask, test_mask = self._create_random_masks(g[target_ntype].num_nodes)
+        # FIX: Standardize Names & Add Reverse Edges
+        GraphStandardizer.standardize(g)
         
-        # Extract labels and features
+        train_mask, val_mask, test_mask = self._create_random_masks(g[target_ntype].num_nodes)
         labels, num_classes = self._extract_labels(g, target_ntype)
         features = self._ensure_features(g, target_ntype)
         
@@ -99,12 +123,6 @@ class PyGStandardLoader(BaseGraphLoader):
 
 
 class HNELoader(BaseGraphLoader):
-    """
-    Loader for HNE (Heterogeneous Network Embedding) format datasets.
-    Handles the custom .dat file format (node.dat, link.dat, meta.dat).
-    """
-    
-    # Dataset-specific type mappings
     TYPE_MAPPINGS = {
         'DBLP': {0: 'author', 1: 'paper', 2: 'conf', 3: 'term'},
         'Yelp': {0: 'user', 1: 'business', 2: 'service', 3: 'level'},
@@ -113,130 +131,60 @@ class HNELoader(BaseGraphLoader):
     }
     
     def load(self, dataset_name: str, target_ntype: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
-        # Handle the case where we loaded a sampled dataset (which might have a different folder name)
-        # In main.py, we register sampled datasets with source='HNE', so they come here.
-        # We assume the directory name matches the dataset_name passed in config.
-        data_dir = f'./data/HNE_{dataset_name}'
-        
+        data_dir = f'./datasets/HNE_{dataset_name}'
         print(f"[HNELoader] Loading from {data_dir}...")
-        
         if not os.path.exists(data_dir):
             raise FileNotFoundError(f"HNE dataset directory not found: {data_dir}")
         
-        # Load nodes
         g = self._load_nodes(data_dir, dataset_name)
-        
-        # Load edges
         self._load_edges(data_dir, g)
+
+        # FIX: Standardize Names & Add Reverse Edges
+        GraphStandardizer.standardize(g)
         
-        # Generate features and labels (HNE datasets typically lack these)
         features = self._ensure_features(g, target_ntype)
         labels, num_classes = self._extract_labels(g, target_ntype)
-        
-        # Create masks
         train_mask, val_mask, test_mask = self._create_random_masks(g[target_ntype].num_nodes)
         
         info = self.create_info_dict(features, labels, train_mask, val_mask, test_mask, num_classes)
         return g, info
-    
+
     def _load_nodes(self, data_dir: str, dataset_name: str) -> tg_data.HeteroData:
-        """Load node.dat file and create graph structure."""
         node_file = os.path.join(data_dir, "node.dat")
-        print(f"    Reading nodes from {node_file}...")
-        
-        df_nodes = pd.read_csv(
-            node_file, sep='\t', header=None,
-            names=['id', 'name', 'type', 'info'],
-            encoding='utf-8', quoting=3
-        )
-        
-        # Detect base dataset name (remove _Sampled suffix) to look up types
+        df_nodes = pd.read_csv(node_file, sep='\t', header=None, names=['id', 'name', 'type', 'info'], encoding='utf-8', quoting=3)
         base_name = dataset_name.replace("_Sampled", "").replace("_SAMPLED", "")
         type_map = self.TYPE_MAPPINGS.get(base_name, {})
-        
         if not type_map:
             unique_types = df_nodes['type'].unique()
             type_map = {t: f"type_{t}" for t in unique_types}
-        
         g = tg_data.HeteroData()
-        self._global_to_local = {} 
-        
-        # Process nodes by type
+        self._global_to_local = {}
         for type_id, group in df_nodes.groupby('type'):
             type_name = type_map.get(type_id, f"type_{type_id}")
             g[type_name].num_nodes = len(group)
-            
-            # Create ID mapping efficiently
-            # Vectorized creation of dict entries is hard, but this loop 
-            # over 500k integers is fast enough (sub-second)
-            local_indices = range(len(group))
-            global_ids = group['id'].values
-            
-            # Update global map
-            for glob, loc in zip(global_ids, local_indices):
+            for glob, loc in zip(group['id'].values, range(len(group))):
                 self._global_to_local[glob] = (type_name, loc)
-                
-        print(f"    Loaded {len(df_nodes)} nodes.")
         return g
     
     def _load_edges(self, data_dir: str, g: tg_data.HeteroData) -> None:
-        """Load link.dat file and populate edge indices (VECTORIZED)."""
         link_file = os.path.join(data_dir, "link.dat")
-        print(f"    Reading edges from {link_file}...")
+        df_links = pd.read_csv(link_file, sep='\t', header=None, names=['src', 'dst'], usecols=[0, 1])
+        valid = df_links['src'].isin(self._global_to_local) & df_links['dst'].isin(self._global_to_local)
+        df_links = df_links[valid].copy()
         
-        # Read only necessary columns to save memory
-        df_links = pd.read_csv(
-            link_file, sep='\t', header=None,
-            names=['src', 'dst'],
-            usecols=[0, 1]
-        )
-        
-        print("    Mapping edge IDs (Vectorized)...")
-        
-        # 1. Filter edges to ensure both nodes exist in the graph 
-        # (Crucial if link.dat contains edges to nodes not in node.dat)
-        # Using map is strictly faster than iterating
-        valid_src = df_links['src'].isin(self._global_to_local)
-        valid_dst = df_links['dst'].isin(self._global_to_local)
-        df_links = df_links[valid_src & valid_dst].copy()
-        
-        if df_links.empty:
-            print("    [Warning] No valid edges found matching loaded nodes.")
-            return
-
-        # 2. Map global IDs to (type, local_id) tuples
-        # pd.Series.map with a dict is highly optimized
         src_tuples = df_links['src'].map(self._global_to_local)
         dst_tuples = df_links['dst'].map(self._global_to_local)
         
-        # 3. Extract types and indices into separate columns
-        # List comprehension is faster than apply/lambda here
         df_links['src_type'] = [t[0] for t in src_tuples]
-        df_links['src_idx']  = [t[1] for t in src_tuples]
+        df_links['src_idx'] = [t[1] for t in src_tuples]
         df_links['dst_type'] = [t[0] for t in dst_tuples]
-        df_links['dst_idx']  = [t[1] for t in dst_tuples]
+        df_links['dst_idx'] = [t[1] for t in dst_tuples]
         
-        print("    Building PyG edge tensors...")
-        
-        # 4. Group by (src_type, dst_type) to create specific edge stores
-        grouped = df_links.groupby(['src_type', 'dst_type'])
-        
-        count = 0
-        for (src_type, dst_type), group in grouped:
-            rel_name = f"{src_type}_to_{dst_type}"
-            
-            # Convert directly to torch tensors
-            src = torch.tensor(group['src_idx'].values, dtype=torch.long)
-            dst = torch.tensor(group['dst_idx'].values, dtype=torch.long)
-            
-            edge_index = torch.stack([src, dst], dim=0)
-            
-            # Assign to graph
-            if rel_name not in g.edge_types:
-                # Basic check to avoid weird relation names
-                pass
-                
+        for (src_type, dst_type), group in df_links.groupby(['src_type', 'dst_type']):
+            # Initial generic name (will be fixed by Standardizer later)
+            rel_name = f"{src_type}_to_{dst_type}" 
+            edge_index = torch.stack([
+                torch.tensor(group['src_idx'].values, dtype=torch.long),
+                torch.tensor(group['dst_idx'].values, dtype=torch.long)
+            ], dim=0)
             g[src_type, rel_name, dst_type].edge_index = edge_index
-            count += len(group)
-            
-        print(f"    Loaded {count} edges successfully.")

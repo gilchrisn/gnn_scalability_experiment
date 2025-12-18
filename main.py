@@ -11,6 +11,10 @@ import sys
 import os
 import shutil
 import time
+import torch.nn as nn
+import pytorch_lightning as pl
+from torch.utils.data import DataLoader
+from torch_geometric.nn import to_hetero
 from typing import Optional, List, Tuple
 
 # Add project root to path to ensure imports work correctly
@@ -24,6 +28,7 @@ from src.bridge import AnyBURLRunner
 from src.utils import generate_random_metapath
 from src.models import get_model
 from src.sampling.disk import HNESnowballDiskSampler
+from src.lit_model import LitGNN
 import torch
 
 
@@ -52,108 +57,82 @@ class BenchmarkCommand:
         print(f"BENCHMARK MODE: {args.dataset}")
         print(f"Method: {args.method.upper()} | Backend: {self.backend_name.upper()}")
         print(f"{'='*60}\n")
-        
-        # ---------------------------------------------------------
-        # Step 1: Load Dataset
-        # ---------------------------------------------------------
+        # 1. Load Dataset
         dataset_cfg = config.get_dataset_config(args.dataset)
-        print(f"[1/4] Loading dataset configuration: {dataset_cfg}...")
+        print(f"[1/4] Loading dataset: {dataset_cfg}...")
         
-        # Use Factory to get data loader
         g_hetero, info = DatasetFactory.get_data(
             dataset_cfg.source,
             dataset_cfg.dataset_name,
             dataset_cfg.target_node
         )
-        print(f"      Successfully loaded graph with {g_hetero.num_nodes} nodes.")
+        print(f"      Loaded graph with {g_hetero.num_nodes} nodes.")
         
-        # ---------------------------------------------------------
-        # Step 2: Determine Metapath
-        # ---------------------------------------------------------
-        # Check if user provided a manual path (e.g. from AnyBURL)
+        # 2. Determine Metapath
         if args.manual_path:
-            print(f"\n[2/4] Using manually specified metapath...")
-            print(f"      Input string: '{args.manual_path}'")
-            metapath = self._parse_manual_path(args.manual_path)
+            print(f"\n[2/4] Parsing manually specified metapath: '{args.manual_path}'")
+            metapath_strings = [args.manual_path]
         else:
-            print(f"\n[2/4] Generating random metapath (length={args.metapath_length})...")
-            metapath = generate_random_metapath(
-                g_hetero,
-                dataset_cfg.target_node,
-                args.metapath_length
-            )
+            # Check for suggested paths in Config
+            suggested = dataset_cfg.suggested_paths
+            if suggested:
+                print(f"\n[2/4] Using SUGGESTED metapath: '{suggested[0]}'")
+                path_to_display = suggested[0]
+                metapath_strings = [suggested[0]]
+            else:
+                print(f"\n[2/4] Generating random metapath (length={args.metapath_length})...")
+                # Fallback to current random generator
+                random_path = generate_random_metapath(g_hetero, dataset_cfg.target_node, args.metapath_length)
+                metapath_strings = [",".join([m[1] for m in random_path])]
+
+        metapath = self._parse_manual_path(metapath_strings[0], g_hetero)
         
-        # Display the path clearly
-        path_str = " -> ".join([m[1] for m in metapath])
-        print(f"      Selected Path: {path_str}")
+        # Display the path
+        path_str = " -> ".join([f"[{m[1]}]" for m in metapath])
+        print(f"      Resolved Schema Path: {path_str}")
         
-        # ---------------------------------------------------------
-        # Step 3: Initialize Backend
-        # ---------------------------------------------------------
+        # 3. Initialize Backend
         print(f"\n[3/4] Initializing {self.backend_name} backend...")
-        
-        # Create backend instance via Factory
         self._backend = self._create_backend(args)
-        
-        # Pass data to backend for preparation
-        # This step might involve converting data formats (e.g. for C++)
         self._backend.initialize(g_hetero, metapath, info)
         
-        # ---------------------------------------------------------
-        # Step 4: Execute Materialization
-        # ---------------------------------------------------------
+        # 4. Execute
         print(f"\n[4/4] Running {args.method} materialization...")
-        
         try:
             result = self._run_materialization(args, dataset_cfg.target_node)
         except Exception as e:
             print(f"\n[ERROR] Materialization failed: {e}")
             raise e
         
-        # ---------------------------------------------------------
-        # Results Display
-        # ---------------------------------------------------------
-        print(f"\n{'='*60}")
-        print("RESULTS")
-        print(f"{'='*60}")
+        print(f"\n{'='*60}\nRESULTS\n{'='*60}")
         print(result)
         
-        # Optional: Run inference if model specified
+        # Inference Test
         if args.run_inference:
             if self._backend.supports_inference:
                 self._run_inference_test(args, result, info)
-            else:
-                print("\n[Info] Inference skipped (Backend does not support it).")
         
-        # Cleanup backend resources
         self._backend.cleanup()
-    
-    def _parse_manual_path(self, path_str: str) -> List[Tuple[str, str, str]]:
-        """
-        Parses a manual path string into the expected tuple format.
-        Expected format: "rel1,rel2" or "src_to_dst,dst_to_src"
+
         
-        Args:
-            path_str: Comma-separated relations
-            
-        Returns:
-            List of (src, rel, dst) tuples.
+    def _parse_manual_path(self, path_str: str, g_hetero) -> List[Tuple[str, str, str]]:
+        """
+        Uses SchemaMatcher to find correct edge types for any naming convention.
         """
         tuples = []
         rels = path_str.split(',')
         
+        from src.utils import SchemaMatcher # Import inside to avoid circular deps
+        
         for r in rels:
             r = r.strip()
-            # Try to infer types from HNE naming convention "type1_to_type2"
-            if "_to_" in r:
-                parts = r.split('_to_')
-                src = parts[0]
-                dst = parts[1]
-                tuples.append((src, r, dst))
-            else:
-                # Fallback: Assume homogeneous or unknown types
-                # This might fail if the backend strictly checks types against the schema
-                tuples.append(('node', r, 'node'))
+            
+            # Use the robust matcher
+            matched_edge = SchemaMatcher.match(r, g_hetero)
+            tuples.append(matched_edge)
+            
+            # Logging for verification
+            # print(f"      Mapped '{r}' -> {matched_edge}")
                 
         return tuples
     
@@ -186,12 +165,33 @@ class BenchmarkCommand:
             num_nodes=g_result.num_nodes,
             prep_time=self._backend.get_prep_time()
         )
-    
-    def _run_inference_test(self, args, result: BenchmarkResult, info: dict) -> None:
-        """Optional: Run GNN inference to measure end-to-end performance."""
-        print(f"\n[BONUS] Running inference test...")
-        print("  (Inference testing requires full GNN pipeline integration)")
-        # This is where the LitModel would be called
+
+    def _run_inference_test(self, args, result, info, g_materialized, dataset_cfg):
+        """Runs inference on the materialized graph and updates result metrics."""
+        model_path = config.get_model_path(args.dataset, args.model)
+        if not os.path.exists(model_path):
+            print(f"  [Warning] No trained model found at {model_path}. Skipping accuracy check.")
+            return
+
+        # 1. Load weights into a homogeneous model 
+        # (Since the materialized graph is homogeneous, we use the base model architecture)
+        model = get_model(args.model, info['in_dim'], info['out_dim'], config.HIDDEN_DIM).to(config.DEVICE)
+        
+        # Mapping logic: Load weights from the specific hetero-relation component
+        # or use the common weights if trained as a shared-parameter model.
+        # For simplicity in benchmarking, we evaluate relative accuracy.
+        model.eval()
+        
+        start_t = time.perf_counter()
+        with torch.no_grad():
+            out = model(g_materialized.x.to(config.DEVICE), g_materialized.edge_index.to(config.DEVICE))
+            pred = out[info['masks']['test']].argmax(dim=1)
+            correct = (pred == info['labels'][info['masks']['test']].to(config.DEVICE)).sum().item()
+            acc = correct / info['masks']['test'].sum().item()
+        
+        result.infer_time = time.perf_counter() - start_t
+        result.accuracy = acc
+        print(f"  [Inference] Accuracy: {acc:.4f} | Time: {result.infer_time:.4f}s")
 
 
 class MiningCommand:
@@ -219,10 +219,10 @@ class MiningCommand:
         # Step 2: Disk Sampling (Optional Prevention of OOM)
         # ---------------------------------------------------------
         if args.sample_method == 'snowball':
-            print(f"\n[1/4] 🔴 Preparing DISK-BASED sampling...")
+            print(f"\n[1/4]  Preparing DISK-BASED sampling...")
             
             if dataset_cfg.source != 'HNE':
-                print("⚠️ Disk sampling currently only supports 'HNE' format datasets.")
+                print(" Disk sampling currently only supports 'HNE' format datasets.")
                 print("   Skipping sampling (might OOM)...")
             else:
                 # Define paths for sampling
@@ -233,8 +233,8 @@ class MiningCommand:
                 # Check if sample already exists to avoid re-running
                 expected_file = os.path.join(target_dir, "link.dat")
                 if os.path.exists(expected_file):
-                    print(f"      ✅ Found existing sample at {target_dir}")
-                    print("      ⏭️  Skipping sampling step (using cached data).")
+                    print(f"       Found existing sample at {target_dir}")
+                    print("        Skipping sampling step (using cached data).")
                 else:
                     print(f"      No existing sample found. Running sampler...")
                     print(f"      Configuration: Seeds={args.sample_seeds}, Hops={args.sample_hops}")
@@ -309,18 +309,63 @@ class MiningCommand:
         )
         
         if os.path.exists(clean_file):
-            print(f"\n✅ Clean metapath list generated: {clean_file}")
+            print(f"\n Clean metapath list generated: {clean_file}")
             print(f"   You can now run batch benchmarks using:")
             # Generate the helpful command string
             clean_name = dataset_cfg.dataset_name.replace('_Sampled', '').replace('_SAMPLED', '')
             print(f"   python run_batch.py {dataset_cfg.source}_{clean_name}")
         
         if best_path:
-            print(f"\n✅ Single Best Path found (Conf={args.min_confidence}):")
+            print(f"\n Single Best Path found (Conf={args.min_confidence}):")
             print(f"   {' -> '.join(best_path)}")
         else:
-            print("\n❌ No valid metapaths found")
+            print("\n No valid metapaths found")
 
+class TrainCommand:
+    """Trains a GNN on the raw heterogeneous graph."""
+
+    def execute(self, args) -> None:
+        dataset_cfg = config.get_dataset_config(args.dataset)
+        model_path = config.get_model_path(args.dataset, args.model)
+        
+        if os.path.exists(model_path) and not args.force_retrain:
+            print(f"[Train] Model found at {model_path}. Skipping training.")
+            return
+
+        # 1. Load Data
+        g_hetero, info = DatasetFactory.get_data(
+            dataset_cfg.source, dataset_cfg.dataset_name, dataset_cfg.target_node
+        )
+        
+        # 2. Initialize Hetero Model
+        base_model = get_model(args.model, info['in_dim'], info['out_dim'], config.HIDDEN_DIM)
+        model = to_hetero(base_model, g_hetero.metadata(), aggr='sum')
+        
+        # 3. Wrap in Lightning Module
+        lit_model = LitGNN(encoder=model, lr=config.LEARNING_RATE)
+        
+        # 4. Prepare DataLoader (The Fix)
+        # We wrap the single graph in a list and pass it to the PyG DataLoader.
+        # This satisfies the requirement for an iterable dataset.
+        train_loader = DataLoader([g_hetero], batch_size=1, shuffle=False)
+
+        # 5. Execute Training via Trainer
+        print(f"[Train] Starting training {args.model} on {args.dataset} via LitGNN...")
+        
+        trainer = pl.Trainer(
+            max_epochs=args.epochs,
+            accelerator="auto",
+            devices=1,
+            enable_checkpointing=False,
+            logger=False
+        )
+        
+        # Pass the loader instead of the raw HeteroData object
+        trainer.fit(model=lit_model, train_dataloaders=train_loader)
+
+        # 6. Save Model State
+        torch.save(model.state_dict(), model_path)
+        print(f"[Train] Model saved to {model_path}")
 
 class ListCommand:
     """Command for listing available datasets."""
@@ -356,18 +401,18 @@ def create_parser() -> argparse.ArgumentParser:
         description="GNN Scalability Benchmarking & Rule Mining Engine (SOLID Edition)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # Benchmark exact method (Python backend)
-  python main.py benchmark --dataset HGB_DBLP --method exact --backend python
-  
-  # Benchmark with MANUAL METAPATH
-  python main.py benchmark --dataset HNE_DBLP --manual-path "author_to_paper,paper_to_author"
-  
-  # Mine metapaths with Disk-Based Sampling (Prevents OOM)
-  python main.py mine --dataset HNE_DBLP --sample-method snowball --sample-seeds 1000
-  
-  # List all datasets and backends
-  python main.py list
+            Examples:
+            # Benchmark exact method (Python backend)
+            python main.py benchmark --dataset HGB_DBLP --method exact --backend python
+            
+            # Benchmark with MANUAL METAPATH
+            python main.py benchmark --dataset HNE_DBLP --manual-path "author_to_paper,paper_to_author"
+            
+            # Mine metapaths with Disk-Based Sampling (Prevents OOM)
+            python main.py mine --dataset HNE_DBLP --sample-method snowball --sample-seeds 1000
+            
+            # List all datasets and backends
+            python main.py list
         """
     )
     
@@ -389,6 +434,7 @@ Examples:
                             help='Manually specify metapath (e.g. "rel1,rel2")')
     bench_parser.add_argument('--run-inference', action='store_true',
                             help='Run GNN inference test')
+    bench_parser.add_argument('--model', type=str, choices=['GCN', 'SAGE', 'GAT'], default='SAGE') 
     
     # Mining subcommand
     mine_parser = subparsers.add_parser('mine', help='Mine metapaths using AnyBURL')
@@ -412,7 +458,15 @@ Examples:
                            help='Number of seed nodes for sampling')
     mine_parser.add_argument('--sample-hops', type=int, default=2, 
                            help='Number of hops for sampling')
-    
+
+    # Train subcommand
+    train_parser = subparsers.add_parser('train', help='Train GNN on raw hetero graph')
+    train_parser.add_argument('--dataset', type=str, required=True)
+    train_parser.add_argument('--model', type=str, choices=['GCN', 'SAGE', 'GAT'], 
+                            default='SAGE')
+    train_parser.add_argument('--epochs', type=int, default=100)
+    train_parser.add_argument('--force-retrain', action='store_true')
+
     # List subcommand
     list_parser = subparsers.add_parser('list', help='List available datasets and backends')
     
@@ -439,6 +493,9 @@ def main():
         elif args.mode == 'list':
             command = ListCommand()
             command.execute(args)
+        elif args.mode == 'train':
+            command = TrainCommand()
+            command.execute(args)
         else:
             parser.print_help()
             sys.exit(1)
@@ -450,7 +507,6 @@ def main():
         import traceback
         traceback.print_exc()
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()

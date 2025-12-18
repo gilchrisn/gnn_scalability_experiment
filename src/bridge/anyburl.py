@@ -169,7 +169,7 @@ THRESHOLD_CONFIDENCE = 0.0001
             for p in sorted(list(unique_paths)):
                 f.write(p + "\n")
         
-        print(f"   ✅ Saved {len(unique_paths)} unique paths to {self.clean_list_file}")
+        print(f"    Saved {len(unique_paths)} unique paths to {self.clean_list_file}")
         return self.clean_list_file
 
     def parse_best_metapath(self, target_head, target_tail, min_confidence=0.001) -> Optional[List[str]]:

@@ -63,7 +63,7 @@ class HNESnowballDiskSampler:
                 if u in adj:
                     neighbors = adj[u]
                     
-                    # 🛑 CAP NEIGHBORS (Strict Limit)
+                    #  CAP NEIGHBORS (Strict Limit)
                     if len(neighbors) > 20: # Reduced from 50 to 20 for safety
                         neighbors = random.sample(neighbors, 20)
                         
@@ -114,4 +114,4 @@ class HNESnowballDiskSampler:
         if os.path.exists(meta_file):
             shutil.copy(meta_file, os.path.join(target_dir, "meta.dat"))
             
-        print(f"✅ Export complete.")
+        print(f" Export complete.")

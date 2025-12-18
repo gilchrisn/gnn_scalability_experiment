@@ -186,3 +186,49 @@ def format_metapath(metapath: List[Tuple[str, str, str]]) -> str:
         parts.append(dst)
     
     return " ".join(parts)
+
+
+class SchemaMatcher:
+    """
+    Robustly maps messy rule strings to actual graph edge types.
+    Solves the mismatch between AnyBURL names (inverse_X) and Loader names (rev_X).
+    """
+    @staticmethod
+    def match(relation_str: str, g_hetero) -> Tuple[str, str, str]:
+        # 1. Clean the input string (remove known prefixes/separators)
+        # e.g. "inverse_rev_>actorh" -> "actorh"
+        # e.g. "paper_to_term" -> "papertoterm"
+        clean_target = relation_str.replace("inverse_", "").replace("rev_", "").replace("_to_", "").replace(">", "").replace("<", "").lower()
+        
+        candidates = []
+        
+        # 2. Iterate over ALL valid edge types in the graph
+        for src, rel, dst in g_hetero.edge_types:
+            # Clean the graph's relation name similarly
+            clean_rel = rel.replace("inverse_", "").replace("rev_", "").replace("_to_", "").replace(">", "").replace("<", "").lower()
+            
+            # Check 1: Exact normalized match
+            if clean_rel == clean_target:
+                candidates.append((src, rel, dst))
+                continue
+                
+            # Check 2: Reverse match (if target is "papertoterm" but graph has "termtopaper")
+            if f"{dst}{src}" in clean_target or f"{src}{dst}" in clean_target:
+                 # This is a heuristic for when the relation name implies direction
+                 if clean_rel in clean_target:
+                     candidates.append((src, rel, dst))
+
+        # 3. Selection Logic
+        if not candidates:
+            # Final Fallback: If absolutely nothing matches, return generic (will fail in C++, but we tried)
+            print(f"      [Matcher] No schema match for '{relation_str}'. Defaulting to 'node'.")
+            return ('node', relation_str, 'node')
+        
+        # If AnyBURL said "inverse", we prefer the edge type starting with "rev_" or "inverse_"
+        if "inverse" in relation_str or "rev" in relation_str:
+            for c in candidates:
+                if "rev" in c[1] or "inverse" in c[1]:
+                    return c
+        
+        # Otherwise return the first exact match (usually the forward edge)
+        return candidates[0]
