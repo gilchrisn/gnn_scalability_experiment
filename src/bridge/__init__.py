@@ -1,6 +1,5 @@
 """
-Bridge module for external tool interoperability.
-Provides interfaces to C++ and Java components.
+Interop layer for C++ (graph processing) and Java (AnyBURL) backends.
 """
 
 from .cpp_adapter import CppBridge, PyGToCppAdapter

@@ -6,6 +6,9 @@ Provides a clean interface for all dataset operations.
 from .factory import DatasetFactory
 from .base import BaseGraphLoader
 from .loaders import HGBLoader, OGBLoader, PyGStandardLoader, HNELoader
+from .preprocessing import FeatureGuard
+from .mapper import GlobalUniverseMapper
+
 
 __all__ = [
     'DatasetFactory',
@@ -13,5 +16,7 @@ __all__ = [
     'HGBLoader',
     'OGBLoader', 
     'PyGStandardLoader',
-    'HNELoader'
+    'HNELoader',
+    'FeatureGuard',
+    'GlobalUniverseMapper',
 ]

@@ -12,53 +12,47 @@ from torch_geometric.datasets import HGBDataset, OGB_MAG, DBLP, IMDB, AMiner
 from .base import BaseGraphLoader
 
 class GraphStandardizer:
-    """Helper to rename generic edges and add reverse edges."""
+    """Utility to normalize edge relationship names and enforce bi-directionality."""
     
     @staticmethod
     def standardize(g: tg_data.HeteroData) -> None:
-        # 1. Collect all edges first to avoid runtime modification issues
+        # Materialize edge list to avoid mutation errors during iteration
         original_edges = list(g.edge_types)
         new_edge_store = {}
 
-        # 2. Rename generic edges (e.g. 'to' -> 'author_to_paper')
         for src, rel, dst in original_edges:
             edge_index = g[src, rel, dst].edge_index
             
-            # Determine standard name
-            if rel in ['to', 'adj', 'link'] or rel == 'to':
+            # Map generic relation names to a canonical format
+            if rel in ['to', 'adj', 'link']:
                 std_rel = f"{src}_to_{dst}"
             else:
                 std_rel = rel
             
-            # Store forward edge with standard name
             new_edge_store[(src, std_rel, dst)] = edge_index
 
-            # 3. Create Reverse Edge immediately
+            # Generate symmetric reverse edges
             if "_to_" in std_rel:
                 parts = std_rel.split("_to_")
-                if len(parts) == 2:
-                    rev_rel = f"{parts[1]}_to_{parts[0]}"
-                else:
-                    rev_rel = f"rev_{std_rel}"
+                rev_rel = f"{parts[1]}_to_{parts[0]}" if len(parts) == 2 else f"rev_{std_rel}"
             else:
                 rev_rel = f"rev_{std_rel}"
 
             rev_key = (dst, rev_rel, src)
             rev_index = torch.stack([edge_index[1], edge_index[0]], dim=0)
             
-            # Store reverse edge (if not duplicate)
+            # Prevent overwriting if reverse relation already exists
             if rev_key not in new_edge_store:
                 new_edge_store[rev_key] = rev_index
 
-        # 4. Clear and Rebuild Graph
-        # We delete old generic edges and replace with the standardized set
+        # Rebuild graph schema with standardized keys
         for src, rel, dst in original_edges:
             del g[src, rel, dst]
             
         for (src, rel, dst), index in new_edge_store.items():
             g[src, rel, dst].edge_index = index
             
-        print(f"    [Standardized] Graph now has {len(g.edge_types)} edge types (Forward + Reverse).")
+        print(f"    [Standardized] Graph now has {len(g.edge_types)} edge types.")
 
 
 class HGBLoader(BaseGraphLoader):
@@ -67,7 +61,6 @@ class HGBLoader(BaseGraphLoader):
         dataset = HGBDataset(root=f'./datasets/HGB_{dataset_name}', name=dataset_name)
         g = dataset[0]
         
-        # FIX: Standardize Names & Add Reverse Edges
         GraphStandardizer.standardize(g)
         
         train_mask = g[target_ntype].train_mask if hasattr(g[target_ntype], 'train_mask') else None
@@ -88,7 +81,6 @@ class OGBLoader(BaseGraphLoader):
         dataset = OGB_MAG(root='./datasets/OGB', preprocess='metapath2vec')
         g = dataset[0]
         
-        # FIX: Standardize Names & Add Reverse Edges
         GraphStandardizer.standardize(g)
         
         labels, num_classes = self._extract_labels(g, target_ntype)
@@ -111,7 +103,6 @@ class PyGStandardLoader(BaseGraphLoader):
         dataset = self.DATASET_MAPPING[dataset_name](root=path)
         g = dataset[0]
         
-        # FIX: Standardize Names & Add Reverse Edges
         GraphStandardizer.standardize(g)
         
         train_mask, val_mask, test_mask = self._create_random_masks(g[target_ntype].num_nodes)
@@ -139,7 +130,6 @@ class HNELoader(BaseGraphLoader):
         g = self._load_nodes(data_dir, dataset_name)
         self._load_edges(data_dir, g)
 
-        # FIX: Standardize Names & Add Reverse Edges
         GraphStandardizer.standardize(g)
         
         features = self._ensure_features(g, target_ntype)
@@ -154,9 +144,11 @@ class HNELoader(BaseGraphLoader):
         df_nodes = pd.read_csv(node_file, sep='\t', header=None, names=['id', 'name', 'type', 'info'], encoding='utf-8', quoting=3)
         base_name = dataset_name.replace("_Sampled", "").replace("_SAMPLED", "")
         type_map = self.TYPE_MAPPINGS.get(base_name, {})
+        
         if not type_map:
             unique_types = df_nodes['type'].unique()
             type_map = {t: f"type_{t}" for t in unique_types}
+            
         g = tg_data.HeteroData()
         self._global_to_local = {}
         for type_id, group in df_nodes.groupby('type'):
@@ -181,7 +173,7 @@ class HNELoader(BaseGraphLoader):
         df_links['dst_idx'] = [t[1] for t in dst_tuples]
         
         for (src_type, dst_type), group in df_links.groupby(['src_type', 'dst_type']):
-            # Initial generic name (will be fixed by Standardizer later)
+            # Temp relation name; finalized by GraphStandardizer
             rel_name = f"{src_type}_to_{dst_type}" 
             edge_index = torch.stack([
                 torch.tensor(group['src_idx'].values, dtype=torch.long),

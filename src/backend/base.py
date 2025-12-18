@@ -1,6 +1,5 @@
 """
 Abstract backend interface for graph materialization.
-Implements Strategy Pattern for interchangeable backends.
 """
 from abc import ABC, abstractmethod
 from typing import Tuple, Dict, Any, List
@@ -40,8 +39,6 @@ class GraphBackend(ABC):
     """
     Abstract base class for graph materialization backends.
     Defines the contract that all backends must implement.
-    
-    This follows the Strategy Pattern, allowing runtime backend selection.
     """
     
     @abstractmethod

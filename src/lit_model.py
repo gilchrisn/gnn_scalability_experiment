@@ -1,6 +1,5 @@
 """
-PyTorch Lightning wrapper for GNN models.
-Handles training, validation, and testing loops.
+LightningModule wrapper for GNN training and evaluation.
 """
 import torch
 import torch.nn as nn
@@ -12,20 +11,13 @@ from typing import Any
 
 class LitGNN(pl.LightningModule):
     """
-    PyTorch Lightning wrapper for GNN encoders.
-    Implements training, validation, and testing logic.
+    Standardizes training and test loops for arbitrary GNN encoders.
     """
     
     def __init__(self, 
                  encoder: torch.nn.Module, 
                  lr: float = 0.01, 
                  weight_decay: float = 5e-4):
-        """
-        Args:
-            encoder: GNN encoder (e.g., GCN, GAT, SAGE)
-            lr: Learning rate
-            weight_decay: L2 regularization coefficient
-        """
         super().__init__()
         self.encoder = encoder
         self.lr = lr
@@ -33,41 +25,34 @@ class LitGNN(pl.LightningModule):
         self.save_hyperparameters(ignore=['encoder'])
 
     def forward(self, x: Any, edge_index: Any) -> torch.Tensor:
-        """
-        Forward pass through the encoder.
-        Supports both Dict (Hetero) and Tensor (Homo) inputs.
-        """
         return self.encoder(x, edge_index)
 
     def _calculate_loss(self, batch: Any, mask: torch.Tensor) -> tuple:
         """
-        Calculate loss and accuracy for a given split.
-        Supports both HeteroData (dict-based) and Data (tensor-based).
+        Shared loss calculation. Handles extraction from single graph or batch list,
+        and manages attribute dispatch for HeteroData vs standard Data objects.
         """
-        # Handle both single graph and list formats
+        # Unwrap data if passed as a single-item list from certain loaders
         data = batch[0] if isinstance(batch, list) else batch
         
-        # 1. Forward Pass logic for Hetero vs Homo
         if hasattr(data, 'x_dict'):
-            # Heterogeneous training path
+            # Heterogeneous path: assumes target labels are on the first available node type
             out_dict = self.encoder(data.x_dict, data.edge_index_dict)
-            # Slice logits for target node type (assumes labels are on target)
             target_node = next(iter(data.y_dict.keys()))
             logits = out_dict[target_node]
             labels = data.y_dict[target_node]
         else:
-            # Homogeneous/Materialized inference path
+            # Homogeneous path
             logits = self.encoder(data.x, data.edge_index)
             labels = data.y
         
-        # 2. Apply mask and calculate loss
+        # Isolate masked indices for metric calculation
         out = logits[mask]
         target_y = labels[mask]
         
         loss = F.cross_entropy(out, target_y)
         
-        # 3. Calculate accuracy
-        # Infer num_classes from output dimension if not explicitly set
+        # Dynamic class inference for multiclass accuracy
         num_classes = logits.size(-1)
         acc = accuracy(out, target_y, task="multiclass", num_classes=num_classes)
         
@@ -75,7 +60,8 @@ class LitGNN(pl.LightningModule):
     
     def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
         data = batch[0] if isinstance(batch, list) else batch
-        # We assume the mask is stored on the target node type or the root
+        
+        # Resolve training mask location
         mask = data.train_mask if not hasattr(data, 'train_mask_dict') else next(iter(data.train_mask_dict.values()))
         loss, acc = self._calculate_loss(batch, mask)
         

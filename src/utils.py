@@ -1,5 +1,5 @@
 """
-Utility functions for metapath generation, file management, and helpers.
+Utility functions for metapath generation, file management, and schema mapping.
 """
 import os
 import random
@@ -11,21 +11,10 @@ def generate_random_metapath(g_hetero: HeteroData,
                              start_ntype: str, 
                              length: int) -> List[Tuple[str, str, str]]:
     """
-    Dynamically discovers the schema and generates a valid random cyclic meta-path.
-    Ensures the path ends at the same node type it started with.
-    
-    Args:
-        g_hetero: Heterogeneous graph
-        start_ntype: Starting node type
-        length: Desired metapath length
-        
-    Returns:
-        List of edge type tuples forming a cyclic metapath
-        
-    Raises:
-        ValueError: If no valid cyclic path can be found
+    Randomly walks the graph schema to generate a valid cyclic metapath.
+    Returns a sequence of edge types that starts and ends at start_ntype.
     """
-    # Build schema adjacency list
+    # Map node types to outgoing edge types for schema traversal
     schema_adj = {}
     for edge_type in g_hetero.edge_types:
         src, rel, dst = edge_type
@@ -36,7 +25,7 @@ def generate_random_metapath(g_hetero: HeteroData,
     if start_ntype not in schema_adj:
         raise ValueError(f"Start node type '{start_ntype}' has no outgoing edges")
     
-    print(f"[Utils] Generating cyclic metapath (length={length}, start='{start_ntype}')...")
+    print(f"[Utils] Sampling cyclic metapath (len={length}, root='{start_ntype}')...")
     
     max_attempts = 100
     for attempt in range(max_attempts):
@@ -51,7 +40,7 @@ def generate_random_metapath(g_hetero: HeteroData,
             
             valid_edges = schema_adj[current_type]
             
-            # For the last step, try to return to start
+            # Constraints for the final step to enforce the cycle
             if i == length - 1:
                 candidates = [e for e in valid_edges if e[2] == start_ntype]
                 if not candidates:
@@ -64,14 +53,13 @@ def generate_random_metapath(g_hetero: HeteroData,
             metapath.append(chosen_edge)
             current_type = chosen_edge[2]
         
-        # Success: valid path that returns to start
         if valid_path and current_type == start_ntype:
             path_str = " -> ".join([rel for _, rel, _ in metapath])
-            print(f"   ✓ Found: {path_str}")
+            print(f"   Generated: {path_str}")
             return metapath
     
-    # Fallback: try to construct simple length-2 cycle
-    print(f"   [Warning] Could not find random path of length {length}")
+    # Fallback to a minimal length-2 cycle if the requested length search fails
+    print(f"   [Warning] Length-{length} path search failed; attempting length-2 fallback.")
     
     if length >= 2 and start_ntype in schema_adj:
         first_edge = schema_adj[start_ntype][0]
@@ -80,107 +68,56 @@ def generate_random_metapath(g_hetero: HeteroData,
         if mid_type in schema_adj:
             for back_edge in schema_adj[mid_type]:
                 if back_edge[2] == start_ntype:
-                    fallback = [first_edge, back_edge]
-                    print(f"   ✓ Using fallback length-2 path")
-                    return fallback
+                    print(f"   Using minimal fallback path.")
+                    return [first_edge, back_edge]
     
-    raise ValueError(
-        f"Could not generate cyclic metapath of length {length} "
-        f"starting from '{start_ntype}'. The graph schema may not support it."
-    )
+    raise ValueError(f"Schema constraints prevent cyclic metapath from '{start_ntype}'.")
 
 
 def get_metapath_suffix(metapath: List[Tuple[str, str, str]]) -> str:
     """
-    Generates a short, readable suffix from a metapath for file naming.
-    
-    Args:
-        metapath: List of edge type tuples
-        
-    Returns:
-        String suffix suitable for filenames
-        
-    Example:
-        >>> metapath = [('author', 'to', 'paper'), ('paper', 'to', 'author')]
-        >>> get_metapath_suffix(metapath)
-        'a_p_a'
+    Creates a shorthand string (e.g., 'a_p_a') for file naming based on node type initials.
     """
     if not metapath:
         return "no_path"
     
     try:
-        # Use first letter of each node type
-        suffix_parts = [metapath[0][0][0]]  # First source type
+        # Extract initial characters from the node sequence
+        suffix_parts = [metapath[0][0][0]]
         for _, _, dst_ntype in metapath:
             suffix_parts.append(dst_ntype[0])
         
         return "_".join(suffix_parts).lower()
     except (TypeError, IndexError):
-        print(f"[Warning] Could not parse metapath {metapath}. Using 'custom_path'.")
         return "custom_path"
 
 
 def get_model_checkpoint_path(model_dir: str, 
                               model_name: str, 
                               metapath: List[Tuple[str, str, str]]) -> str:
-    """
-    Generates standardized checkpoint path for a model.
-    
-    Args:
-        model_dir: Directory for model checkpoints
-        model_name: Name of the model (e.g., 'GCN', 'GAT')
-        metapath: Metapath used for training
-        
-    Returns:
-        Full path to checkpoint file
-    """
+    """Standardized naming convention for model persistence."""
     path_suffix = get_metapath_suffix(metapath)
     filename = f"{model_name.lower()}_{path_suffix}.ckpt"
     return os.path.join(model_dir, filename)
 
 
 def ensure_dir(directory: str) -> None:
-    """
-    Ensures a directory exists, creating it if necessary.
-    
-    Args:
-        directory: Path to directory
-    """
+    """Wraps os.makedirs with exist_ok for safe directory initialization."""
     os.makedirs(directory, exist_ok=True)
 
 
 def get_edge_type_str(edge_type: Tuple[str, str, str]) -> str:
-    """
-    Converts edge type tuple to readable string.
-    
-    Args:
-        edge_type: Tuple of (src_type, relation, dst_type)
-        
-    Returns:
-        Formatted string
-        
-    Example:
-        >>> get_edge_type_str(('author', 'writes', 'paper'))
-        'author -[writes]-> paper'
-    """
+    """ASCII representation of an edge type triple."""
     src, rel, dst = edge_type
     return f"{src} -[{rel}]-> {dst}"
 
 
 def format_metapath(metapath: List[Tuple[str, str, str]]) -> str:
-    """
-    Formats metapath for pretty printing.
-    
-    Args:
-        metapath: List of edge type tuples
-        
-    Returns:
-        Formatted string representation
-    """
+    """Readable string representation of the full metapath sequence."""
     if not metapath:
         return "Empty metapath"
     
-    parts = [metapath[0][0]]  # Start node
+    parts = [metapath[0][0]]
     for _, rel, dst in metapath:
         parts.append(f"-[{rel}]->")
         parts.append(dst)
@@ -190,45 +127,37 @@ def format_metapath(metapath: List[Tuple[str, str, str]]) -> str:
 
 class SchemaMatcher:
     """
-    Robustly maps messy rule strings to actual graph edge types.
-    Solves the mismatch between AnyBURL names (inverse_X) and Loader names (rev_X).
+    Utility for resolving naming conflicts between rule mining outputs (AnyBURL) 
+    and graph loader naming conventions (rev_X vs inverse_X).
     """
     @staticmethod
     def match(relation_str: str, g_hetero) -> Tuple[str, str, str]:
-        # 1. Clean the input string (remove known prefixes/separators)
-        # e.g. "inverse_rev_>actorh" -> "actorh"
-        # e.g. "paper_to_term" -> "papertoterm"
+        # Normalize input to ignore syntactic differences like prefixes or direction arrows
         clean_target = relation_str.replace("inverse_", "").replace("rev_", "").replace("_to_", "").replace(">", "").replace("<", "").lower()
         
         candidates = []
         
-        # 2. Iterate over ALL valid edge types in the graph
         for src, rel, dst in g_hetero.edge_types:
-            # Clean the graph's relation name similarly
             clean_rel = rel.replace("inverse_", "").replace("rev_", "").replace("_to_", "").replace(">", "").replace("<", "").lower()
             
-            # Check 1: Exact normalized match
+            # Direct match on normalized strings
             if clean_rel == clean_target:
                 candidates.append((src, rel, dst))
                 continue
                 
-            # Check 2: Reverse match (if target is "papertoterm" but graph has "termtopaper")
+            # Directional heuristic for relation names containing node type identifiers
             if f"{dst}{src}" in clean_target or f"{src}{dst}" in clean_target:
-                 # This is a heuristic for when the relation name implies direction
                  if clean_rel in clean_target:
                      candidates.append((src, rel, dst))
 
-        # 3. Selection Logic
         if not candidates:
-            # Final Fallback: If absolutely nothing matches, return generic (will fail in C++, but we tried)
-            print(f"      [Matcher] No schema match for '{relation_str}'. Defaulting to 'node'.")
+            print(f"      [Matcher] No match for '{relation_str}'. Falling back to generic node type.")
             return ('node', relation_str, 'node')
         
-        # If AnyBURL said "inverse", we prefer the edge type starting with "rev_" or "inverse_"
+        # Priority logic: align AnyBURL 'inverse' semantics with graph 'rev' attributes
         if "inverse" in relation_str or "rev" in relation_str:
             for c in candidates:
                 if "rev" in c[1] or "inverse" in c[1]:
                     return c
         
-        # Otherwise return the first exact match (usually the forward edge)
         return candidates[0]

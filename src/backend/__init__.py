@@ -1,6 +1,5 @@
 """
 Backend module for pluggable graph materialization engines.
-Implements Strategy Pattern for runtime backend selection.
 """
 
 from .base import GraphBackend, BackendFactory, BenchmarkResult
