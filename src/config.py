@@ -40,6 +40,9 @@ class Config:
         
         # System Configuration
         self.DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # Training Configuration
+        self.IGNORE_LABEL_INDEX = -100
         
         # Paths
         self.PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -61,7 +64,7 @@ class Config:
         # Model Hyperparameters
         self.HIDDEN_DIM = 64
         self.GAT_HEADS = 8
-        self.LEARNING_RATE = 0.01
+        self.LEARNING_RATE = 0.001
         self.WEIGHT_DECAY = 5e-4
         self.EPOCHS = 50
         
@@ -188,7 +191,7 @@ class Config:
         issues = []
         
         # Check CUDA availability
-        if not torch.cuda.is_available() and self.DEVICE.type == 'cuda':
+        if self.DEVICE.type == 'cuda' and not torch.cuda.is_available():
             issues.append("CUDA requested but not available")
         
         # Check external tools

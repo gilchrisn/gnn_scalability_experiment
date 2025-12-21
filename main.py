@@ -7,9 +7,11 @@ import os
 import shutil
 import time
 import json
+import gc
 import torch.nn as nn
 import pytorch_lightning as pl
-from torch_geometric.loader import DataLoader
+from torch_geometric.loader import DataLoader, NeighborLoader
+from pytorch_lightning.callbacks import EarlyStopping
 from torch_geometric.nn import to_hetero
 from typing import Optional, List, Tuple
 
@@ -17,7 +19,7 @@ from typing import Optional, List, Tuple
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.config import config, DatasetConfig
-from src.data import DatasetFactory, FeatureGuard, GlobalUniverseMapper
+from src.data import DatasetFactory, FeatureGuard, GlobalUniverseMapper, ArtifactManager
 from src.backend import BackendFactory, BenchmarkResult
 from src.bridge import AnyBURLRunner
 from src.utils import generate_random_metapath
@@ -34,7 +36,7 @@ class BenchmarkCommand:
     def __init__(self, backend_name: str):
         self.backend_name = backend_name
         self._backend = None
-    
+        
     def execute(self, args) -> None:
         # Console header
         print(f"\n{'='*60}")
@@ -42,17 +44,45 @@ class BenchmarkCommand:
         print(f"Method: {args.method.upper()} | Backend: {self.backend_name.upper()}")
         print(f"{'='*60}\n")
 
-        # Data loading
         dataset_cfg = config.get_dataset_config(args.dataset)
-        print(f"Loading dataset: {dataset_cfg}...")
+        artifact_mgr = ArtifactManager(config.TEMP_DIR)
         
-        g_hetero, info = DatasetFactory.get_data(
-            dataset_cfg.source,
-            dataset_cfg.dataset_name,
-            dataset_cfg.target_node
-        )
-        print(f"      Graph size: {g_hetero.num_nodes} nodes.")
+        g_hetero = None
+        info = None
         
+        # Zero-Copy Logic: Check for cached artifacts to avoid RAM spike
+        # Only valid for C++ backend which can read directly from disk
+        if self.backend_name == 'cpp' and artifact_mgr.exists():
+            try:
+                print(f"[System] Found cached artifacts. Attempting Zero-Copy load...")
+                info = artifact_mgr.load_metadata()
+                if 'schema' in info:
+                    print("[System] Zero-Copy successful. Python Graph Memory = 0GB.")
+                else:
+                    # Cache is stale (missing schema for rule generation), force reload
+                    info = None 
+            except Exception:
+                info = None
+
+        # Fallback: Full load via Factory if cache missed or invalid
+        if info is None:
+            print(f"Loading dataset: {dataset_cfg}...")
+            g_hetero, info = DatasetFactory.get_data(
+                dataset_cfg.source,
+                dataset_cfg.dataset_name,
+                dataset_cfg.target_node
+            )
+            print(f"      Graph size: {g_hetero.num_nodes} nodes.")
+            
+            # Enrich info with schema for future zero-copy runs
+            # This allows parsing metapaths without loading the full graph object
+            info['schema'] = {
+                'node_types': sorted(list(g_hetero.node_types)),
+                'edge_types': sorted(list(g_hetero.edge_types))
+            }
+            if self.backend_name == 'cpp':
+                artifact_mgr.save_metadata(info)
+
         # Resolve path
         if args.manual_path:
             print(f"\nParsing manual path: '{args.manual_path}'")
@@ -63,11 +93,20 @@ class BenchmarkCommand:
                 print(f"\nUsing config-suggested path: '{suggested[0]}'")
                 metapath_strings = [suggested[0]]
             else:
+                # Random generation requires traversal, so we can't do this in zero-copy mode
+                if g_hetero is None:
+                    raise RuntimeError("Random path generation requires full graph load. Clear cache or specify --manual-path.")
                 print(f"\nGenerating random walk path (len={args.metapath_length})...")
                 random_path = generate_random_metapath(g_hetero, dataset_cfg.target_node, args.metapath_length)
                 metapath_strings = [",".join([m[1] for m in random_path])]
 
-        metapath = self._parse_manual_path(metapath_strings[0], g_hetero)
+        # Adapter: If g_hetero is None, create a dummy object so SchemaMatcher can read edge_types
+        schema_provider = g_hetero
+        if schema_provider is None:
+            from types import SimpleNamespace
+            schema_provider = SimpleNamespace(edge_types=info['schema']['edge_types'])
+
+        metapath = self._parse_manual_path(metapath_strings[0], schema_provider)
         
         path_str = " -> ".join([f"[{m[1]}]" for m in metapath])
         print(f"      Schema: {path_str}")
@@ -76,6 +115,14 @@ class BenchmarkCommand:
         print(f"\nInitializing {self.backend_name} backend...")
         self._backend = self._create_backend(args)
         self._backend.initialize(g_hetero, metapath, info)
+        
+        # Memory optimization: Free Python graph before C++ execution
+        # This is the critical step preventing OOM during subprocess execution
+        if self.backend_name == 'cpp' and g_hetero is not None:
+            print("[System] Deallocating Python source graph to free RAM for C++...")
+            del g_hetero
+            import gc
+            gc.collect()
         
         print(f"\nRunning {args.method} materialization...")
         try:
@@ -89,7 +136,8 @@ class BenchmarkCommand:
         
         if args.run_inference:
             if self._backend.supports_inference:
-                self._run_inference_test(args, result, info)
+                # Note: g_materialized might be None if backend manages memory internally
+                self._run_inference_test(args, result, info, getattr(self, 'g_materialized', None), dataset_cfg)
         
         self._backend.cleanup()
 
@@ -252,6 +300,13 @@ class FoundationTrainCommand:
     """ Train GNN on the homogenized 'Universe' space. """
 
     def execute(self, args) -> None:
+        model_path = config.get_model_path(args.dataset, args.model)
+        
+        if os.path.exists(model_path):
+            print(f"\n[Info] Model already exists at {model_path}.")
+            print("Skipping training. (Delete the file to force retrain).")
+            return
+        
         print(f"\n{'='*60}")
         print(f"FOUNDATION TRAINING: {args.dataset}")
         print(f"{'='*60}\n")
@@ -263,14 +318,22 @@ class FoundationTrainCommand:
         
         FeatureGuard.ensure_features(g_hetero, seed=42, default_dim=64)
         
+        # Attach labels/masks to graph for Mapper
+        target = dataset_cfg.target_node
+        g_hetero[target].train_mask = info['masks']['train']
+        g_hetero[target].val_mask = info['masks']['val']
+        g_hetero[target].test_mask = info['masks']['test']
+        
+        if 'labels' in info:
+            g_hetero[target].y = info['labels']
+        
         print("Mapping to Universe space...")
+        # Recalculate dims in case FeatureGuard added something
+        dims = {}
         for nt in g_hetero.node_types:
-            if not hasattr(g_hetero[nt], 'x') or g_hetero[nt].x is None:
-                num_nodes = g_hetero[nt].num_nodes
-                print(f"      [Warning] Generating random features for '{nt}'")
-                g_hetero[nt].x = torch.randn((num_nodes, 64))
+            if hasattr(g_hetero[nt], 'x') and g_hetero[nt].x is not None:
+                dims[nt] = g_hetero[nt].x.shape[1]
 
-        dims = {nt: g_hetero[nt].x.shape[1] for nt in g_hetero.node_types}
         mapper = GlobalUniverseMapper(g_hetero.node_types, dims)
         g_homo = mapper.transform(g_hetero)
         
@@ -285,16 +348,41 @@ class FoundationTrainCommand:
         lit_model = LitGNN(model, lr=config.LEARNING_RATE)
 
         print(f"\nTraining {args.model} ({args.epochs} epochs)...")
-        loader = DataLoader([g_homo], batch_size=1, shuffle=False)
         
+        train_loader = NeighborLoader(
+            g_homo,
+            num_neighbors=[10] * 2,  
+            batch_size=1024,        
+            shuffle=True,
+            num_workers=4
+        )
+
+        val_loader = NeighborLoader(
+            g_homo,
+            num_neighbors=[10] * 2,
+            batch_size=1024,
+            shuffle=False,
+            num_workers=4
+        )
+        
+        early_stop_callback = EarlyStopping(
+            monitor="val_loss",
+            min_delta=0.00,
+            patience=5,
+            verbose=True,
+            mode="min"
+        )
+
         trainer = pl.Trainer(
             max_epochs=args.epochs,
             accelerator="auto",
             devices=1,
             enable_checkpointing=False,
-            logger=False
+            logger=False,
+            gradient_clip_val=1.0,
+            callbacks=[early_stop_callback]
         )
-        trainer.fit(lit_model, loader)
+        trainer.fit(lit_model, train_loader, val_loader)
 
         print("\nSaving artifacts...")
         self._save_artifacts(lit_model.encoder, mapper, args.dataset, args.model)
@@ -344,7 +432,16 @@ class FidelityCommand:
         from src.utils import SchemaMatcher
         
         path_list = [SchemaMatcher.match(s.strip(), g_hetero) for s in args.metapath.split(',')]
-        backend = BackendFactory.create('python', device=config.DEVICE)
+        
+        if args.backend == 'cpp':
+            backend = BackendFactory.create(
+                'cpp',
+                executable_path=config.CPP_EXECUTABLE,
+                temp_dir=config.TEMP_DIR
+            )
+        else:
+            backend = BackendFactory.create('python', device=config.DEVICE)
+
         backend.initialize(g_hetero, path_list, info)
 
         g_exact = backend.materialize_exact()
@@ -430,6 +527,9 @@ def create_parser() -> argparse.ArgumentParser:
         description="GNN Scalability Engine",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
+
+    # Global toggle for hardware override
+    parser.add_argument('--cpu', action='store_true', help='Force CPU execution')
     
     subparsers = parser.add_subparsers(dest='mode', help='Task mode')
     
@@ -468,6 +568,7 @@ def create_parser() -> argparse.ArgumentParser:
     fid_parser.add_argument('--model', type=str, required=True)
     fid_parser.add_argument('--metapath', type=str, required=True)
     fid_parser.add_argument('--k', type=int, default=32)
+    fid_parser.add_argument('--backend', type=str, choices=['python', 'cpp'], default='python')
 
     # List
     subparsers.add_parser('list')
@@ -478,6 +579,10 @@ def create_parser() -> argparse.ArgumentParser:
 def main():
     parser = create_parser()
     args = parser.parse_args()
+
+    if args.cpu:
+        print("[System] CPU override requested. Disabling CUDA for this run.")
+        config.DEVICE = torch.device('cpu')
     
     if not config.validate():
         print("\n[Warning] Config validation issues.")

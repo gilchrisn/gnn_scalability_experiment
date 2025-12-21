@@ -68,7 +68,7 @@ class HGBLoader(BaseGraphLoader):
         labels, num_classes = self._extract_labels(g, target_ntype)
         features = self._ensure_features(g, target_ntype)
         
-        info = self.create_info_dict(features, labels, train_mask, val_mask, test_mask, num_classes)
+        info = self.create_info_dict(g, target_ntype, features, labels, train_mask, val_mask, test_mask, num_classes)
         return g, info
 
 
@@ -86,7 +86,7 @@ class OGBLoader(BaseGraphLoader):
         labels, num_classes = self._extract_labels(g, target_ntype)
         features = g[target_ntype].x
         
-        info = self.create_info_dict(features, labels, g[target_ntype].train_mask, 
+        info = self.create_info_dict(g, target_ntype, features, labels, g[target_ntype].train_mask, 
                                    g[target_ntype].val_mask, g[target_ntype].test_mask, num_classes)
         return g, info
 
@@ -109,7 +109,7 @@ class PyGStandardLoader(BaseGraphLoader):
         labels, num_classes = self._extract_labels(g, target_ntype)
         features = self._ensure_features(g, target_ntype)
         
-        info = self.create_info_dict(features, labels, train_mask, val_mask, test_mask, num_classes)
+        info = self.create_info_dict(g, target_ntype, features, labels, train_mask, val_mask, test_mask, num_classes)
         return g, info
 
 
@@ -136,7 +136,7 @@ class HNELoader(BaseGraphLoader):
         labels, num_classes = self._extract_labels(g, target_ntype)
         train_mask, val_mask, test_mask = self._create_random_masks(g[target_ntype].num_nodes)
         
-        info = self.create_info_dict(features, labels, train_mask, val_mask, test_mask, num_classes)
+        info = self.create_info_dict(g, target_ntype, features, labels, train_mask, val_mask, test_mask, num_classes)
         return g, info
 
     def _load_nodes(self, data_dir: str, dataset_name: str) -> tg_data.HeteroData:

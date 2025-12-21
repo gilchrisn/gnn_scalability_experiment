@@ -54,7 +54,7 @@ class LitGNN(pl.LightningModule):
         
         # Dynamic class inference for multiclass accuracy
         num_classes = logits.size(-1)
-        acc = accuracy(out, target_y, task="multiclass", num_classes=num_classes)
+        acc = accuracy(out, target_y, task="multiclass", num_classes=num_classes, ignore_index=-100)
         
         return loss, acc
     

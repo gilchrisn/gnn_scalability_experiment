@@ -3,7 +3,7 @@ C++ backend implementation.
 Delegates computation to external C++ executable via subprocess.
 """
 import os
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 import torch
 from torch_geometric.data import Data, HeteroData
 
@@ -50,40 +50,58 @@ class CppBackend(GraphBackend):
         return True  # Results can be used for inference
     
     def initialize(self,
-                   g_hetero: HeteroData,
+                   g_hetero: Optional[HeteroData],
                    metapath: List[Tuple[str, str, str]],
                    info: Dict[str, Any]) -> None:
         """
         Convert graph to C++ format and prepare for execution.
-        
-        Args:
-            g_hetero: Input graph
-            metapath: Path definition
-            info: Metadata
+        Supports Zero-Copy if g_hetero is None (artifacts must exist).
         """
-        print(f"[CppBackend] Converting graph to C++ format...")
+        print(f"[CppBackend] Initializing...")
         
-        self._g_hetero = g_hetero
         self._metapath = metapath
         self._info = info
         self._target_ntype = metapath[-1][2]
         
-        # Convert to C++ format
+        #  Setup Adapter
         self._adapter = PyGToCppAdapter(self.temp_dir)
-        self._adapter.convert(g_hetero)
         
-        # Generate rule file
-        rule_str = self._adapter.generate_cpp_rule(metapath)
-        self._rule_path = self._adapter.write_rule_file(rule_str)
+        #  Handle Zero-Copy (g_hetero is None)
+        edge_map = {}
+        if g_hetero is not None:
+            self._adapter.convert(g_hetero)
+            sorted_edges = sorted(g_hetero.edge_types)
+            edge_map = {et: i for i, et in enumerate(sorted_edges)}
+            self._target_offset = self._adapter.type_offsets[self._target_ntype]
+        else:
+            print("[CppBackend] Running in Zero-Copy mode (Cached Artifacts).")
+            # Fallback schema from metadata
+            sorted_edges = sorted(info['schema']['edge_types'])
+            edge_map = {tuple(et): i for i, et in enumerate(sorted_edges)}
+            
+            # Load offsets from disk
+            import json
+            with open(os.path.join(self.temp_dir, "offsets.json"), 'r') as f:
+                offsets = json.load(f)['offsets']
+            self._target_offset = offsets[self._target_ntype]
+
+        #  Generate rule file
+        rule_parts = ["-1"]
+        for edge_tuple in metapath:
+            t_edge = tuple(edge_tuple)
+            if t_edge not in edge_map:
+                raise ValueError(f"Edge {t_edge} not found in schema")
+            rule_parts.append("-2")
+            rule_parts.append(str(edge_map[t_edge]))
+        rule_parts.extend(["-5", "0", "-4", "-4"])
+        
+        self._rule_path = self._adapter.write_rule_file(" ".join(rule_parts))
         
         # Setup bridge
         self._bridge = CppBridge(self.executable_path, self.temp_dir)
-        
-        # Calculate target offset for ID mapping
-        self._target_offset = self._adapter.type_offsets[self._target_ntype]
         self._num_nodes = info['features'].shape[0]
         
-        print(f"[CppBackend] Initialized (offset={self._target_offset}, nodes={self._num_nodes})")
+        print(f"[CppBackend] Initialized (offset={self._target_offset})")
     
     def materialize_exact(self) -> Data:
         """

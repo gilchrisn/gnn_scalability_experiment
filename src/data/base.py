@@ -85,6 +85,8 @@ class BaseGraphLoader(ABC):
         return labels, num_classes
 
     def create_info_dict(self, 
+                        g: tg_data.HeteroData,     
+                        target_ntype: str,
                         features: torch.Tensor,
                         labels: torch.Tensor,
                         train_mask: torch.Tensor,
@@ -94,6 +96,12 @@ class BaseGraphLoader(ABC):
         """
         Collate training tensors and dimensions into a standard metadata package.
         """
+
+        if not hasattr(g[target_ntype], 'train_mask') or g[target_ntype].train_mask is None:
+            g[target_ntype].train_mask = train_mask
+            g[target_ntype].val_mask = val_mask
+            g[target_ntype].test_mask = test_mask
+            
         return {
             "features": features,
             "labels": labels,

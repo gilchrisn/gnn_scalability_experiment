@@ -55,9 +55,13 @@ class CppBridge:
             print(f"Done ({duration:.4f}s)")
             return duration
         except subprocess.CalledProcessError as e:
-            print("\n   [C++] Runtime error encountered.")
-            print(f"   Stderr: {e.stderr}")
-            raise
+            # Check specifically for C++ memory allocation failure
+            if "std::bad_alloc" in e.stderr:
+                print("\n   [C++] Memory allocation failed.")
+                raise MemoryError("C++ backend exhausted available RAM.") from None
+                
+            print(f"\n   [C++] Error: {e.stderr}")
+            raise RuntimeError(f"C++ binary failed with exit code {e.returncode}") from e
     
     def load_result_graph(self,
                           filepath: str,
@@ -114,30 +118,55 @@ class PyGToCppAdapter:
         os.makedirs(self.output_dir, exist_ok=True)
         
         self.type_offsets: Dict[str, int] = {}
-        self.node_type_mapping: Dict[str, int] = {}
-        self.edge_type_mapping: Dict[Tuple[str, str, str], int] = {}
-    
+        # Load offsets from cache if available to ensure consistency
+        self._load_cached_offsets()
+
+    def _load_cached_offsets(self) -> None:
+        """Attempts to load type offsets from a previous run."""
+        offset_path = os.path.join(self.output_dir, "offsets.json")
+        if os.path.exists(offset_path):
+            import json
+            with open(offset_path, 'r') as f:
+                data = json.load(f)
+                self.type_offsets = data.get('offsets', {})
+                
     def convert(self, g_hetero: HeteroData) -> None:
         """
         Entry point for graph conversion. Generates node, link, and meta files.
+        Checks for existing artifacts to enable zero-copy execution.
         """
-        print(f"[Adapter] Serializing HeteroData to {self.output_dir}...")
-        
         node_file = os.path.join(self.output_dir, "node.dat")
         link_file = os.path.join(self.output_dir, "link.dat")
-        meta_file = os.path.join(self.output_dir, "meta.dat")
+        
+        # Short-circuit: If files exist and are non-empty, skip conversion
+        if (os.path.exists(node_file) and os.path.getsize(node_file) > 0 and
+            os.path.exists(link_file) and os.path.getsize(link_file) > 0):
+            print(f"[Adapter] Found existing artifacts. Skipping write.")
+            self._recalculate_offsets(g_hetero)
+            return
+
+        print(f"[Adapter] Serializing HeteroData to {self.output_dir}...")
         
         if os.path.exists(node_file): os.remove(node_file)
         if os.path.exists(link_file): os.remove(link_file)
-        if os.path.exists(meta_file): os.remove(meta_file)
         
         total_nodes = self._write_nodes(g_hetero, node_file)
         self._write_edges(g_hetero, link_file)
         
-        with open(meta_file, "w") as f:
-            f.write(f"Total Node Num : {total_nodes}\n")
-        
+        # Save offsets for future runs (essential for C++ ID mapping)
+        import json
+        with open(os.path.join(self.output_dir, "offsets.json"), 'w') as f:
+            json.dump({'offsets': self.type_offsets}, f)
+
         print(f"[Adapter] Success. Total graph size: {total_nodes} nodes.")
+
+    def _recalculate_offsets(self, g: HeteroData) -> None:
+        """Recalculates global ID offsets without writing to disk."""
+        node_types = sorted(g.node_types)
+        global_id = 0
+        for ntype in node_types:
+            self.type_offsets[ntype] = global_id
+            global_id += g[ntype].num_nodes
     
     def _write_nodes(self, g: HeteroData, filepath: str) -> int:
         """
