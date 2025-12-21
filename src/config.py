@@ -77,55 +77,63 @@ class Config:
         Config._initialized = True
     
     def _init_datasets(self) -> Dict[str, DatasetConfig]:
-        """Initialize dataset registry with high-quality semantic meta-paths."""
+        """
+        Initialize dataset registry with schema-verified metapaths.
+        
+        Corrections made based on SCHEMA files:
+        - HGB_DBLP: 'conf' -> 'venue'
+        - HGB_Freebase: 'author'/'genre' -> 'people' (BPB)
+        - OGB_MAG: Fixed edge names ('rev_writes') and removed invalid 'venue' path
+        - HNE_Yelp: Removed invalid 'service' link; added 'level' path
+        """
         return {
-            # HGB DATASETS
+            # === HGB DATASETS ===
             'HGB_DBLP': DatasetConfig('HGB', 'DBLP', 'author', [
-                "author_to_paper,paper_to_author",             # APA (Co-authorship)
-                "author_to_paper,paper_to_conf,conf_to_paper,paper_to_author" # APCPA (Venue similarity)
+                "author_to_paper,paper_to_author",             # APA
+                "author_to_paper,paper_to_venue,venue_to_paper,paper_to_author" # APVPA
             ]),
             'HGB_ACM': DatasetConfig('HGB', 'ACM', 'paper', [
-                "paper_to_author,author_to_paper",             # PAP (Shared Authors)
-                "paper_to_subject,subject_to_paper"            # PSP (Shared Subject)
+                "paper_to_author,author_to_paper",             # PAP
+                "paper_to_subject,subject_to_paper"            # PSP
             ]),
             'HGB_IMDB': DatasetConfig('HGB', 'IMDB', 'movie', [
-                "movie_to_actor,actor_to_movie",               # MAM (Shared Actor)
-                "movie_to_director,director_to_movie"          # MDM (Shared Director)
+                "movie_to_actor,actor_to_movie",               # MAM
+                "movie_to_director,director_to_movie"          # MDM
             ]),
             'HGB_Freebase': DatasetConfig('HGB', 'Freebase', 'book', [
-                "book_to_author,author_to_book",               # BAB
-                "book_to_genre,genre_to_book"                  # BGB
+                "book_to_people,people_to_book",               # BPB (Shared connections like authors/characters)
+                "book_to_film,film_to_book"                    # BFB (Books adapted to films)
             ]),
 
-            # OGB DATASETS
+            # === OGB DATASETS ===
             'OGB_MAG': DatasetConfig('OGB', 'ogbn-mag', 'paper', [
-                "paper_to_author,author_to_paper",             # PAP
-                "paper_to_field,field_to_paper",               # PFP
-                "paper_to_venue,venue_to_paper"                # PVP
+                "rev_writes,writes",                           # PAP (Paper->Author->Paper)
+                "has_topic,rev_has_topic",                     # PFP (Paper->Field->Paper)
+                "rev_writes,affiliated_with,rev_affiliated_with,writes" # PAhAP (Paper->Author->Inst->Author->Paper)
             ]),
 
-            # PyG DATASETS
+            # === PyG DATASETS ===
             'PyG_IMDB': DatasetConfig('PyG', 'IMDB', 'movie', [
                 "movie_to_actor,actor_to_movie", 
                 "movie_to_director,director_to_movie"
             ]),
             'PyG_DBLP': DatasetConfig('PyG', 'DBLP', 'author', [
                 "author_to_paper,paper_to_author", 
-                "author_to_paper,paper_to_conf,conf_to_paper,paper_to_author"
+                "author_to_paper,paper_to_conference,conference_to_paper,paper_to_author"
             ]),
-            'PyG_AMiner': DatasetConfig('PyG', 'AMiner', 'author', [
-                "author_to_paper,paper_to_author",
-                "author_to_paper,paper_to_ref,ref_to_paper,paper_to_author" # APRPA (Citation-based similarity)
+            'PyG_AMiner': DatasetConfig('PyG', 'AMiner', 'paper', [
+                "written_by,writes",                           # PAP
+                "published_in,publishes"                       # PVP
             ]),
 
-            # HNE DATASETS (Standard naming conventions)
+            # === HNE DATASETS ===
             'HNE_DBLP': DatasetConfig('HNE', 'DBLP', 'author', [
                 "author_to_paper,paper_to_author", 
                 "author_to_paper,paper_to_conf,conf_to_paper,paper_to_author"
             ]),
             'HNE_Yelp': DatasetConfig('HNE', 'Yelp', 'user', [
-                "user_to_business,business_to_user",           # UBU (Shared visitation)
-                "user_to_business,business_to_service,service_to_business,business_to_user" # UBSBU
+                "user_to_business,business_to_user",           # UBU (Co-reviews)
+                "user_to_level,level_to_user"                  # ULU (Shared Level)
             ]),
             'HNE_PubMed': DatasetConfig('HNE', 'PubMed', 'paper', [
                 "paper_to_author,author_to_paper", 
