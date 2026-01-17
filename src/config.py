@@ -143,6 +143,24 @@ class Config:
                 "entity_to_relation,relation_to_entity",       # ERE
                 "entity_to_type,type_to_entity"                # ETE
             ]),
+
+            # === CUSTOM DATASETS ===
+            'CUSTOM_ACM': DatasetConfig('CUSTOM', 'ACM', 'paper', [
+                "paper_to_author,author_to_paper",
+                "paper_to_subject,subject_to_paper"
+            ]),
+            'CUSTOM_IMDB': DatasetConfig('CUSTOM', 'IMDB', 'movie', [
+                "movie_to_actor,actor_to_movie",
+                "movie_to_director,director_to_movie"
+            ]),
+            'CUSTOM_Yelp': DatasetConfig('CUSTOM', 'Yelp', 'user', [
+                "user_to_business,business_to_user",
+                "user_to_level,level_to_user"
+            ]),
+            'CUSTOM_Freebase': DatasetConfig('CUSTOM', 'Freebase', 'book', [
+                "book_to_people,people_to_book",
+                "book_to_film,film_to_book"
+            ]),
         }
     
     def _ensure_directories(self) -> None:

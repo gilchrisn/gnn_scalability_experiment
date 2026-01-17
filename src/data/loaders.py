@@ -56,9 +56,11 @@ class GraphStandardizer:
 
 
 class HGBLoader(BaseGraphLoader):
-    def load(self, dataset_name: str, target_ntype: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
+    def load(self, dataset_name: str, target_ntype: str, root_dir: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
         print(f"[HGBLoader] Loading {dataset_name}...")
-        dataset = HGBDataset(root=f'./datasets/HGB_{dataset_name}', name=dataset_name)
+
+        dataset_root = os.path.join(root_dir, f'HGB_{dataset_name}')    
+        dataset = HGBDataset(root=dataset_root, name=dataset_name)
         g = dataset[0]
         
         GraphStandardizer.standardize(g)
@@ -73,12 +75,13 @@ class HGBLoader(BaseGraphLoader):
 
 
 class OGBLoader(BaseGraphLoader):
-    def load(self, dataset_name: str, target_ntype: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
+    def load(self, dataset_name: str, target_ntype: str, root_dir: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
         print(f"[OGBLoader] Loading {dataset_name}...")
         if dataset_name.lower() not in ['ogbn-mag', 'mag']:
             raise ValueError(f"OGBLoader only supports 'ogbn-mag'")
         
-        dataset = OGB_MAG(root='./datasets/OGB', preprocess='metapath2vec')
+        dataset_root = os.path.join(root_dir, 'OGB')
+        dataset = OGB_MAG(root=dataset_root, preprocess='metapath2vec')
         g = dataset[0]
         
         GraphStandardizer.standardize(g)
@@ -94,12 +97,12 @@ class OGBLoader(BaseGraphLoader):
 class PyGStandardLoader(BaseGraphLoader):
     DATASET_MAPPING = {'DBLP': DBLP, 'IMDB': IMDB, 'AMiner': AMiner}
     
-    def load(self, dataset_name: str, target_ntype: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
+    def load(self, dataset_name: str, target_ntype: str, root_dir: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
         print(f"[PyGLoader] Loading {dataset_name}...")
         if dataset_name not in self.DATASET_MAPPING:
             raise ValueError(f"Unknown PyG dataset: {dataset_name}")
         
-        path = f'./datasets/PyG_{dataset_name}'
+        path = os.path.join(root_dir, f'PyG_{dataset_name}')
         dataset = self.DATASET_MAPPING[dataset_name](root=path)
         g = dataset[0]
         
@@ -121,8 +124,8 @@ class HNELoader(BaseGraphLoader):
         'Freebase': {0: 'entity', 1: 'type', 2: 'relation'}
     }
     
-    def load(self, dataset_name: str, target_ntype: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
-        data_dir = f'./datasets/HNE_{dataset_name}'
+    def load(self, dataset_name: str, target_ntype: str, root_dir: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
+        data_dir = os.path.join(root_dir, f'HNE_{dataset_name}')
         print(f"[HNELoader] Loading from {data_dir}...")
         if not os.path.exists(data_dir):
             raise FileNotFoundError(f"HNE dataset directory not found: {data_dir}")
@@ -180,3 +183,47 @@ class HNELoader(BaseGraphLoader):
                 torch.tensor(group['dst_idx'].values, dtype=torch.long)
             ], dim=0)
             g[src_type, rel_name, dst_type].edge_index = edge_index
+
+class CustomLoader(HNELoader):
+    """
+    Loader for custom datasets (ACM, IMDB, Yelp, Freebase) provided externally.
+    Inherits parsing logic from HNELoader but enforces strict schema mappings
+    specific to this data source.
+    """
+    
+    # Explicit schema mapping for the friend's datasets
+    TYPE_MAPPINGS = {
+        'ACM': {0: 'paper', 1: 'author', 2: 'subject'},
+        'IMDB': {0: 'movie', 1: 'actor', 2: 'director'},
+        'Yelp': {0: 'user', 1: 'business', 2: 'service', 3: 'level'},
+        'Freebase': {0: 'entity', 1: 'type', 2: 'relation'}
+    }
+
+    def load(self, dataset_name: str, target_ntype: str, root_dir: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
+        print(f"[CustomLoader] Loading {dataset_name}...")
+        
+        # Enforce directory structure: datasets/CUSTOM_<name>
+        folder_name = f"CUSTOM_{dataset_name}"
+        data_dir = os.path.join(root_dir, folder_name)
+        
+        if not os.path.exists(data_dir):
+            raise FileNotFoundError(
+                f"Custom dataset not found at: {data_dir}\n"
+                f"Expected format: node.dat, link.dat inside {folder_name}/"
+            )
+
+        # Reuse HNELoader's logic for parsing tab-separated files
+        # We access the parent method directly to avoid recursion issues
+        g = self._load_nodes(data_dir, dataset_name)
+        self._load_edges(data_dir, g)
+
+        GraphStandardizer.standardize(g)
+        
+        # Standard feature/label extraction (Template Method Pattern from BaseGraphLoader)
+        features = self._ensure_features(g, target_ntype)
+        labels, num_classes = self._extract_labels(g, target_ntype)
+        train_mask, val_mask, test_mask = self._create_random_masks(g[target_ntype].num_nodes)
+        
+        info = self.create_info_dict(g, target_ntype, features, labels, 
+                                   train_mask, val_mask, test_mask, num_classes)
+        return g, info

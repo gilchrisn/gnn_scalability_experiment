@@ -7,7 +7,7 @@ import torch
 from torch_geometric.data import Data, HeteroData
 
 from .base import GraphBackend
-from ..kernels import ExactMaterializationKernel, KMVSketchingKernel
+from ..kernels import ExactMaterializationKernel, KMVSketchingKernel, RandomSamplingKernel
 
 
 class PythonBackend(GraphBackend):
@@ -16,7 +16,7 @@ class PythonBackend(GraphBackend):
     Implements graph operations using in-memory tensor operations.
     """
     
-    def __init__(self, device: torch.device = None):
+    def __init__(self, device: torch.device = None, **kwargs):
         """
         Args:
             device: Computation device (CPU or CUDA)
@@ -111,6 +111,36 @@ class PythonBackend(GraphBackend):
         )
         
         self._last_prep_time = t_prop + t_build
+        return g_result
+    
+    def materialize_random(self, k: int) -> Data:
+        """
+        Random sampling-based approximate materialization.
+        
+        Args:
+            k: Number of neighbors to sample
+
+        Returns:
+            Sampled graph
+        """ 
+
+        if self._g_hetero is None:
+            raise RuntimeError("Backend not initialized. Call initialize() first.")
+        
+        print(f"[PythonBackend] Running Random Sampling (k={k})...")
+        
+        random_kernel = RandomSamplingKernel(k=k, device=self.device)
+        
+        g_result, t_prep, _ = random_kernel.sketch_and_sample(
+            self._g_hetero,
+            self._metapath,
+            self._target_ntype,
+            features=self._info['features'],
+            labels=self._info['labels'],
+            masks=self._info['masks']
+        )
+        
+        self._last_prep_time = t_prep
         return g_result
     
     def get_prep_time(self) -> float:

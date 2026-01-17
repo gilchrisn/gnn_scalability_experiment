@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 import torch
 from typing import Tuple, Dict, Any
 import torch_geometric.data as tg_data
-
+from src.config import config
 
 class BaseGraphLoader(ABC):
     """
@@ -75,8 +75,22 @@ class BaseGraphLoader(ABC):
         if hasattr(g[target_ntype], 'y') and g[target_ntype].y is not None:
             labels = g[target_ntype].y
             if labels.dim() > 1:
-                labels = labels.view(-1)
-            num_classes = int(labels.max()) + 1
+                if labels.size(1) > 1:
+                    labels = labels.argmax(dim=1)
+                else:
+                    labels = labels.view(-1)
+
+            labels = labels.long()
+
+            mask_invalid = (labels == -1)
+            if mask_invalid.any():
+                labels[mask_invalid] = config.IGNORE_LABEL_INDEX
+
+            valid_labels = labels[labels != config.IGNORE_LABEL_INDEX]
+            if valid_labels.numel() > 0:
+                num_classes = int(valid_labels.max()) + 1
+            else:
+                num_classes = default_classes
         else:
             print(f"[Loader] No labels found for '{target_ntype}'; using random targets.")
             num_classes = default_classes

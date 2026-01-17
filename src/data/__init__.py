@@ -8,7 +8,7 @@ from .base import BaseGraphLoader
 from .loaders import HGBLoader, OGBLoader, PyGStandardLoader, HNELoader
 from .preprocessing import FeatureGuard
 from .mapper import GlobalUniverseMapper
-from .caching import ArtifactManager
+from .caching import BaselineCache
 
 
 __all__ = [
@@ -20,5 +20,6 @@ __all__ = [
     'HNELoader',
     'FeatureGuard',
     'GlobalUniverseMapper',
-    'ArtifactManager',
+    'BaselineCache'
+
 ]

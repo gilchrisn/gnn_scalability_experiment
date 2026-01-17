@@ -5,7 +5,8 @@ from typing import Tuple, Dict, Any, Type
 import torch_geometric.data as tg_data
 
 from .base import BaseGraphLoader
-from .loaders import HGBLoader, OGBLoader, PyGStandardLoader, HNELoader
+from .loaders import HGBLoader, OGBLoader, PyGStandardLoader, HNELoader, CustomLoader
+from ..config import config
 
 
 class DatasetFactory:
@@ -18,6 +19,7 @@ class DatasetFactory:
         'OGB': OGBLoader,
         'PyG': PyGStandardLoader,
         'HNE': HNELoader,
+        'CUSTOM': CustomLoader,
     }
     
     @classmethod
@@ -57,7 +59,7 @@ class DatasetFactory:
         loader = loader_class()
         
         try:
-            return loader.load(dataset_name, target_ntype)
+            return loader.load(dataset_name, target_ntype, config.DATA_DIR)
         except Exception as e:
             print(f"[Factory] Failed to load {source_type}/{dataset_name}: {e}")
             raise

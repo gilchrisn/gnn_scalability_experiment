@@ -16,76 +16,70 @@ class CppBackend(GraphBackend):
     C++ subprocess backend.
     Converts graph to C++ format, executes binary, and loads results.
     """
-    
-    def __init__(self, executable_path: str, temp_dir: str):
+
+    def __init__(self, 
+                 executable_path: str, 
+                 temp_dir: str, 
+                 num_sketches: int = 1,
+                 **kwargs):
         """
         Args:
             executable_path: Path to compiled C++ binary
             temp_dir: Directory for intermediate files
+            num_sketches: Number of independent sketches (L parameter) to run.
         """
         self.executable_path = executable_path
         self.temp_dir = temp_dir
-        
-        self._adapter = None
-        self._bridge = None
-        self._g_hetero = None
-        self._metapath = None
-        self._info = None
-        self._target_ntype = None
-        self._target_offset = 0
-        self._num_nodes = 0
-        self._last_prep_time = 0.0
-        self._rule_path = None
-        
+        self.num_sketches = num_sketches
+
+        self._adapter: Optional[PyGToCppAdapter] = None
+        self._bridge: Optional[CppBridge] = None
+        self._metapath: Optional[List[Tuple[str, str, str]]] = None
+        self._info: Optional[Dict[str, Any]] = None
+        self._target_ntype: Optional[str] = None
+        self._target_offset: int = 0
+        self._num_nodes: int = 0
+        self._last_prep_time: float = 0.0
+        self._rule_path: Optional[str] = None
+
         # Validate executable exists
         if not os.path.exists(executable_path):
             raise FileNotFoundError(f"C++ executable not found: {executable_path}")
-    
+
     @property
     def name(self) -> str:
         return "cpp"
-    
+
     @property
     def supports_inference(self) -> bool:
         return True  # Results can be used for inference
-    
-    def initialize(self,
-                   g_hetero: Optional[HeteroData],
+
+    def initialize(self, 
+                   g_hetero: Optional[HeteroData], 
                    metapath: List[Tuple[str, str, str]],
                    info: Dict[str, Any]) -> None:
         """
         Convert graph to C++ format and prepare for execution.
-        Supports Zero-Copy if g_hetero is None (artifacts must exist).
         """
-        print(f"[CppBackend] Initializing...")
-        
+        print(f"[CppBackend] Initializing (L={self.num_sketches})...")
+
+        if g_hetero is None:
+            raise ValueError("[CppBackend] g_hetero cannot be None. Full conversion required.")
+
         self._metapath = metapath
         self._info = info
         self._target_ntype = metapath[-1][2]
-        
-        #  Setup Adapter
-        self._adapter = PyGToCppAdapter(self.temp_dir)
-        
-        #  Handle Zero-Copy (g_hetero is None)
-        edge_map = {}
-        if g_hetero is not None:
-            self._adapter.convert(g_hetero)
-            sorted_edges = sorted(g_hetero.edge_types)
-            edge_map = {et: i for i, et in enumerate(sorted_edges)}
-            self._target_offset = self._adapter.type_offsets[self._target_ntype]
-        else:
-            print("[CppBackend] Running in Zero-Copy mode (Cached Artifacts).")
-            # Fallback schema from metadata
-            sorted_edges = sorted(info['schema']['edge_types'])
-            edge_map = {tuple(et): i for i, et in enumerate(sorted_edges)}
-            
-            # Load offsets from disk
-            import json
-            with open(os.path.join(self.temp_dir, "offsets.json"), 'r') as f:
-                offsets = json.load(f)['offsets']
-            self._target_offset = offsets[self._target_ntype]
 
-        #  Generate rule file
+        # 1. Setup Adapter and Convert
+        self._adapter = PyGToCppAdapter(self.temp_dir)
+        self._adapter.convert(g_hetero)
+
+        # Calculate offsets
+        sorted_edges = sorted(g_hetero.edge_types)
+        edge_map = {et: i for i, et in enumerate(sorted_edges)}
+        self._target_offset = self._adapter.type_offsets[self._target_ntype]
+
+        # 2. Generate rule file
         rule_parts = ["-1"]
         for edge_tuple in metapath:
             t_edge = tuple(edge_tuple)
@@ -94,104 +88,129 @@ class CppBackend(GraphBackend):
             rule_parts.append("-2")
             rule_parts.append(str(edge_map[t_edge]))
         rule_parts.extend(["-5", "0", "-4", "-4"])
-        
+
         self._rule_path = self._adapter.write_rule_file(" ".join(rule_parts))
-        
-        # Setup bridge
+
+        # 3. Setup bridge
         self._bridge = CppBridge(self.executable_path, self.temp_dir)
         self._num_nodes = info['features'].shape[0]
-        
+
         print(f"[CppBackend] Initialized (offset={self._target_offset})")
-    
+
     def materialize_exact(self) -> Data:
         """
         Execute C++ exact materialization.
-        
-        Returns:
-            Materialized graph
         """
         if self._bridge is None:
             raise RuntimeError("Backend not initialized. Call initialize() first.")
-        
+
         print(f"[CppBackend] Running exact materialization...")
-        
         output_file = os.path.join(self.temp_dir, "exact_result.txt")
-        
-        # Execute C++ binary
+
         prep_time = self._bridge.run_command(
-            "materialize",
-            self._rule_path,
-            output_file
+            mode="materialize",
+            rule_file=self._rule_path,
+            output_file=output_file
         )
-        
-        # Load results
+
         g_result = self._bridge.load_result_graph(
-            output_file,
-            self._num_nodes,
-            self._target_offset
+            output_file, self._num_nodes, self._target_offset
         )
-        
-        # Attach metadata
-        g_result.x = self._info['features']
-        g_result.y = self._info['labels']
-        g_result.train_mask = self._info['masks']['train']
-        g_result.val_mask = self._info['masks']['val']
-        g_result.test_mask = self._info['masks']['test']
-        
+
+        self._attach_metadata(g_result)
         self._last_prep_time = prep_time
         return g_result
-    
+
     def materialize_kmv(self, k: int) -> Data:
         """
         Execute C++ KMV materialization.
-        
-        Args:
-            k: Sketch size
-            
-        Returns:
-            Sampled graph
+        Returns ONLY the first graph sample (_0) for standard compatibility.
         """
         if self._bridge is None:
             raise RuntimeError("Backend not initialized. Call initialize() first.")
-        
-        print(f"[CppBackend] Running KMV (k={k})...")
-        
-        output_file = os.path.join(self.temp_dir, f"kmv_k{k}_result.txt")
-        
-        # Execute C++ binary
+
+        print(f"[CppBackend] Running KMV (k={k}, L={self.num_sketches})...")
+        base_output_file = os.path.join(self.temp_dir, f"kmv_k{k}_L{self.num_sketches}.txt")
+
+        # Run C++ (Generates L files)
         prep_time = self._bridge.run_command(
-            "sketch",
-            self._rule_path,
-            output_file,
-            k=k
+            mode="sketch",
+            rule_file=self._rule_path,
+            output_file=base_output_file,
+            k=k,
+            l_val=self.num_sketches
         )
-        
-        # Load results
+
+        # Load only the 0-th graph
+        base_name, ext = os.path.splitext(base_output_file)
+        actual_output_file = f"{base_name}_0{ext}"
+
         g_result = self._bridge.load_result_graph(
-            output_file,
-            self._num_nodes,
-            self._target_offset
+            actual_output_file, self._num_nodes, self._target_offset
         )
+
+        self._attach_metadata(g_result)
+        self._last_prep_time = prep_time
+        return g_result
+
+    def materialize_kmv_ensemble(self, k: int) -> List[Data]:
+        """
+        [New] Execute C++ KMV and load ALL L generated subgraphs.
+        Returns a list of Data objects.
+        """
+        if self._bridge is None:
+            raise RuntimeError("Backend not initialized.")
+
+        print(f"[CppBackend] Running Ensemble KMV (k={k}, L={self.num_sketches})...")
+        base_output_file = os.path.join(self.temp_dir, f"kmv_k{k}_L{self.num_sketches}.txt")
+
+        # 1. Run C++ (Generates L files on disk)
+        prep_time = self._bridge.run_command(
+            mode="sketch",
+            rule_file=self._rule_path,
+            output_file=base_output_file,
+            k=k,
+            l_val=self.num_sketches
+        )
+        self._last_prep_time = prep_time
+
+        # 2. Load all L files
+        graphs = []
+        base_name, ext = os.path.splitext(base_output_file)
         
-        # Attach metadata
+        print(f"   -> Loading {self.num_sketches} graphs from disk...")
+        for i in range(self.num_sketches):
+            file_i = f"{base_name}_{i}{ext}"
+            
+            # Helper to fail gracefully if C++ didn't generate enough files
+            if not os.path.exists(file_i):
+                print(f"   [Warning] Expected output {file_i} missing. Skipping.")
+                continue
+
+            g = self._bridge.load_result_graph(
+                file_i, self._num_nodes, self._target_offset
+            )
+            self._attach_metadata(g)
+            graphs.append(g)
+            
+        print(f"   -> Loaded {len(graphs)} graphs.")
+        return graphs
+
+    def _attach_metadata(self, g_result: Data) -> None:
+        """Helper to attach features, labels, and masks to the raw structure."""
         g_result.x = self._info['features']
         g_result.y = self._info['labels']
         g_result.train_mask = self._info['masks']['train']
         g_result.val_mask = self._info['masks']['val']
         g_result.test_mask = self._info['masks']['test']
-        
-        self._last_prep_time = prep_time
-        return g_result
-    
+
     def get_prep_time(self) -> float:
         """Return last recorded preprocessing time."""
         return self._last_prep_time
-    
+
     def cleanup(self) -> None:
-        """Clean up temporary files."""
-        # Optionally delete intermediate files
+        """Clean up temporary files and references."""
         self._adapter = None
         self._bridge = None
-        self._g_hetero = None
         self._metapath = None
         self._info = None
