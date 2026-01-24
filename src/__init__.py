@@ -10,14 +10,14 @@ __author__ = "Your Name"
 from .config import config
 from .data import DatasetFactory
 from .kernels import ExactMaterializationKernel, KMVSketchingKernel
-from .bridge import CppBridge, PyGToCppAdapter, AnyBURLRunner
+from .bridge import CppEngine, PyGToCppAdapter, AnyBURLRunner
 
 __all__ = [
     'config',
     'DatasetFactory',
     'ExactMaterializationKernel',
     'KMVSketchingKernel',
-    'CppBridge',
+    'CppEngine',
     'PyGToCppAdapter',
     'AnyBURLRunner'
 ]

@@ -1,12 +1,18 @@
 """
 Interop layer for C++ (graph processing) and Java (AnyBURL) backends.
+Exports clean interfaces and concrete implementations.
 """
 
-from .cpp_adapter import CppBridge, PyGToCppAdapter
+from .base import GraphConverter, RuleMiner, ExecutionEngine
+from .converter import PyGToCppAdapter
+from .engine import CppEngine
 from .anyburl import AnyBURLRunner
 
 __all__ = [
-    'CppBridge',
+    'GraphConverter',
+    'RuleMiner',
+    'ExecutionEngine',
     'PyGToCppAdapter',
+    'CppEngine',
     'AnyBURLRunner'
 ]
