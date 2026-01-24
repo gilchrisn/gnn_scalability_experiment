@@ -1,67 +1,44 @@
-This codebase implements a **Stochastic Graph Materialization Framework** designed to approximate the expensive operations of Heterogeneous Graph Neural Networks (HGNNs).
+This is the **Master Protocol** for your journal extension. It strictly separates the *stochastic* discovery of rules (AnyBURL) from the *stochastic* evaluation of your engine (KMV), ensuring mathematical rigor and reproducibility.
 
-Formally, it addresses the scalability bottleneck of metapath-based neighbor aggregation by relaxing exact boolean matrix multiplication (SpGEMM) into a probabilistic sketch merging problem using **K-Minimum Values (KMV)**.
+### **I. The High-Level Workflow**
 
-Here is the theoretical summary of the implemented system:
+We are building a **Three-Stage Pipeline**. Each stage is isolated to prevent "contamination" between the rule mining variance and your engine's variance.
 
-### 1. Problem Formulation: Exact Materialization
+#### **Stage 1: The "Freezer" (Deterministic Mining)**
 
-Let  be a heterogeneous graph with node type mapping  and edge type mapping .
-A metapath  is defined as a sequence of relations .
+* **Goal:** Obtain the standard set of metapaths used in the original paper.
+* **Constraint:** Must match original paper settings (Snapshot @ 10s, Conf > 0.1).
+* **Action:** Run AnyBURL **once** per dataset with a fixed seed. Save the output to a text file.
+* **Why:** If you re-run this inside the loop, your input data changes every time. You cannot compare "System Speed" if "System Input" is different.
 
-The **Exact Materialization** (implemented in `src/kernels/exact.py`) constructs a homogeneous adjacency matrix  between the source domain  and target domain :
+#### **Stage 2: The "Translator" (Parsing)**
 
-Where  is the adjacency matrix for relation .
+* **Goal:** Convert AnyBURL logic rules into the `rel1,rel2,rel3` string format your engine expects.
+* **Action:** A parser reads the Top-K rules from the "Frozen" file and formats them.
 
-* **Computational Complexity:** For exact SpGEMM, the cost is roughly , where  is the average degree. This explodes geometrically with path length .
+#### **Stage 3: The "Validator" (Experiment Loop)**
 
-### 2. The Approximation: KMV Sketching Kernel
+* **Goal:** Prove the "Stochastic Materialization" hypothesis.
+* **Action:** Iterate through the Top-K paths and run the three modes:
+1. **Exact:** The ground truth (Standard Matrix Multiplication).
+2. **KMV-Static ():** Fast but biased approximation.
+3. **KMV-Dynamic ():** The proposed method (Ensemble Averaging).
 
-The core innovation (`src/kernels/kmv.py`) replaces exact set intersection/reachability with Min-Hash sketching. It relies on the property that the Jaccard similarity between two sets  can be estimated by the overlap of their smallest hashed values.
 
-#### Definition
 
-For a set of nodes , we define a hash function . The KMV sketch  retains the  smallest hash values:
+---
 
-#### Propagation Logic
+### **II. The Constraints Checklist**
 
-Instead of multiplying matrices, the framework propagates sketches along the metapath. For a node  at step  (relation ), the sketch is updated via the union of its neighbors' sketches from step :
+*Since this extends an existing paper, we must adhere to these invariants:*
 
-This reduces the operation from sparse matrix multiplication to **merge-sort of fixed-size arrays**.
+1. **Mining Configuration:**
+* **Software:** AnyBURL-23-1.
+* **Snapshot:** 10 Seconds.
+* **Confidence Threshold:** 0.1.
+* **Constraints:** Cyclic/Acyclic allowed (handled by valid walk checks).
 
-* **Space Complexity:** Reduced from  (worst case density) to .
-* **Time Complexity:** The merge operation is  or  (linear merge) per edge, effectively independent of the global graph density.
 
-### 3. Feature Space Homogenization (Global Universe)
-
-Heterogeneous graphs possess disjoint feature spaces .
-The `GlobalUniverseMapper` (`src/data/mapper.py`) formalizes the unification of these spaces into a single Hilbert space  via a **Direct Sum** approach (Block-Diagonal Padding).
-
-Let  be the feature matrix for type . The global feature matrix  is constructed as:
-
-This ensures orthogonality between features of different types during the initial aggregation phase ( for ), preventing feature interference before the GNN mixing layers.
-
-### 4. Theoretical Diagnostics
-
-The framework includes a `diagnostics` module to mathematically justify *why* low-rank approximation (small ) succeeds.
-
-#### A. Effective Rank (`src/diagnostics/rank.py`)
-
-This measures the redundancy in the feature space of a node's neighborhood. The **Stable Rank** (or numeric rank) of a neighborhood feature matrix  is calculated as:
-
-**Hypothesis:** If , the information content of the neighborhood is low-dimensional, and sampling  nodes (KMV) is theoretically lossless regarding the aggregation function .
-
-#### B. Semantic Distortion (`src/diagnostics/distortion.py`)
-
-This quantifies the information loss caused by approximation using the **Kullback-Leibler (KL) Divergence** between the class distribution induced by the Exact graph () and the Approximate graph ():
-
-where  is the probability that a random walk ending at  lands on a node of class .
-
-### Summary of Formalisms
-
-| Component | Mathematical Formalism | Implementation |
-| --- | --- | --- |
-| **Baseline** | Sparse General Matrix-Matrix Multiplication (SpGEMM) | `ExactMaterializationKernel` |
-| **Approximation** | Min-Wise Independent Permutations (MinHash) | `KMVSketchingKernel` |
-| **Feature Space** | Direct Sum of Vector Spaces () | `GlobalUniverseMapper` |
-| **Justification** | Stable Rank (Spectral Theory) & KL Divergence | `RankAnalyzer`, `DistortionAnalyzer` |
+2. **Reproducibility:**
+* **Global Seed:** `42` (Must be passed to C++ backend).
+* **Persistence:** Mining results must be cached on disk.

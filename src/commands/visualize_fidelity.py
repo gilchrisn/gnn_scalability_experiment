@@ -40,12 +40,14 @@ class VisualizeFidelityCommand(BaseCommand):
         # 2. Extract Z_Exact (Control)
         print("[1/2] Extracting EXACT embeddings...")
         g_exact = backend.materialize_exact()
-        z_exact = self._get_embeddings(g_exact, info, args.model, 'exact')
+        # FIX: Pass args.dataset explicitly
+        z_exact = self._get_embeddings(g_exact, info, args.model, 'exact', args.dataset)
         
         # 3. Extract Z_KMV (Experimental)
         print(f"[2/2] Extracting KMV (k={args.k}) embeddings...")
         g_kmv = backend.materialize_kmv(k=args.k)
-        z_kmv = self._get_embeddings(g_kmv, info, args.model, f'kmv_k{args.k}') # Assumes model name suffix convention
+        # FIX: Pass args.dataset explicitly
+        z_kmv = self._get_embeddings(g_kmv, info, args.model, f'kmv_k{args.k}', args.dataset) 
 
         # 4. Filter to Test Set
         mask = info['masks']['test'].cpu()
@@ -60,37 +62,52 @@ class VisualizeFidelityCommand(BaseCommand):
         print(f"\n[RESULT] Semantic Similarity (CKA): {score:.4f}")
         print("Interpretation: >0.9 is excellent, >0.8 is acceptable for approximation.")
 
-        # 6. Generate Plot (CKA Heatmap or Kernel Visualization)
-        # Since CKA is a scalar between two matrices, to make a heatmap, 
-        # researchers often plot CKA across layers. Since we only have the final layer,
-        # we will plot a correlation heatmap of the first 50 dimensions to show alignment.
-        
+        # 6. Generate Plot
         self._plot_correlation_comparison(z_exact_test, z_kmv_test, score, args.dataset)
 
-    def _get_embeddings(self, graph, info, model_arch, mode_suffix):
+    def _get_embeddings(self, graph, info, model_arch, mode_suffix, dataset_name):
         """
-        Loads the specific model weights for the given mode (Exact/KMV) and runs inference.
-        Note: This assumes you ran 'train_fidelity' first to save these specific weights.
-        For this script, we look for 'dataset_model_mode.pt' convention.
+        Loads model and runs inference with STRICT safety checks.
         """
-        # Construct path based on how TrainFidelity saves it (assumed)
-        # Ideally, train_fidelity should save with these suffixes. 
-        # If not, we fall back to the generic model loader for demonstration.
-        
-        # NOTE: In a real run, ensure TrainFidelityCommand saves as f"{dataset}_{model}_{mode}.pt"
-        # Here we assume the user points to specific checkpoints or we load the generic one
-        # to simulate the process if specific checkpoints aren't found.
-        
         in_dim = graph.x.shape[1]
+        num_nodes = graph.x.shape[0] # The limit of valid IDs
+        
+        # --- SAFETY FIX: Sanitize Graph ---
+        # Ensure we don't have edges pointing to nodes >= num_nodes
+        if graph.edge_index.numel() > 0:
+            max_idx = graph.edge_index.max().item()
+            if max_idx >= num_nodes:
+                print(f" [WARNING] Found invalid edges! Max ID {max_idx} >= Num Nodes {num_nodes}")
+                print(f"           Pruning invalid edges to prevent CUDA crash...")
+                
+                # Filter edges where both source and dest are valid
+                mask = (graph.edge_index[0] < num_nodes) & (graph.edge_index[1] < num_nodes)
+                graph.edge_index = graph.edge_index[:, mask]
+        # ----------------------------------
+
         model = get_model(model_arch, in_dim, info['num_classes'], config.HIDDEN_DIM)
         
-        # Try to load specific checkpoint if exists, else generic
-        # (This logic would be more robust in a production env)
+        # FIX: Use the dataset_name passed explicitly
+        foundation_path = config.get_model_path(dataset_name, model_arch)
+        
+        if os.path.exists(foundation_path):
+            try:
+                print(f" [Info] Loading model weights from: {foundation_path}")
+                model.load_state_dict(torch.load(foundation_path, map_location=config.DEVICE))
+            except Exception as e:
+                print(f" [Warn] Could not load weights ({e}), using random init for visualization.")
+        else:
+            print(f" [Warn] Model path not found: {foundation_path}. Using random init.")
+        
         model.to(config.DEVICE).eval()
         
         with torch.no_grad():
-            # Pad if necessary (handled by model usually, but good to be safe)
-            out = model(graph.x.to(config.DEVICE), graph.edge_index.to(config.DEVICE))
+            # Move data to GPU
+            x = graph.x.to(config.DEVICE)
+            edge_index = graph.edge_index.to(config.DEVICE)
+            
+            # Run Model
+            out = model(x, edge_index)
             
         return out.cpu()
 

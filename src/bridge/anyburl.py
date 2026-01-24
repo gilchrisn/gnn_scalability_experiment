@@ -4,7 +4,7 @@ Handles graph serialization, Java execution, and rule-to-path parsing.
 """
 import os
 import subprocess
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from torch_geometric.data import HeteroData
 
 class AnyBURLRunner:
@@ -24,8 +24,6 @@ class AnyBURLRunner:
         
         self.triples_file = os.path.join(data_dir, "anyburl_triples.txt")
         self.rules_file = os.path.join(data_dir, "anyburl_rules.txt")
-        self.clean_list_file = os.path.join(data_dir, "metapaths_clean.txt")
-        self.gnn_rules_file = os.path.join(data_dir, "gnn-rules") 
         self.config_file = os.path.join(data_dir, "config-learn.properties")
     
     def export_graph(self, g_hetero: HeteroData) -> None:
@@ -46,17 +44,25 @@ class AnyBURLRunner:
                     f.write(f"{src_type}_{u}\t{rel}\t{dst_type}_{v}\n")
         print(f"[AnyBURL] Export complete.")
     
-    def run_mining(self, timeout: int = 60, max_length: int = 4, num_threads: int = 8) -> None:
-        """Generates AnyBURL configuration and executes the Java learning process."""
+    def run_mining(self, timeout: int = 10, max_length: int = 4, num_threads: int = 1, seed: int = 42) -> None:
+        """
+        Generates AnyBURL configuration and executes the Java learning process.
+        
+        Args:
+            timeout: Mining time in seconds (Snapshot).
+            max_length: Maximum path length.
+            num_threads: Worker threads.
+            seed: Random seed for determinism.
+        """
         if os.path.exists(self.rules_file) and os.path.getsize(self.rules_file) > 0:
-            print(f"[AnyBURL] Rules exist; skipping mining.")
+            print(f"[AnyBURL] Rules exist; skipping mining (The Freezer).")
             return
 
         # Prepare path strings for property file (standardizing separators)
         safe_triples = self.triples_file.replace(os.sep, '/')
         safe_rules = self.rules_file.replace(os.sep, '/')
         
-        config = f"""PATH_TRAINING = {safe_triples}
+        config_content = f"""PATH_TRAINING = {safe_triples}
             PATH_OUTPUT = {safe_rules}
             SNAPSHOTS_AT = {timeout}
             WORKER_THREADS = {num_threads}
@@ -64,12 +70,13 @@ class AnyBURLRunner:
             ZERO_RULES_ACTIVE = false
             THRESHOLD_CORRECT_PREDICTIONS = 2
             THRESHOLD_CONFIDENCE = 0.0001
+            RANDOM_SEED = {seed}
         """
         with open(self.config_file, 'w') as f:
-            f.write(config)
+            f.write(config_content)
         
         # Execute learner via subprocess
-        print(f"[AnyBURL] Learning rules (timeout={timeout}s)...")
+        print(f"[AnyBURL] Learning rules (timeout={timeout}s, seed={seed})...")
         cmd = ["java", "-Xmx12G", "-cp", self.jar_path, "de.unima.ki.anyburl.Learn", self.config_file]
         try:
             subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout + 300)
@@ -81,6 +88,8 @@ class AnyBURLRunner:
         if os.path.exists(expected_output):
             if os.path.exists(self.rules_file): os.remove(self.rules_file)
             os.rename(expected_output, self.rules_file)
+        else:
+            print(f"[AnyBURL] Warning: Expected snapshot {expected_output} not found.")
 
     def _smart_parse_rule(self, rule_body: str, start_var: str) -> List[str]:
         """
@@ -128,89 +137,69 @@ class AnyBURLRunner:
                     found = True
                     break
             
-            if not found: break 
+            if not found:
+                break # Break if we can't find the next link in the chain
             
         return path
 
-    def save_clean_list(self) -> str:
-        """Parses learned rules into unique, comma-separated metapaths."""
-        print(f"[AnyBURL] Extracting paths from rules...")
-        if not os.path.exists(self.rules_file): return ""
-
-        unique_paths = set()
+    def get_top_k_paths(self, k: int = 5, min_conf: float = 0.1) -> List[Tuple[float, str]]:
+        """
+        Parses output file to identify top-K paths with highest confidence score.
         
+        Args:
+            k: Number of paths to retrieve.
+            min_conf: Minimum confidence threshold.
+            
+        Returns:
+            List of tuples (confidence, metapath_string)
+        """
+        print(f"[AnyBURL] Parsing Top-{k} paths (Conf > {min_conf})...")
+        if not os.path.exists(self.rules_file): return []
+        
+        valid_rules = []
+
         with open(self.rules_file, 'r') as f:
             for line in f:
-                line = line.strip()
-                if not line or "<=" not in line: continue
                 try:
-                    # Extract starting anchor variable from head
-                    head_part = line.split(" <= ")[0]
-                    start_var = head_part.split("(")[1].split(")")[0].split(",")[0].strip()
+                    line = line.strip()
+                    if not line or "<=" not in line: continue
                     
-                    # Parse body chain
-                    body_part = line.split(" <= ")[1]
+                    parts = line.split("\t")
+                    if len(parts) < 4: continue
+                    
+                    conf = float(parts[2])
+                    if conf < min_conf: continue
+                    
+                    rule_str = parts[3]
+                    
+                    # Validate grounding (filter out specific entity rules)
+                    head_part = rule_str.split(" <= ")[0]
+                    head_args = head_part.split("(")[1].split(")")[0].split(",")
+                    is_grounded = False
+                    for arg in head_args:
+                        if not arg.strip()[0].isupper(): is_grounded = True
+                    if is_grounded: continue
+                    
+                    # Parse body
+                    start_var = head_args[0].strip()
+                    body_part = rule_str.split(" <= ")[1]
                     relations = self._smart_parse_rule(body_part, start_var)
                     
                     if len(relations) >= 2:
                         path_str = ",".join(relations)
-                        unique_paths.add(path_str)
-                except:
-                    continue
+                        valid_rules.append((conf, path_str))
+                except: continue
+
+        # Sort by confidence descending
+        valid_rules.sort(key=lambda x: x[0], reverse=True)
         
-        with open(self.clean_list_file, 'w') as f:
-            for p in sorted(list(unique_paths)):
-                f.write(p + "\n")
+        # Deduplicate while preserving order
+        seen = set()
+        unique_rules = []
+        for conf, path in valid_rules:
+            if path not in seen:
+                unique_rules.append((conf, path))
+                seen.add(path)
+                if len(unique_rules) >= k: break
         
-        print(f"    Exported {len(unique_paths)} paths to {self.clean_list_file}")
-        return self.clean_list_file
-
-    def parse_best_metapath(self, target_head, target_tail, min_confidence=0.001) -> Optional[List[str]]:
-        """Parses output file to identify path with highest confidence score."""
-        print(f"[AnyBURL] Parsing scores and generating ruleset...")
-        if not os.path.exists(self.rules_file): return None
-        
-        best_path = None
-        best_conf = -1.0
-
-        with open(self.gnn_rules_file, 'w') as wf:
-            with open(self.rules_file, 'r') as f:
-                for line in f:
-                    try:
-                        line = line.strip()
-                        if not line or "<=" not in line: continue
-                        
-                        parts = line.split("\t")
-                        if len(parts) < 4: continue
-                        conf = float(parts[2])
-                        rule_str = parts[3]
-                        
-                        body_part = rule_str.split(" <= ")[1]
-                        atoms = body_part.split("), ")
-                        
-                        if len(atoms) >= 2:
-                            wf.write(body_part + '\n')
-                        
-                        # Validate grounding (filter out specific entity rules)
-                        head_part = rule_str.split(" <= ")[0]
-                        head_args = head_part.split("(")[1].split(")")[0].split(",")
-                        is_grounded = False
-                        for arg in head_args:
-                            if not arg.strip()[0].isupper(): is_grounded = True
-                        if is_grounded: continue
-                        
-                        relations = [a.split("(")[0].strip() for a in atoms]
-                        if conf > best_conf:
-                            best_path = relations
-                            best_conf = conf
-                    except: continue
-
-        return best_path
-
-    def export_to_config_format(self, metapath: List[str], output_file: str = "mined_metapath.txt") -> str:
-        """Utility for saving specific metapath selections in a standard key-value format."""
-        output_path = os.path.join(self.data_dir, output_file)
-        with open(output_path, 'w') as f:
-            f.write("# Mined metapath\n")
-            f.write(f"METAPATH = {' -> '.join(metapath)}\n")
-        return output_path
+        return unique_rules

@@ -17,7 +17,7 @@ class LitFullBatchGNN(pl.LightningModule):
     
     def __init__(self, 
                  encoder: torch.nn.Module, 
-                 initial_graph: Data,
+                 initial_graph: Data, 
                  lr: float = 0.01, 
                  weight_decay: float = 5e-4):
         super().__init__()
@@ -80,7 +80,6 @@ class LitFullBatchGNN(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
-    # --- FIX START ---
     def _dummy_loader(self):
         """
         Returns a dummy DataLoader with 1 step.
@@ -88,9 +87,9 @@ class LitFullBatchGNN(pl.LightningModule):
         moving the massive graph data through the CPU-GPU bus unnecessarily.
         """
         dummy_ds = TensorDataset(torch.tensor([0.0]))
-        return DataLoader(dummy_ds, batch_size=1)
+        # FIX: Set num_workers=0 to avoid subprocess overhead for this dummy task
+        return DataLoader(dummy_ds, batch_size=1, num_workers=0)
 
     def train_dataloader(self): return self._dummy_loader()
     def val_dataloader(self): return self._dummy_loader()
     def test_dataloader(self): return self._dummy_loader()
-    # --- FIX END ---

@@ -1,19 +1,15 @@
 """
-Python-to-C++ bridge for graph processing.
-Handles data serialization for C++ ingestion and parsing of generated adjacency lists.
+Python-to-C++ bridge adapter for graph processing.
+
+Converts PyG HeteroData objects into the specific Tab-Separated Value (TSV) 
+format required by the C++ engine (node.dat, link.dat, meta.dat).
 """
 import os
-import subprocess
-import time
 import json
-from typing import Dict, Optional, List
-import torch
 import pandas as pd
-import numpy as np
+from typing import Dict, List, Any
 from tqdm import tqdm
-import torch_geometric.utils as pyg_utils
-from torch_geometric.data import Data, HeteroData
-
+from torch_geometric.data import HeteroData
 
 class CppBridge:
     """
@@ -32,11 +28,14 @@ class CppBridge:
                     mode: str, 
                     rule_file: str, 
                     output_file: str, 
-                    k: Optional[int] = None,
-                    l_val: Optional[int] = 1) -> float:
+                    k: int = None,
+                    l_val: int = 1) -> float:
         """
         Invokes the C++ engine via subprocess.
         """
+        import time
+        import subprocess
+
         cmd: List[str] = [
             self.executable,
             mode,
@@ -51,7 +50,7 @@ class CppBridge:
             cmd.append(str(k))
             cmd.append(str(l_val))
 
-        print(f"   [C++] Exec: {' '.join(cmd)}")
+        print(f"    [C++] Exec: {' '.join(cmd)}")
         start = time.perf_counter()
 
         try:
@@ -62,24 +61,28 @@ class CppBridge:
 
         except subprocess.CalledProcessError as e:
             if "std::bad_alloc" in e.stderr:
-                print("\n   [C++] CRITICAL: Memory allocation failed (OOM).")
+                print("\n    [C++] CRITICAL: Memory allocation failed (OOM).")
                 raise MemoryError("C++ backend exhausted available RAM.") from None
             
-            print(f"\n   [C++] STDERR: {e.stderr}")
-            print(f"   [C++] STDOUT: {e.stdout}")
-            print(f"   [C++] Exit Code: {e.returncode} (Hex: {hex(e.returncode)})")
+            print(f"\n    [C++] STDERR: {e.stderr}")
+            print(f"    [C++] STDOUT: {e.stdout}")
+            print(f"    [C++] Exit Code: {e.returncode}")
             
             raise RuntimeError(f"C++ binary failed with exit code {e.returncode}") from e
 
     def load_result_graph(self, 
                           filepath: str, 
                           num_nodes: int, 
-                          node_offset: int) -> Data:
+                          node_offset: int) -> Any:
         """
         Parses the C++ adjacency list back into PyG format.
         """
+        import torch
+        import torch_geometric.utils as pyg_utils
+        from torch_geometric.data import Data
+
         if not os.path.exists(filepath):
-            print(f"   [C++] Warning: {filepath} not found. Returning empty graph.")
+            print(f"    [C++] Warning: {filepath} not found. Returning empty graph.")
             return Data(edge_index=torch.empty((2, 0), dtype=torch.long), num_nodes=num_nodes)
 
         srcs: List[int] = []
@@ -92,10 +95,10 @@ class CppBridge:
                     if not parts:
                         continue
 
-                    # Format: <src_global_id> <dst1_global_id> <dst2_global_id> ...
                     u_global = parts[0]
                     u_local = u_global - node_offset
 
+                    # Safety check for invalid IDs
                     if u_local < 0 or u_local >= num_nodes:
                         continue
 
@@ -119,115 +122,205 @@ class CppBridge:
 
 class PyGToCppAdapter:
     """
-    Format translator for converting HeteroData to C++ 'node.dat', 'link.dat', and 'meta.dat'.
+    Adapts PyG HeteroData to C++ Engine format.
+    
+    Implements the Adapter Pattern to bridge Python graph structures 
+    with C++ file-based input requirements. Handles data sanitization 
+    and format conversion.
     """
+    
+    # Constant for the header string to ensure exact length match with C++ parser
+    # C++ expects: "Node Number is : " (17 chars)
+    _META_HEADER = "Node Number is : "
 
     def __init__(self, output_dir: str):
+        """
+        Initialize the adapter.
+
+        Args:
+            output_dir: Directory where C++ input files will be written.
+        """
         self.output_dir = output_dir
-        os.makedirs(self.output_dir, exist_ok=True)
+        self._ensure_clean_directory()
+        
+        # State tracking for ID mapping
         self.type_offsets: Dict[str, int] = {}
         self.node_type_mapping: Dict[str, int] = {}
         self.edge_type_mapping: Dict[tuple, int] = {}
 
     def convert(self, g_hetero: HeteroData) -> None:
         """
-        Entry point for graph conversion. Generates node, link, and meta files.
+        Orchestrates the conversion process.
+        
+        Pipeline:
+        1. Validate & Fix Metadata (Handle dirty data)
+        2. Serialize Nodes
+        3. Serialize Edges
+        4. Write Metadata
+        5. Save Offsets
+        
+        Args:
+            g_hetero: The input PyTorch Geometric HeteroData object.
         """
-        node_file = os.path.join(self.output_dir, "node.dat")
-        link_file = os.path.join(self.output_dir, "link.dat")
-        meta_file = os.path.join(self.output_dir, "meta.dat")
+        print("[Adapter] Starting conversion pipeline...")
+        
+        # 1. Validate and fix node counts (Crucial for HGB datasets)
+        real_counts = self._validate_and_fix_metadata(g_hetero)
+        
+        # 2. Write Nodes (node.dat)
+        total_nodes = self._serialize_nodes(g_hetero, real_counts)
+        
+        # 3. Write Edges (link.dat)
+        self._serialize_edges(g_hetero)
+        
+        # 4. Write Meta (meta.dat)
+        self._write_meta(total_nodes)
+        
+        # 5. Save Offsets for backward mapping
+        self._save_offsets()
+        
+        print(f"[Adapter] Conversion complete. Total Nodes: {total_nodes}")
 
-        print(f"[Adapter] Serializing HeteroData to {self.output_dir}...")
-
-        # Clean old files to prevent partial reads
-        for f in [node_file, link_file, meta_file]:
-            if os.path.exists(f): os.remove(f)
-
-        total_nodes = self._write_nodes(g_hetero, node_file)
-        self._write_edges(g_hetero, link_file)
-        self._write_meta(meta_file, total_nodes)
-
-        with open(os.path.join(self.output_dir, "offsets.json"), 'w') as f:
-            json.dump({'offsets': self.type_offsets}, f)
-
-        print(f"[Adapter] Success. Total graph size: {total_nodes} nodes.")
-
-    def _write_nodes(self, g: HeteroData, filepath: str) -> int:
+    def write_rule_file(self, rule_string: str, filename: str = "experiment.rule") -> str:
         """
-        Writes node.dat using pandas for speed and correct formatting.
-        Format: ID \t Name \t Type \t Info
+        Writes a rule string to a file for the C++ engine.
+
+        Args:
+            rule_string: The formatted rule string (e.g., "-1 -2 0 ...").
+            filename: Name of the output file.
+
+        Returns:
+            Absolute path to the created rule file.
         """
+        path = os.path.join(self.output_dir, filename)
+        with open(path, "w") as f:
+            f.write(rule_string)
+        return path
+
+    # =========================================================================
+    # Internal Helper Methods (Private)
+    # =========================================================================
+
+    def _ensure_clean_directory(self) -> None:
+        """Creates directory and removes stale files."""
+        os.makedirs(self.output_dir, exist_ok=True)
+        for f in ["node.dat", "link.dat", "meta.dat"]:
+            path = os.path.join(self.output_dir, f)
+            if os.path.exists(path):
+                os.remove(path)
+
+    def _validate_and_fix_metadata(self, g: HeteroData) -> Dict[str, int]:
+        """
+        Scans edges to ensure node counts encompass all referenced IDs.
+        Fixes 'dirty data' where edge indices exceed declared num_nodes.
+        """
+        print("  -> Validating graph integrity...")
+        real_counts = {nt: g[nt].num_nodes for nt in g.node_types}
+        
+        for src, _, dst in g.edge_types:
+            edge_index = g[src, _, dst].edge_index
+            if edge_index.numel() == 0:
+                continue
+            
+            # Find max ID actually used
+            max_src = edge_index[0].max().item()
+            max_dst = edge_index[1].max().item()
+            
+            # Auto-expand if necessary
+            if max_src >= real_counts[src]:
+                print(f"    [Fix] {src}: Found ID {max_src} >= num_nodes {real_counts[src]}. Expanding.")
+                real_counts[src] = max_src + 1
+                
+            if max_dst >= real_counts[dst]:
+                print(f"    [Fix] {dst}: Found ID {max_dst} >= num_nodes {real_counts[dst]}. Expanding.")
+                real_counts[dst] = max_dst + 1
+                
+        return real_counts
+
+    def _serialize_nodes(self, g: HeteroData, real_counts: Dict[str, int]) -> int:
+        """
+        Writes node.dat. Maps heterogeneous types to global homogeneous IDs.
+        
+        Returns:
+            Total number of nodes written.
+        """
+        print("  -> Serializing nodes...")
+        filepath = os.path.join(self.output_dir, "node.dat")
+        total_nodes = 0
         node_types = sorted(g.node_types)
+        
         self.node_type_mapping = {nt: i for i, nt in enumerate(node_types)}
 
-        global_id = 0
-        for ntype in tqdm(node_types, desc="Processing Node Types"):
-            num_nodes = g[ntype].num_nodes
-            self.type_offsets[ntype] = global_id
+        for ntype in node_types:
+            count = real_counts[ntype]
+            self.type_offsets[ntype] = total_nodes
             type_id = self.node_type_mapping[ntype]
 
-            # Use pandas to handle the writing efficiently and correctly
+            # Enforce column order for C++ parser safety
             df_nodes = pd.DataFrame({
-                'name': [f"{ntype}_{i}" for i in range(num_nodes)],
-                'type': type_id,
-                'info': "" # Empty info column
+                'col1': range(total_nodes, total_nodes + count),
+                'col2': 'IGNORED',
+                'type': type_id
             })
             
-            # We explicitly construct the DataFrame to match the C++ expectation
-            # The Global ID is implicit (line number), but some parsers might expect an ID column.
-            # HNE standard is usually: Name \t Type \t Info (ID is line index)
-            # However, previous successful runs suggested sticking to a simple format.
-            # Let's write: Name \t Type \t Info
+            df_nodes.to_csv(
+                filepath, 
+                mode='a', 
+                sep='\t', 
+                header=False, 
+                index=False, 
+                columns=['col1', 'col2', 'type'] # Strict ordering
+            )
             
-            df_nodes.to_csv(filepath, mode='a', sep='\t', header=False, index=False, quoting=3) # quoting=3 is csv.QUOTE_NONE
-            global_id += num_nodes
+            total_nodes += count
+            
+        return total_nodes
 
-        return global_id
-
-    def _write_edges(self, g: HeteroData, filepath: str) -> None:
-        """
-        Writes link.dat using pandas.
-        Format: SrcID \t DstID \t Type \t Weight
-        """
+    def _serialize_edges(self, g: HeteroData) -> None:
+        """Writes link.dat. Converts local IDs to global IDs."""
+        print("  -> Serializing edges...")
+        filepath = os.path.join(self.output_dir, "link.dat")
         edge_types = sorted(g.edge_types)
         self.edge_type_mapping = {et: i for i, et in enumerate(edge_types)}
 
-        for etype_tuple in tqdm(edge_types, desc="Processing Edge Types"):
-            src_type, rel, dst_type = etype_tuple
+        for etype_tuple in tqdm(edge_types, desc="    Processing Edge Types"):
+            src_type, _, dst_type = etype_tuple
             etype_id = self.edge_type_mapping[etype_tuple]
-
-            src_offset = self.type_offsets[src_type]
-            dst_offset = self.type_offsets[dst_type]
 
             edge_index = g[etype_tuple].edge_index.cpu().numpy()
             if edge_index.shape[1] == 0:
                 continue
 
+            # Map local IDs to global IDs
+            src_offset = self.type_offsets[src_type]
+            dst_offset = self.type_offsets[dst_type]
+
             srcs_global = edge_index[0] + src_offset
             dsts_global = edge_index[1] + dst_offset
             
-            # Create DataFrame for bulk write
-            edge_data = pd.DataFrame({
+            df_edges = pd.DataFrame({
                 'src': srcs_global,
                 'dst': dsts_global,
-                'type': etype_id,
-                'weight': 1.0
+                'type': etype_id
             })
             
-            # quoting=3 (QUOTE_NONE) ensures no quotes are added around numbers
-            edge_data.to_csv(filepath, mode='a', sep='\t', header=False, index=False, quoting=3)
+            df_edges.to_csv(
+                filepath, 
+                mode='a', 
+                sep='\t', 
+                header=False, 
+                index=False, 
+                columns=['src', 'dst', 'type'] # Strict ordering
+            )
 
-    def _write_meta(self, filepath: str, total_nodes: int) -> None:
-        """
-        Creates a valid meta.dat file to prevent parser crashes.
-        """
-        with open(filepath, 'w') as f:
-            f.write(f"Total Nodes: {total_nodes}\n")
-            f.write("Generated by PyGToCppAdapter\n")
-            f.write("=" * 50 + "\n")
+    def _write_meta(self, total_nodes: int) -> None:
+        """Writes meta.dat with the required handshake header."""
+        path = os.path.join(self.output_dir, "meta.dat")
+        with open(path, 'w') as f:
+            f.write(f"{self._META_HEADER}{total_nodes}\n")
 
-    def write_rule_file(self, rule_string: str, filename: str = "experiment.rule") -> str:
-        path = os.path.join(self.output_dir, filename)
-        with open(path, "w") as f:
-            f.write(rule_string)
-        return path
+    def _save_offsets(self) -> None:
+        """Saves offsets to JSON for result reconstruction."""
+        path = os.path.join(self.output_dir, "offsets.json")
+        with open(path, 'w') as f:
+            json.dump({'offsets': self.type_offsets}, f)
