@@ -2,6 +2,7 @@
 AnyBURL implementation of the RuleMiner interface.
 Handles graph serialization to triples, Java execution, and rule parsing.
 """
+import re
 import os
 import subprocess
 from typing import Optional, List, Tuple, Dict, Any
@@ -110,22 +111,63 @@ class AnyBURLRunner(RuleMiner):
         return unique
 
     def _parse_single_line(self, line: str, min_conf: float) -> Optional[Tuple[float, str]]:
-        """Helper to parse a single rule line."""
+        """
+        Parses a single AnyBURL rule line, resolving FOL variable bindings 
+        into a strict directed sequential metapath.
+        """
         line = line.strip()
         parts = line.split("\t")
         if len(parts) < 4: return None
         
-        conf = float(parts[2])
+        try:
+            conf = float(parts[2])
+        except ValueError:
+            return None
+            
         if conf < min_conf: return None
         
         rule_str = parts[3]
-        if "author_" in rule_str or "paper_" in rule_str: return None # Filter grounded rules
         
-        # Simple extraction logic (can be expanded)
-        body = rule_str.split(" <= ")[1]
+        # Filter grounded rules (those with specific node IDs)
+        if re.search(r'[a-z]+_\d+', rule_str): return None 
+        
+        try:
+            # Isolate the body: target(X,Y) <= rel1(X,A), rel2(Y,A) -> rel1(X,A), rel2(Y,A)
+            body = rule_str.split(" <= ")[1]
+        except IndexError:
+            return None
+            
         atoms = body.split(", ")
-        relations = [a.split("(")[0] for a in atoms]
+        relations = []
+        current_var = None
         
+        for i, atom in enumerate(atoms):
+            # Parse atom: relation_name(var1, var2)
+            # Lifted rules use uppercase letters for variables (X, Y, A, B, etc.)
+            match = re.match(r'([a-zA-Z0-9_]+)\(([A-Z]),([A-Z])\)', atom)
+            if not match: 
+                return None
+            
+            rel, v1, v2 = match.groups()
+            
+            # Initialize the walk at the source of the first atom (usually 'X')
+            if i == 0:
+                current_var = v1
+                
+            # Determine traversal direction based on variable tracking
+            if current_var == v1:
+                # Forward traversal: current_var -> v2
+                relations.append(rel)
+                current_var = v2
+            elif current_var == v2:
+                # Backward traversal: current_var -> v1
+                relations.append(f"rev_{rel}")
+                current_var = v1
+            else:
+                # The rule is disjointed or branches in a way that 
+                # cannot be represented as a single sequential walk.
+                return None
+                
         if len(relations) >= 2:
             return (conf, ",".join(relations))
         return None

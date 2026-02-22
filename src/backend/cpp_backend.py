@@ -105,7 +105,7 @@ class CppBackend(GraphBackend):
         self._last_prep_time = prep_time
         return g_result
 
-    def materialize_kmv(self, k: int) -> Data:
+    def materialize_kmv(self, k: int, seed: int = 42) -> Data:
         """
         Execute C++ KMV materialization.
         """
@@ -120,7 +120,8 @@ class CppBackend(GraphBackend):
             rule_file=self._rule_path,
             output_file=base_output_file,
             k=k,
-            l_val=self.num_sketches
+            l_val=self.num_sketches,
+            seed=seed
         )
 
         # Logic Patch: Robust File Discovery
@@ -221,17 +222,26 @@ class CppBackend(GraphBackend):
         return " ".join(rule_parts)
 
     def _resolve_output_filename(self, base_file: str) -> str:
-        """Handles discovering _0 suffix if C++ added it."""
+        """
+        Handles discovering _0 suffix if C++ added it.
+        
+        [FIX] Priority inverted: Always check for the indexed file ('_0') first.
+        The C++ 'sketch' mode ALWAYS creates indexed output (e.g., filename_0.txt).
+        Checking base_file first is dangerous because it might exist as an empty 
+        placeholder created by the binary's file handle logic.
+        """
+        base_name, ext = os.path.splitext(base_file)
+        suffixed_file = f"{base_name}_0{ext}"
+        
+        # Priority 1: Check for the guaranteed C++ output format
+        if os.path.exists(suffixed_file):
+            return suffixed_file
+            
+        # Priority 2: Fallback to base file (legacy or different mode)
         if os.path.exists(base_file):
             return base_file
         
-        base_name, ext = os.path.splitext(base_file)
-        alt_file = f"{base_name}_0{ext}"
-        
-        if not os.path.exists(alt_file):
-             raise FileNotFoundError(f"[CppBackend] Output missing. Checked {base_file} and {alt_file}")
-        
-        return alt_file
+        raise FileNotFoundError(f"[CppBackend] Output missing. Checked {suffixed_file} and {base_file}")
 
     def _attach_metadata(self, g_result: Data) -> None:
         """Helper to attach features, labels, and masks to the raw structure."""

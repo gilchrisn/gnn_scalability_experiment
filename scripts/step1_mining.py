@@ -19,8 +19,9 @@ from src.bridge import AnyBURLRunner
 
 # --- Configuration ---
 TARGET_DATASETS = ["HGB_ACM", "HGB_DBLP", "HGB_IMDB", "HGB_Freebase"]
+# TARGET_DATASETS = ["HGB_Freebase"]
 MINING_TIMEOUT = 3600  # Seconds
-MIN_CONFIDENCE = 0.01
+MIN_CONFIDENCE = 0.05
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ class MiningOrchestrator:
         # 4. Run Mining Process
         runner.run_mining(
             timeout=MINING_TIMEOUT, 
-            max_length=4, 
+            max_length=2, 
             num_threads=4
         )
         

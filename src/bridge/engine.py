@@ -2,6 +2,7 @@
 C++ Execution Engine implementation.
 Handles subprocess calls and result parsing for the graph_prep binary.
 """
+import cmd
 import os
 import time
 import subprocess
@@ -23,36 +24,59 @@ class CppEngine(ExecutionEngine):
         if not os.path.exists(executable_path):
             raise FileNotFoundError(f"C++ binary missing: {executable_path}")
 
-    def run_command(self, mode: str, rule_file: str, output_file: str, k: int = None, l_val: int = 1) -> float:
+    def _sanitize_path(self, path: str) -> str:
         """
-        Invokes the C++ engine via subprocess.
+        Forces forward slashes for C++ argument compatibility, specifically on Windows.
+        The C++ standard library or specific argument parsers can sometimes choke on backslashes
+        in file paths when passed via subprocess.
         """
-        cmd: List[str] = [
-            self.executable,
-            mode,
-            self.data_dir,
-            rule_file,
-            output_file
-        ]
+        return os.path.abspath(path).replace('\\', '/')
+    
+    def run_command(self, mode: str, rule_file: str, output_file: str, 
+                    k: int = None, l_val: int = 1, seed: int = None) -> float:
+        """
+        Invokes the C++ engine. Parses internal algorithmic timer if available,
+        otherwise falls back to total end-to-end execution time.
+        """
+        bin_path = self._sanitize_path(self.executable)
+        data_path = self._sanitize_path(self.data_dir)
+        rule_path = self._sanitize_path(rule_file)
+        out_path = self._sanitize_path(output_file)
+
+        cmd: List[str] = [bin_path, mode, data_path, rule_path, out_path]
 
         if mode == 'sketch':
             if k is None:
                 raise ValueError("Argument 'k' is required for sketch mode.")
             cmd.append(str(k))
             cmd.append(str(l_val))
+            if seed is not None:
+                cmd.append(str(seed))
 
         print(f"    [C++] Exec: {' '.join(cmd)}")
-        start = time.perf_counter()
+        start_fallback = time.perf_counter()
 
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-            return time.perf_counter() - start
+            res = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            
+            # 1. Try to intercept Pure C++ Algorithmic Time (For Benchmarking Mode)
+            for line in res.stdout.split('\n'):
+                line = line.strip().lower()
+                if line.startswith("time:"):
+                    try:
+                        return float(line.split(":")[1].strip())
+                    except ValueError:
+                        pass
+                        
+            # 2. Fallback to Total Pipeline Time (For Data Generation Mode like 'sketch')
+            return time.perf_counter() - start_fallback
 
         except subprocess.CalledProcessError as e:
             if "std::bad_alloc" in e.stderr:
                 raise MemoryError("C++ backend exhausted available RAM.") from None
             
             print(f"\n    [C++] STDERR: {e.stderr}")
+            print(f"    [C++] STDOUT: {e.stdout}")
             raise RuntimeError(f"C++ binary failed with exit code {e.returncode}") from e
 
     def load_result(self, filepath: str, num_nodes: int, node_offset: int) -> Data:
