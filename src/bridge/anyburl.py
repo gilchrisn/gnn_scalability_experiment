@@ -2,8 +2,8 @@
 AnyBURL implementation of the RuleMiner interface.
 Handles graph serialization to triples, Java execution, and rule parsing.
 """
-import re
 import os
+import re
 import subprocess
 from typing import Optional, List, Tuple, Dict, Any
 from torch_geometric.data import HeteroData
@@ -112,7 +112,7 @@ class AnyBURLRunner(RuleMiner):
 
     def _parse_single_line(self, line: str, min_conf: float) -> Optional[Tuple[float, str]]:
         """
-        Parses a single AnyBURL rule line, resolving FOL variable bindings 
+        Parses a single AnyBURL rule line, resolving FOL variable bindings
         into a strict directed sequential metapath.
         """
         line = line.strip()
@@ -164,7 +164,7 @@ class AnyBURLRunner(RuleMiner):
                 relations.append(f"rev_{rel}")
                 current_var = v1
             else:
-                # The rule is disjointed or branches in a way that 
+                # The rule is disjointed or branches in a way that
                 # cannot be represented as a single sequential walk.
                 return None
                 

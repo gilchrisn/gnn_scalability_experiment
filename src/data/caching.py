@@ -7,7 +7,8 @@ import torch
 import json
 from typing import Dict, Any, Optional
 import hashlib
-from .. import config
+from ..config import config  # FIX: was `from .. import config` which relies on __init__ re-export
+
 
 class BaselineCache:
     """
@@ -34,7 +35,7 @@ class BaselineCache:
         raw_str = f"{dataset}|{model_name}|{timestamp}|{metapath.strip().replace(' ', '')}"
         return hashlib.md5(raw_str.encode()).hexdigest()
 
-    def save(self, dataset: str, model: str, metapath: str, data: Dict[str, torch.Tensor]):
+    def save(self, dataset: str, model: str, metapath: str, data: Dict[str, torch.Tensor]) -> None:
         """Saves baseline tensors."""
         filename = f"{self._get_hash(dataset, model, metapath)}.pt"
         path = os.path.join(self.cache_dir, filename)

@@ -6,6 +6,7 @@ from .analyze import AnalyzeCommand
 from .compare import CompareCommand
 from .train_fidelity import TrainFidelityCommand
 from .visualize_fidelity import VisualizeFidelityCommand
+from .mlp_baseline import MLPBaselineCommand
 
 __all__ = [
     'BaseCommand',
@@ -15,5 +16,6 @@ __all__ = [
     'AnalyzeCommand',
     'CompareCommand',
     'TrainFidelityCommand',
-    'VisualizeFidelityCommand'
+    'VisualizeFidelityCommand',
+    'MLPBaselineCommand',
 ]

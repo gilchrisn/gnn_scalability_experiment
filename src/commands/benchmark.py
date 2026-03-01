@@ -2,6 +2,7 @@ import time
 import os
 import torch
 import gc
+import json
 import pandas as pd
 import torch.nn.functional as F
 from argparse import Namespace
@@ -9,7 +10,7 @@ from typing import List, Tuple
 
 from .base import BaseCommand
 from ..config import config
-from ..data import DatasetFactory, BaselineCache  # Removed ArtifactManager
+from ..data import DatasetFactory, BaselineCache
 from ..backend import BackendFactory, BenchmarkResult
 from ..utils import generate_random_metapath, SchemaMatcher
 from ..models import get_model
@@ -18,7 +19,7 @@ from ..analysis import CosineFidelityMetric, PredictionAgreementMetric
 class BenchmarkCommand(BaseCommand):
     """
     Executes benchmark: Materialization Speed + Model Fidelity.
-    
+
     Features:
     1. Fidelity Checking: Compares Approximate vs. Exact embeddings.
     2. Full Loading: Always loads fresh data from source.
@@ -30,9 +31,9 @@ class BenchmarkCommand(BaseCommand):
         print(f"Method: {args.method.upper()} (k={args.k}) | Backend: {args.backend.upper()}")
         print(f"{'='*60}\n")
 
-        # --- 1. Data Loading Strategy (Full Load Only) ---
+        # --- 1. Data Loading ---
         dataset_cfg = config.get_dataset_config(args.dataset)
-        
+
         print(f"Loading dataset: {dataset_cfg}...")
         g_hetero, info = DatasetFactory.get_data(
             dataset_cfg.source,
@@ -40,19 +41,21 @@ class BenchmarkCommand(BaseCommand):
             dataset_cfg.target_node
         )
         print(f"      Graph size: {g_hetero.num_nodes} nodes.")
-        
-        # Enrich info with schema for consistency
+
         info['schema'] = {
             'node_types': sorted(list(g_hetero.node_types)),
             'edge_types': sorted(list(g_hetero.edge_types))
         }
 
-        # --- 2. Setup Model & Metrics (If Fidelity Requested) ---
+        # --- 2. Setup Model & Metrics ---
         model = None
+        target_dim = None
         exact_baseline_out = None
-        
+
         if args.check_fidelity:
-            model = self._load_model(args.dataset, args.model, info)
+            # FIX: _load_model now returns (model, target_dim) to avoid
+            # fragile model.conv1.in_channels attribute access.
+            model, target_dim = self._load_model(args.dataset, args.model, info)
             metric_cos = CosineFidelityMetric()
             metric_agree = PredictionAgreementMetric()
 
@@ -76,77 +79,63 @@ class BenchmarkCommand(BaseCommand):
 
         # --- 4. Initialize Backend ---
         print(f"\nInitializing {args.backend} backend...")
-        backend = BackendFactory.create(args.backend, 
+        backend = BackendFactory.create(args.backend,
                                         executable_path=config.CPP_EXECUTABLE,
                                         temp_dir=config.TEMP_DIR,
                                         device=config.DEVICE)
-        
+
         backend.initialize(g_hetero, metapath, info)
 
-        # Memory optimization: Free Python graph before C++ execution
         if args.backend == 'cpp' and g_hetero is not None:
             print("[System] Deallocating Python source graph to free RAM for C++...")
             del g_hetero
             gc.collect()
 
-        # Initialize Cache
         baseline_cache = BaselineCache(config.TEMP_DIR)
         exact_baseline_out = None
 
-        # --- 5 & 6. Combined Materialization & Baseline Logic ---
-        
-        # CASE A: The user is running EXACT. This is the "Producer" run.
+        # --- 5 & 6. Materialization ---
+
         if args.method == 'exact':
             print(f"\n[Target] Running EXACT Materialization...")
             start_t = time.perf_counter()
             g_target = backend.materialize_exact()
-            
-            # Helper logic to capture prep time (fallback if backend doesn't provide it)
+
             prep_time = backend.get_prep_time()
             if prep_time <= 0: prep_time = time.perf_counter() - start_t
 
-            # If we need fidelity (or just want to populate cache), we run inference now
             if args.check_fidelity:
                 with torch.no_grad():
-                    # Using your existing _pad_features
-                    x_target = self._pad_features(g_target.x, model.conv1.in_channels)
+                    x_target = self._pad_features(g_target.x, target_dim)
                     out_target = model(x_target, g_target.edge_index.to(config.DEVICE))
-                
-                # SAVE TO CACHE
+
                 print("[Cache] Saving Exact results to disk...")
                 baseline_cache.save(args.dataset, args.model, path_str, {
                     'logits': out_target.cpu()
                 })
-                
-                # For Exact, the target IS the baseline
+
                 exact_baseline_out = out_target
 
-        # CASE B: The user is running KMV/RANDOM. This is the "Consumer" run.
         else:
-            # 1. First, establish the baseline (Try Cache -> Fallback to Compute)
             if args.check_fidelity:
                 print("\n[Baseline] Checking cache for Exact Baseline...")
                 cached_data = baseline_cache.load(args.dataset, args.model, path_str)
-                
+
                 if cached_data is not None:
-                    # CACHE HIT: Instant load
                     exact_baseline_out = cached_data['logits'].to(config.DEVICE)
                 else:
-                    # CACHE MISS: Compute strictly as fallback (The old slow way)
                     print(" -> Cache miss. Computing Exact Baseline on-the-fly...")
                     g_exact = backend.materialize_exact()
                     with torch.no_grad():
-                        x_ex = self._pad_features(g_exact.x, model.conv1.in_channels)
+                        x_ex = self._pad_features(g_exact.x, target_dim)
                         exact_baseline_out = model(x_ex, g_exact.edge_index.to(config.DEVICE))
-                    
-                    # Clean up strictly
+
                     del g_exact
                     gc.collect()
 
-            # 2. Now run the actual Target Materialization (KMV/Random)
             print(f"\n[Target] Running {args.method.upper()} Materialization...")
             start_t = time.perf_counter()
-            
+
             if args.method == 'kmv':
                 g_target = backend.materialize_kmv(k=args.k)
             elif args.method == 'random':
@@ -156,7 +145,6 @@ class BenchmarkCommand(BaseCommand):
             else:
                 raise ValueError(f"Unknown method: {args.method}")
 
-            # Capture timing
             prep_time = backend.get_prep_time()
             if prep_time <= 0: prep_time = time.perf_counter() - start_t
 
@@ -176,10 +164,9 @@ class BenchmarkCommand(BaseCommand):
 
         if args.check_fidelity:
             with torch.no_grad():
-                x_target = self._pad_features(g_target.x, model.conv1.in_channels)
+                x_target = self._pad_features(g_target.x, target_dim)
                 out_target = model(x_target, g_target.edge_index.to(config.DEVICE))
-                
-                # Accuracy
+
                 if 'masks' in info and 'test' in info['masks']:
                     mask = info['masks']['test'].to(config.DEVICE)
                     labels = info['labels'].to(config.DEVICE)
@@ -187,15 +174,13 @@ class BenchmarkCommand(BaseCommand):
                     acc = (pred == labels[mask]).float().mean().item()
                     stats["Acc"] = acc
 
-                # Fidelity Metrics (Compare against Baseline)
                 if exact_baseline_out is not None:
-                    # Filter only test nodes
                     emb_a = exact_baseline_out[mask]
                     emb_b = out_target[mask]
-                    
+
                     stats["Fidelity"] = metric_cos.calculate(emb_a, emb_b)
                     stats["Agreement"] = metric_agree.calculate(exact_baseline_out[mask], out_target[mask])
-                
+
                 print(f"  -> Acc: {stats['Acc']:.4f} | Fid: {stats['Fidelity']:.4f} | Agree: {stats['Agreement']:.4f}")
 
         # --- 8. Save Results ---
@@ -209,31 +194,43 @@ class BenchmarkCommand(BaseCommand):
         rels = path_str.split(',')
         for r in rels:
             r = r.strip()
-            # SchemaMatcher is robust enough to handle dummy g_hetero if edge_types are present
             matched_edge = SchemaMatcher.match(r, g_hetero)
             tuples.append(matched_edge)
         return tuples
 
-    def _load_model(self, dataset, model_name, info):
+    def _load_model(self, dataset: str, model_name: str, info: dict) -> Tuple[torch.nn.Module, int]:
+        """
+        Loads a trained model and its mapper configuration.
+
+        Returns:
+            Tuple of (model, target_dim) where target_dim is the global_max_dim
+            from the mapper. Use target_dim explicitly for feature padding rather
+            than accessing model internals like conv1.in_channels, which breaks
+            if the architecture changes.
+        """
         model_path = config.get_model_path(dataset, model_name)
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model weights not found at {model_path}")
-            
-        import json
+
         with open(model_path.replace('.pt', '_mapper.json'), 'r') as f:
             mapper_cfg = json.load(f)
-            
-        model = get_model(model_name, mapper_cfg['global_max_dim'], info['num_classes'], config.HIDDEN_DIM)
+
+        target_dim: int = mapper_cfg['global_max_dim']
+
+        model = get_model(model_name, target_dim, info['num_classes'], config.HIDDEN_DIM)
         model.load_state_dict(torch.load(model_path, map_location=config.DEVICE))
         model.to(config.DEVICE).eval()
-        return model
 
-    def _pad_features(self, x, target_dim):
+        return model, target_dim
+
+    def _pad_features(self, x: torch.Tensor, target_dim: int) -> torch.Tensor:
+        """Pads feature matrix to target_dim if needed."""
         x = x.to(config.DEVICE)
-        if x.size(1) == target_dim: return x
+        if x.size(1) == target_dim:
+            return x
         return F.pad(x, (0, target_dim - x.size(1)), "constant", 0)
 
-    def _save_to_csv(self, stats, filepath):
+    def _save_to_csv(self, stats: dict, filepath: str) -> None:
         df = pd.DataFrame([stats])
         header = not os.path.exists(filepath)
         df.to_csv(filepath, mode='a', header=header, index=False)
