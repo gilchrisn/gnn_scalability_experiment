@@ -3,7 +3,6 @@ hehe.sh
 .venv/
 
 
-markdown/
 HUB/
 bin/
 checkpoints/
@@ -24,9 +23,5 @@ IMPORTANT_REMINDER.md
 script.ps1
 
 HGB*
-ignore
 lightning_logs
-justifications
-documents
 global_res
-todo

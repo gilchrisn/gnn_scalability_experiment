@@ -1,0 +1,1384 @@
+\begin{abstract}
+Relational graphs encapsulate nontrivial inherent interactions among entities in heterogeneous data sources. Identifying \emph{hubs} in relational graphs is vital in various applications such as fraud detection, influence analysis, and protein complex discovery. However, building relational graphs induced by meta-paths on heterogeneous data entails substantial costs, thus hindering efficient hub discovery. In this paper, we propose a novel sketch propagation framework for approximate hub queries in induced relational graphs that avoids explicitly materializing those graphs. Our framework specifically supports hub queries that ask for all nodes whose centrality scores, based on \emph{degree} or \emph{h-index}, are in the top quantile with provable guarantees under the notion of~$\epsilon$-separable sets. In addition, we devise pruning techniques that efficiently process \emph{personalized} hub queries asking whether a given node is a hub. Extensive experiments on real-world and synthetic data confirm the efficacy and efficiency of our proposals, which achieve orders of magnitude speed-ups over exact methods while consistently attaining accuracy beyond~90\%.
+\end{abstract}
+\begin{IEEEkeywords}
+hub query, relational graph, degree centrality, h-index, KMV sketch.
+\end{IEEEkeywords}
+
+
+\section{Introduction}
+\label{sec:intro}
+
+The graph model has been widely used to denote relationships between different entities and to support data mining tasks across domains \cite{jiang2024spade+, ji2022detecting, li2024sefraud, liu2022user,niu2024discovering}. Application needs often necessitate \emph{inducing} composite relationships from heterogeneous data using meta-paths \cite{sun2011pathsim, fang2020effective, zheng2017entity} and representing them via \emph{relational graphs}. For example, on e-commerce platforms, market segmentation relies on community analysis in such \emph{induced} relational graphs that link customers with shared shopping preferences via meta-paths such as ``(\emph{customer}) $\rightarrow$ (\emph{product}) $\leftarrow$ (\emph{customer})''. Nevertheless, building such induced graphs is resource-intensive due to the cost of ``\textsf{join}'' operations on heterogeneous data~\cite{xirogiannopoulos2017extracting}. Moreover, although several studies have focused on accelerating relational graph materialization \cite{chatzopoulos2023atrapos, guo2024efficient, shi2016constrained, sun2011pathsim}, these methods are unsuitable for online business applications that require real-time on-demand analysis over time spans, rendering full materialization infeasible.
+
+To address these challenges, we propose the analysis of induced relational graphs without full materialization. As a pioneer effort in this direction, we focus on \emph{hub queries} (\ced), which find important nodes in a relational graph according to a given \emph{centrality measure}.
+
+\myp{Applications} \ced queries in relational graphs find applications in a variety of real-world scenarios, including:
+\begin{itemize}[leftmargin=*]
+    \item \etitle{Fraud Detection:} In an e-commence platform, by identifying hubs in relational graphs induced by ``(\emph{account}) $\rightarrow$ (\emph{transaction}) $\leftarrow$ (\emph{account})'' from transactional data, we can uncover financial accounts with an abnormally large number of interactions with other accounts, which might indicate the existence of money laundering \cite{cao2017hitfraud}.
+    \item \etitle{Influence Analysis:} Hubs in a co-author network induced by ``(\emph{author}) $\rightarrow$ (\emph{paper}) $\leftarrow$ (\emph{author})'' \cite{mihara2015influence} denote influential researchers who are active in general domains. Moreover, hubs in a venue-filtered co-author network induced by meta-paths, e.g., ``(\emph{author}) $\rightarrow$ (\emph{paper}, \emph{venue}=`DB') $\leftarrow$ (\emph{author})'', reveal influencers in specific research areas \cite{shi2016constrained, li2014hrank}.
+    \item \etitle{Protein Complex Discovery:} The protein-protein interaction (PPI) networks induced by meta-paths such as ``(\emph{protein}) $\rightarrow$ (\emph{pathway}) $\leftarrow$ (\emph{protein})'' from protein databases such as \textsf{STRING} (see \url{https://string-db.org/}) and \textsf{Reactome} (see \url{https://reactome.org/}) capture collective interactions among proteins in physiological pathways. Hubs in a PPI network are vital for the discovery of protein complexes \cite{wu2009core, srihari2013survey}.
+\end{itemize}
+
+\myp{Our Contributions}
+We first consider \ced queries based on degree centrality. Inspired by cardinality sketches \cite{estan2003bitmap, alon1996space, durand2003loglog, heule2013hyperloglog, gibbons2001distinct}, we propose a novel sketch propagation framework for \ced queries on relational graphs with provable approximation guarantees. Specifically, we construct a \emph{neighborhood cardinality} sketch for each node to estimate its degree in the relational graph by iteratively propagating sketches along edges in matching instances of the given meta-path~$\mset$. Therefore, instead of computing the degree of each node after materialization, we collectively estimate the degrees of all nodes through a \emph{single} propagation process, which substantially improves the efficiency of processing \ced queries under degree centrality.
+
+Then, we extend the sketch framework to approximate \ced queries based on the h-index \cite{LuZZS16}, which requires higher-order neighborhood information. Specifically, a key challenge is that the h-index of a node depends, in addition to its own degree, on the degrees of its neighbors, while cardinality sketches can only provide information on a node's own degree. To address this issue, we propose a \emph{pivot-based} algorithm built on the sketch propagation process. Instead of directly estimating h-indexes, we recursively find the nodes whose h-indexes reach or exceed that of a randomly chosen pivot node using sketches, in a quicksort-like fashion. As such, we can skip the nodes that cannot be hubs to process h-index-based \ced queries more efficiently. Note that we consider the $h$-index as a representative of centrality measures based on higher-order neighborhoods. By employing similar techniques, our framework can also be adapted to support other higher-order centrality measures, such as the i10-index and g-index \cite{egghe2006theory}. Furthermore, our framework can be extended to support closeness centrality \cite{olsen2014efficient, bergamini2019computing} by propagating cardinality sketches over the matching instances of $\mset$ in multiple iterations to estimate the number of nodes at different distances from each node in the relational graph.
+
+Furthermore, we devise efficient pruning methods to answer \emph{personalized} \ced queries, that is, to determine whether a given node is a hub. Specifically, we maintain a lower bound on the number of nodes with centrality scores higher than the query node and terminate the sketch propagation process when that lower bound exceeds a given threshold. This early termination mechanism can accelerate personalized \ced queries based on both degree and h-index centrality measures.
+
+Under the notion of $\epsilon$-separable sets, we show that the sketch propagation framework provides \emph{unbiased and efficient} approximations for \ced queries based on both centrality measures. The experiments reveal that the estimations converge much more quickly than the worst-case bound on the number of propagation iterations, achieving orders of magnitude speedups over exact methods.
+
+Our main contributions are summarized as follows.
+\begin{itemize}[leftmargin=*]
+  \item We introduce the novel problem of hub queries (\ced) based on the degree and h-index centrality measures over relational graphs induced by meta-paths (Sect.~\ref{sec:preli}).
+  \item We propose a \emph{sketch propagation} framework for approximate degree-based \ced queries and extend it to personalized \ced queries with early termination (Sect.~\ref{sec:scopeprop}).
+  \item We devise a \emph{pivot-based} algorithm, also with early termination, for approximate (personalized) \ced queries using the h-index measure (Sect.~\ref{sec:hindex}).
+  \item We show that our methods can scale well to massive graphs in which state-of-the-art exact methods fail to terminate in a reasonable time and mostly achieve orders of magnitude speedups over them while yielding accuracy beyond~90\%. We conduct case studies to indicate that our methods serve as seeding strategies comparable to state-of-the-art methods for influence analysis on relational graphs (Sect.~\ref{sec:exp}).
+\end{itemize}
+
+
+\section{Preliminaries}
+\label{sec:preli}
+
+\subsection{Notation and Problem Formulation}
+
+We model a heterogeneous data source as a knowledge graph (KG).
+However, our formulation and methodology are independent of the data format and can be easily adapted to other data sources such as RDBMS.
+
+We denote a KG as $\gset=(\vset, \eset, \lset)$ with $\vset$ and $\eset$ representing the sets of node and edge instances.
+An edge instance $e = (u, v) \in \eset$ connects two nodes $u, v \in \vset$.
+The type function $\lset$ maps each node or edge instance, $v$ or $e$, to its type, $\lset(v)$ or $\lset(e)$.
+For simplicity of presentation, we assume that $\lset(e)$ is determined by the type of its end nodes.
+Nevertheless, our methods can also handle more complex scenarios.
+
+\emph{Meta-paths} are commonly used to induce relational graphs from heterogeneous data \cite{fang2020effective, yang2020effective}.
+We provide the definitions of \emph{meta-path} and its \emph{matching instances} on the KG as follows:
+\begin{definition}[Meta-path]
+  An $L$-hop meta-path is a sequence of node types denoted as $\mset=(x_0, x_1, \dots, x_{L-1}, x_{L})$, where~$x_i$ is the type of the~$i$-th node. The inverse of $\mset$ is denoted as $\mset^{-1}=(x_L, x_{L-1}, \dots, x_1,x_0)$. 
+\end{definition}
+Although our methods support any meta-path~$\mset$, following the established convention \cite{fang2020effective, yang2020effective,jiang2022effective}, we only consider symmetric meta-paths to induce homogeneous relational graphs. A meta-path $\mset$ is symmetric if $\mset=\mset^{-1}$.
+\begin{definition}[Matching Instance]
+  A matching instance $M$ to a meta-path $\mset$ is a sequence of node instances in $\gset$ denoted by $M=(v_0, v_1,\dots,v_{L-1}, v_L) \triangleright \mset$ satisfying:
+  \begin{enumerate}
+    \item $\forall i\in\{0, \dots,L\}$, $\lset(v_i)=x_i$;
+    \item $\forall i\in\{0, \dots,L-1\}$, $(v_i, v_{i+1}) \in \eset$.
+  \end{enumerate}
+  We use $M(x_i)$ to denote the node $v_i$ in $M$.
+\end{definition}
+
+\begin{definition}[Relational Graph]
+  For a KG $\gset$, a (symmetric) meta-path $\mset$ induces a relational graph $H_\mset = (V_\mset, E_\mset)$, where $V_\mset$ contains all nodes in $\vset$ that match $x_0$ in any instance of $\mset$ and $E_\mset$ consists of all edges $(u,v)$ for any two nodes $u, v \in V_\mset$ such that there is an instance $M \triangleright \mset$ in $\gset$ with $M(x_0) = u$ and $M(x_L) = v$.
+\end{definition}
+We denote the neighborhood of $u$ in $H_\mset$ as $\nset(u)$ and \emph{degree} of $u$ in $H_\mset$ as $N(u)=|\nset(u)|$.
+Furthermore, $\Lambda = \max_{u\in H}{N(u)}$ represents the maximum degree among all nodes in $H_\mset$.
+When the context is clear, we will drop $\mset$ and use $H = (V, E)$ to represent a relational graph.
+
+\begin{figure}[t]
+  \centering
+  \subfigure[KG $\gset$\label{fig:hin}]{\includegraphics[width=2.8cm]{figure/hin.pdf}}
+  \hspace{0.5em}
+  \subfigure[Relational graph $H$\label{fig:sub.hg}]{\includegraphics[width=2.8cm]{figure/hg.pdf}}
+  \vspace{-2mm}
+  \caption{An exemplary KG $\gset$ and a relational graph $H$ induced from $\gset$ using a meta-path $\mset(A, P, V, P, A)$.\label{fig:example}}
+\end{figure}
+
+\begin{example}
+  Fig.~\ref{fig:hin} presents an academic KG with three node types $A$ (`author'), $P$ (`paper'), and $V$ (`venue') and two edge types $A \rightarrow P$ (`write') and $P \rightarrow V$ (`publish').
+  A sequence $(A, P, V, P, A)$ denotes a meta-path $\mset$, which induces the relational graph $H$ in Fig.~\ref{fig:sub.hg}, where $a_0$ and $a_2$ are neighbors because there exist an instance $M = (a_0, p_0, v_0,$ $p_1, a_2)$ of $\mset$ in $\gset$.
+  Intuitively, the two authors $a_0$ and $a_2$ are connected since they publish papers in the same venue $v_0$.
+\end{example}
+
+\myp{Problem Statement}
+We study the problem of hub queries in relational graphs.
+Hubs are nodes ranking high according to a function $c: V \rightarrow \mathbb{R}_{\geq 0}$ that measures centrality.
+We use \emph{degree} \cite{DasSP18}, i.e., the number of nodes connected to a node, and \emph{h-index} \cite{LuZZS16}, i.e., the largest integer $h$ such that a node has $h$ neighbors each of degree at least $h$, as centrality measures.
+The \ced query we consider is formalized as follows:
+\begin{problem}[\ced Query]\label{def:hub}
+  Given a relational graph $H$ and a parameter $\lambda\in(0,1)$, find every node $u \in V$ such that $c(u) \geq c(v^{\lambda})$, where $v^{\lambda}$ is the $(1-\lambda)$-quantile node under a centrality measure $c(\cdot)$.
+\end{problem}
+We also consider \emph{personalized} \ced queries to ask whether a given node $q$ is a hub of $H$.
+\begin{problem}[Personalized \ced Query]\label{problem:exactPer}
+  Given a relational graph~$H$, a node~$q$, and~$\lambda \in (0,1)$, decide if~$c(q) \geq c(v^\lambda)$.
+\end{problem}
+
+Processing \ced queries on large-scale relational graphs is computationally expensive. Specifically, computing the exact centrality, such as the degree of each node, requires traversing the matching graph with $|\eset^*|$ edges (as defined in Sect.~\ref{sec:wcoj}) from the corresponding node, leading to a time complexity of $O(|V|\cdot|\eset^*|)$, which is prohibitive for large KGs. Thus, we consider how to answer \ced queries approximately and efficiently under the notion of $\epsilon$-separable sets.
+\begin{definition}[$\epsilon$-Separable Set~\cite{GreenwaldK01}]
+  Given any node $u\in V$ and $\epsilon\in(0,1)$, the two $\epsilon$-separable sets of $u$, denoted as $S^+_\epsilon(u)$ and $S^-_\epsilon(u)$, are the sets of nodes in~$H$ with centrality scores larger and smaller than~$c(u)$ by a relative ratio of~$\epsilon$, respectively, i.e., $S^+_\epsilon(u) = \{v \in V | c(v) > (1+\epsilon) \cdot c(u)\}$ and $S^-_\epsilon(u)=\{v \in V | c(v) < (1-\epsilon) \cdot c(u)\}$.
+\end{definition}
+Consequently, we define the approximate versions of \ced and personalized \ced queries as follows:
+\begin{problem}[$\epsilon$-Approximate \ced Query]\label{problem:approxHUB}
+  Given a relational graph $H$ and $\epsilon, \lambda \in (0, 1)$, return a set $S$ of nodes in $H$ such that $S^+_\epsilon(v^\lambda) \subseteq S$ and $S \cap S^-_\epsilon(v^\lambda) = \varnothing$.
+\end{problem}
+\begin{problem}[$\epsilon$-Approximate Personalized \ced Query]\label{problem:approxPer}
+  Given a relational graph $H$, a node $q$, and $\epsilon, \lambda \in (0, 1)$, return \texttt{TRUE} if $q\in S^+_\epsilon(v^\lambda)$ and \texttt{FALSE} if $q\in S^-_\epsilon(v^\lambda)$.
+\end{problem}
+
+Before presenting our proposed algorithms for \ced queries, we summarize the frequently used symbols in Table~\ref{tab:notations}.
+
+\input{tables/notations}
+
+\subsection{Related Work}
+\label{sec:related}
+
+\myp{Relational Graph Analysis}
+There have been extensive studies on materializing and analyzing relational graphs induced by meta-paths from heterogeneous data.
+Chatzopoulos et al.~\cite{chatzopoulos2023atrapos} accelerated the enumeration of instances for multiple meta-paths by sharing workloads.
+This method can be extended to relational graph materialization.
+Guo et al.~\cite{guo2024efficient} first proposed \boolap, an algorithm for relational graph construction through boolean matrix multiplication.
+They also proposed \boolapp, an optimized algorithm for graphs with locally dense regions.
+Although these methods improve the efficiency of relational graph materialization over na\"ive methods, they are still prohibitively expensive for large relational graphs, as indicated in our experiments (see Sect.~\ref{sec:efficiency}).
+
+Then, great effort \cite{fang2020effective, yang2020effective, jiang2022effective, ZhouFLY23} has been devoted to community search over relational graphs.
+Fang et al.~\cite{fang2020effective} and Yang et al.~\cite{yang2020effective} proposed $(k, \mset)$-core and $(k, \mset)$-truss community models in relational graphs induced by meta-paths.
+Jiang et al.~\cite{jiang2022effective} and Zhou et al.~\cite{ZhouFLY23} extended the $(k, \mset)$-core model by incorporating star schemas and influences.
+We note that these methods introduced edge- and vertex-disjoint meta-paths to induce relational graphs.
+Despite their effectiveness for community definition, they take $O(|V|^2 \cdot |\eset^*|)$ time to extract a relational graph since they incur expensive max-flow computations to find the neighbors of each node on meta-path networks.
+Since the \ced problem is already computationally challenging for non-disjoint meta-paths, we leave the study of disjoint meta-paths for future work.
+
+Xirogiannopoulos et al.~\cite{xirogiannopoulos2017extracting} proposed to construct compact representations of relational graphs induced by \emph{path joins} in databases for memory-efficient query processing. Although they focus on a different problem from ours, the sketch we build can serve as the compact structure in \cite{xirogiannopoulos2017extracting}. In addition, the exact algorithm in Sect.~\ref{sec:wcoj} that leverages the worst-case optimal join for neighborhood computation aligns with the future direction for efficiency improvements suggested in~\cite{xirogiannopoulos2017extracting}.
+
+Meta-paths were also used to rank entities based on centrality measures \cite{10.1145/2020408.2020594, LEE2013684, ShiLYW16} and assess the similarity between entities \cite{sun2011pathsim, xiong2014top, shi2014hetesim, wang2016relsim} within heterogeneous data.
+These methods can operate directly on the original data and do not involve the materialization of relational graphs.
+
+Generally, although relational graphs were widely used in different applications, the fundamental problem of hub queries has received little attention. To the best of our knowledge, this is the first systematic investigation of efficient hub queries over relational graphs induced from heterogeneous data.
+
+\vspace{1mm}
+\myp{Sketch-based Graph Queries}
+Several works have been devoted to accelerating graph queries using cardinality sketches. Cohen~\cite{cohen1997size} introduced the use of cardinality sketches to estimate the size of transitive closure of each node, which was subsequently extended to influence queries~\cite{cohen2014sketch} by estimating the combined reachability size of a query node over sampled graphs under the independent cascade (IC) model. Liu et al.~\cite{liu2023efficient} extended the structural graph clustering to consider the multi-hop neighborhood for similarity computation, employing KMV sketches to accelerate the estimation of multi-hop Jaccard similarities. Furthermore, Zhang et al.~\cite{zhang2022effective} proposed an efficient approach for maintaining neighborhood KMV sketches following graph updates, thereby extending the sketch-based structural graph clustering to dynamic graphs. Chierichetti et al.~\cite{chierichetti2015efficient} utilized cardinality sketches for efficient closeness centrality and reachability tree size estimation within public-private networks from the point of view of each node.
+
+Nevertheless, existing studies that apply cardinality sketches to graph problems primarily focus on accelerating graph queries over materialized graphs by eliminating computationally expensive intermediate results. In contrast, we adopt cardinality sketches to avoid the materialization of relational graphs when performing graph queries.
+
+\vspace{1mm}
+\myp{Hubs in Hidden Networks}
+Another line of literature has studied the problem of finding hubs in hidden networks, where the existence of any edge can only be decided via \emph{probe operations}.
+Tao et al.~\cite{tao2010finding} proposed two instance-optimal exact algorithms over two kinds of probing strategies of hidden networks.
+Wang et al.~\cite{wang2012identifying} extended this problem to include group testing, whereby probes can verify edge connections between multiple nodes.
+Sheng et al.~\cite{sheng2012exact} proposed a sampling algorithm for hub queries, upon which Cao et al.~\cite{cao2015top} subsequently improved.
+Strouthopoulos et al.~\cite{StrouthopoulosP19} studied the discovery of~$k$-cores in hidden networks.
+However, all of the above algorithms face two challenges when applied to \ced queries.
+First, they focus on bipartite networks and potentially take~$O(|V|^2)$ probe operations for \ced queries on relational graphs.
+Second, the probe operations are time-consuming for \ced queries because they involve many breadth-first search (BFS) operations on the matching graph.
+
+\subsection{Memory-Efficient Exact Method for \ced}
+\label{sec:wcoj}
+
+Since the materialization of large relational graphs can often be memory-prohibitive \cite{xirogiannopoulos2017extracting}, we propose a memory-efficient baseline method for exact \ced queries, which computes the exact centrality of each node in $H$ using a generic worst-case optimal join algorithm \cite{ngo2018worst, freitag2020adopting, arroyuelo2021worst, veldhuizen2014leapfrog} on the \emph{matching graph} of $\mset$ over $\gset$ and avoid full materialization.
+We first introduce the notion of \emph{matching graph} of a meta-path.
+\begin{definition}[Matching Graph]
+  Given a KG $\gset$ and a meta-path $\mset$, the \emph{matching graph} of $\mset$ over $\gset$ is a \emph{multi-level} graph $\gset^*=(\vset^*,\eset^*)$ with node set $\vset^*=\bigcup_{0 \leq i \leq L}{\vset_i}$ and edge set $\eset^* = \bigcup_{0 \leq i < L}{\eset_i}$, where $\vset_i$ is the set of all node instances of type $x_i$ contained in any matching instance of $\mset$ and $\eset_i$ consists of all edges that connects two nodes between $\vset_i$ and $\vset_{i+1}$. For each node $u\in\vset_i$, we use $\vset^+(u)$ to denote the nodes in $\vset_{i+1}$ connected with $u$, i.e., \emph{successors} of $u$ in $\gset^*$; and use $\vset^-(u)$ to denote the nodes in $\vset_{i-1}$ connected with $u$, i.e., predecessors of $u$ in $\gset^*$.
+\end{definition}
+
+For each node $u\in\vset_i$, we use $\bar{u}$ to denote the node in $\vset_{L-i}$ corresponding to the same node in $\gset$.
+
+\begin{example}
+  Fig.~\ref{fig:propagation}(a) illustrates the matching graph $\gset^*$ of a meta-path $\mset(A, P, V, P, A)$.
+  The node set $\vset_0=\{a_0, a_1, \dots,$ $a_4\}$ consists of nodes of type $x_0$, i.e., `authors'.
+  Then, the set of successors of $v_0$ is $\vset^+(v_0)=\{\bar{p}_0, \bar{p}_1\}$, which contains the neighbors of $v_0$ in $\vset_3$, and the set of predecessors of $v_0$ is $\vset^-(v_0)=\{p_0, p_1\}$, which contains the neighbors of $v_0$ in $\vset_1$.
+\end{example}
+
+The matching graph $\gset^*$ can be extracted from $\gset$ level by level efficiently using the breadth-first search (BFS).
+Given the matching nodes in $\vset_i$, we iteratively visit all neighbors in $\gset$ of each node in $\vset_i$ and add its neighbors of type $x_{i+1}$ as successors (in $\vset_{i+1}$) of the matching node in the matching graph.
+Based on our experimental findings (see Table~\ref{tab:efficiency}), the cost of extracting $\gset^*$ from $\gset$ is negligible compared to the total computational cost of \ced queries.
+
+\begin{procedure}[t]
+\caption{DFS($u,v$)}
+\label{alg:wcoj}
+    \LinesNumbered
+    \KwIn{The matching graph $\gset^*$}
+    Mark $v$ as visited\;
+    \textbf{if} $v \in \vset_{L}$ \textbf{then} Add $v$ to $\nset(u)$\;\label{algline:addnbr-end}
+    \For{$w \in\vset^+(v)$\label{algline:nextstep-begin}}{
+        \textbf{if} $w$ is not visited \textbf{then} $\texttt{DFS}(u,w)$\;\label{algline:nextstep-end}
+    }
+\end{procedure}
+
+To avoid generating excessive intermediate results, we employ a worst-case optimal join on the matching graph to compute the neighbors of each node $u \in V$ in the relational graph.
+Starting with a depth-first search (DFS) from each node $u$, we traverse the matching instances of~ $\mset$.
+Specifically, DFS$(u, u)$ (Procedure~\ref{alg:wcoj}) runs for each node $u \in V$ and recursively traverses the current node's successors (Lines~\ref{algline:nextstep-begin}--\ref{algline:nextstep-end}).
+Once we visit a node $v$ in $\vset_L$, we add it to $\nset(u)$ (Line~\ref{algline:addnbr-end}).
+After performing DFS for each node, we discard $\nset(u)$ and keep only the degree $|\nset(u)|$ to ensure a small memory footprint.
+To compute the h-indexes of all nodes without \emph{materializing} the relational graph, we perform the worst-case optimal join in two rounds.
+The first round computes and stores the degree of each node $u \in V$; the second round computes the h-index of each node $u$ by combining its neighborhood $\nset(u)$ with the degrees kept in the first round.
+
+Although the memory consumption is bounded by $O(|\vset^*|+|\eset^*|)$ and thus is not a bottleneck, the exact algorithm is still inefficient due to repeated edge traversals.
+Each edge in $\eset^*$ is visited up to $O(|V|)$ times to compute the neighborhood of each node in $V$.
+Consequently, the time complexity of the exact algorithms is $O(|V| \cdot |\eset^*|)$, which can be prohibitively expensive when processing large relational graphs.
+
+
+% \section{Meta-path Pruning}\label{sec:prune}
+% A basic exact algorithm for \ced problem is to traverse each meta-path $P$ and integer $\ell$, and compute the degree rank percentile of the query node $r^{\ell}_{P}(q)$ by constructing the meta-path graph $g^{\ell}_P$; and then return the meta-path $P^*$ and $\ell^{*}$ with maximum $|S^{P^*}_0|$ so that $r^{\ell^*}_{P^*}(q)\leq \theta$.
+% However, this basic algorithm can be time-prohibitive due to the larger number of meta-paths to be considered, which explodes exponentially w.r.t. the length of the meta-paths. 
+
+% To this end, in this section, we propose the \textit{meta-path pruning} technique to accelerate the basic algorithm by avoiding top-$\theta$ degree rank evaluation of the query node $q$ over unpromising meta-paths.
+
+% \subsection{Search Space for Semantics}
+% The search space of semantics is a Hasse diagram augmented with association points.
+
+% \subsection{Semantic Pruning}
+% According to the definition of the meta-path graph $g^\ell_P$, we have the following observation, which relates the scopes of nodes to their neighborhood in $g^\ell_P$.
+
+% \begin{observation}\label{ob:domdeg}
+% For two nodes $v_i, v_j\in S^P_0$, if $S^{P}_{\ell}(v_i)\subseteq S^{P}_{\ell}(v_j)$, we have $\nset^{\ell}_{P}(v_i)\subseteq \nset^{\ell}_P(v_j)$ in meta-path graph $g^{\ell}_P$.
+% \end{observation}
+
+% Motivated by this observation, we define the $(P, \ell)$-dominating ratio of query node $q$ in the meta-path graph $g^\ell_P$, which provides a lower bound of the degree percentile of query node $q$. We further prove that the $(P, \ell)$-dominating ratio is monotonic w.r.t. both $P$ and $\ell$ and thus can be used for meta-path pruning.
+
+% \begin{defn}[$(P,\ell)$-Dominating Ratio]
+% Given a meta-path $P$ and integer $\ell$, we define the $(P, \ell)$-dominating ratio of the query node $q\in S^P_0$ as $\gamma^{P}_{\ell}(q)=\frac{|\{u|S^{P}_{\ell}(q)\subseteq S^{P}_{\ell}(u)\}|}{|S^{P}_0|}$.
+% \end{defn}
+
+% \begin{lemma}[Lower Bound of $r^\ell_P(q)$]\label{lemma:lb}
+% For query node $q\in S^P_0$, we have $\gamma^P_\ell(q)\leq r^\ell_P(q)$.
+% \end{lemma}
+
+% \begin{proof}
+% Let $D^{P}_{\ell}(q)=\{v|S^P_\ell(q)\subseteq S^P_\ell(v)\}$. Then, for each node $v\in D^P_{\ell}(q)$, we have $|\nset(v)|\geq |\nset(q)|$ according to observation~\ref{ob:domdeg}, i.e. there are at least $|D^P_\ell(q)|$ nodes with degree larger than $q$. Thus, we have $\gamma^P_\ell(q)=\frac{|D^P_\ell(q)|}{|S^P_0|}\leq r^\ell_P(q)$. The lemma is proved.
+% \end{proof}
+
+% \begin{theorem}[Monotonicity of $(P, \ell)$-dominating Ratio]\label{lemma:dom_mono}
+% Given $P\leq P^\prime$ and $\ell\leq\ell^\prime$, we have $\gamma^P_\ell(q)\leq \gamma^{P^\prime}_{\ell^\prime}(q)$.
+% \end{theorem}
+
+% \begin{proof}
+% Let $v$ denote any node within $D^P_\ell(q)$. We prove the theorem by cases.
+
+% \textit{Case 0}: When $P^\prime=P$ and $\ell^\prime=\ell$, the case is trivial.
+
+% \textit{Case 1}: When $P^\prime=P$ and $\ell^\prime > \ell$, for any $u^\prime\in S^{P}_{\ell^\prime}(q)$, we prove that $u^\prime\in S^{P}_{\ell^\prime}(v)$ by constructing an instance $M^*$ such that $f^*(x_0)=v$ and $f^*(x_{\ell^\prime})=u^\prime$. Since $u^\prime\in S^{P}_{\ell^\prime}(q)$, there exists an instance $M$ such that $f(x_0)=q$ and $f(x_{\ell^\prime})=u^\prime$. Let $u=f(x_{\ell})$, we have $u\in S^{P}_{\ell}(q)$. Since $v\in D^P_\ell(q)$, we have $u\in S^{P}_{\ell}(v)$, i.e. there exists an instance $M^\prime$ such that $f^\prime(x_0)=v$ and $f^\prime(x_\ell)=u$. By combining $f^\prime(x_0)=v$ to $f^\prime(x_\ell)=u$ in $M^\prime$ with $f(x_\ell)=u$ to $f(x_{\ell^\prime})=u^\prime$ in $M$, we get the instance $M^*$. Thus, we have $S^{P}_{\ell^\prime}(q)\subseteq S^{P}_{\ell^\prime}(v)$, i.e. $v\in D^P_{\ell^\prime}(q)$. Thus, we have $D^P_{\ell}(q)\subseteq D^P_{\ell^\prime}(q)$. Note that $S^P_0$ is invariant to the association point and therefore we have $\gamma^P_{\ell}(q)=\frac{|D^P_\ell(q)|}{|S^P_0|}\leq\frac{|D^P_{\ell^\prime(q)}|}{|S^P_0|}=\gamma^P_{\ell^\prime}(q)$. The case is proved.
+
+% \textit{Case 2}: When $P^\prime>P$ and $\ell^\prime=\ell$, given $q\in S^{P^\prime}_0$, for any $u^\prime\in S^{P^\prime}_{\ell}(q)$, we prove that $u^\prime\in S^{P^{\prime}}_{\ell}(v)$ by constructing an instance $M^*$ of $P^\prime$ such that $f^*(x_0)=v$ and $f^*(x_\ell)=u^\prime$. Since $u^\prime\in S^{P^\prime}_{\ell}(q)$, there exists an instance $M$ of $P^\prime$ such that $f(x_0)=q$ and $f(x_{\ell})=u^\prime$. By taking the partial instance of $M$ from $f(x_0)$ to $f(x_{|P|-1})$, we can get an instance $M^\prime$ of $P$ such that $f^\prime(x_\ell)=u^\prime$, i.e. $u^\prime\in S^P_{\ell}(q)$. Since $v\in D^P_\ell(q)$, we have $u^\prime\in S^{P}_\ell(v)$, i.e. there exists an instance $M^{\prime\prime}$ such that $f^{\prime\prime}(x_0)=v$ and $f^{\prime\prime}(x_\ell)=u^\prime$. By combining $f^{\prime\prime}(x_0)=v$ to $f^{\prime\prime}(x_\ell)=u^\prime$ in $M^{\prime\prime}$ with $f(x_\ell)=u^\prime$ to $f(x_{|P^\prime|-1})$ in $M$, we get the instance $M^*$. Besides, note that we have $S^{P^\prime}_0\subseteq S^P_0$ for $P^\prime>P$. Therefore, we have $\gamma^P_{\ell}(q)=\frac{|D^P_\ell(q)|}{|S^P_0|}\leq\frac{|D^{P^\prime}_\ell(q)|}{|S^{P^\prime}_0|}=\gamma^{P^\prime}_{\ell}(q)$. The case is proved.
+
+% \textit{Case 3}: When $P^\prime>P$ and $\ell^\prime>\ell$, we combine \textit{case 1} and \textit{case 2} and obtain $\gamma^P_\ell(q)\leq\gamma^P_{\ell^\prime}(q)\leq\gamma^{P^\prime}_{\ell^\prime}(q)$. The case is proved.
+% \end{proof}
+
+% % \begin{proof}
+% % we have $D^{P^\prime}_{\ell^\prime}(q)\subseteq D^{P}_{\ell}(q)$ according to the Lemma~\ref{lemma:dom_mono}. Thus, we have
+% % $$\gamma^{P}_{\ell}(q)=\frac{D^{P}_{\ell}(q)}{S^P_0}\leq \frac{D^{P^\prime}_{\ell^\prime}(q)}{S^{P^\prime}_0}=\gamma^{P^\prime}_{\ell^{\prime}}$$
+% % The theorem is proved.
+% % \end{proof}
+
+% Based on Lemma~\ref{lemma:lb} and Theorem~\ref{lemma:dom_mono}, we can accelerate the basic algorithm for \ced by pruning unpromising meta-paths. Specifically, once we find that $\gamma^P_\ell(q)$ is larger than the required degree rank percentile $\theta$ for certain meta-path $P$ and integer $\ell$, Theorem~\ref{lemma:dom_mono} ensures that $\gamma^{P^\prime}_{\ell^\prime}(q)\geq\theta$ for $P^\prime\geq P$ and $\ell^\prime\geq\ell$. Then, by Lemma~\ref{lemma:lb}, we have $r^{\ell^\prime}_{P^\prime}(q)\geq\gamma^{P^\prime}_{\ell^\prime}(q)\geq\theta$, i.e. the query node $q$ is not top-$\theta$ impactful in the meta-path graph $g^{P^\prime}_{\ell^\prime}$. Therefore, we can safely prune the iterations with $P^\prime\geq P$ and $\ell^\prime\geq\ell$.
+
+% \begin{example}
+
+% \end{example}
+
+% \subsection{Implementation and Complexity Analysis}
+% Alg.~\ref{alg:pruning} presents the pseudocode of the basic exact algorithm equipped with the meta-path pruning technique. It receives the knowledge graph $\gset$, a query node $q$ and the required degree rank percentile $\theta$ as inputs, and outputs the characteristic meta-path $P^*$ and the corresponding integer $\ell^*$ for $q$. 
+
+% \begin{algorithm}[!h]
+% \caption{{\sffamily Meta-path Pruning}}\label{alg:pruning}
+% \small
+% \LinesNumbered
+% \KwIn{Knowledge graph $\gset$, query node $q$, rank percentile $\theta$}
+% \KwOut{The characteristic meta-path $P^*$ and integer $\ell^*$}
+% $\mathbb{P}\leftarrow\{(P, \infty)|x_0\in T(q)\wedge |P|=1\}$\;
+% $(P^*, \ell^*)\leftarrow (\varnothing, 0)$\;
+% \While{$\mathbb{P}\neq\varnothing$}{
+%     $(P, \hat{\ell})\leftarrow\mathbb{P}${\sffamily .pop}()\;
+%     {\sffamily pruned} $\leftarrow$ \textbf{False}\;
+%     \For{$\ell$ {\rm \textbf{from}} $1$ {\rm \textbf{to}} $\min(\hat{\ell},|P|-1)$}{
+%         \If{$\gamma^P_\ell(q)\geq\theta$}{
+%             $\mathbb{P}\leftarrow\mathbb{P}\cup\{(P^\prime, \ell-1)|P^\prime>P\wedge|P^\prime|=|P|+1\}$\;
+%             {\sffamily pruned}$\leftarrow$\textbf{True}\;
+%             \textbf{break}\;
+%         }
+%         construct $g^{\ell}_P$ and compute $r^\ell_P(q)$\;
+%         \If{$r^\ell_P(q)\leq\theta$}{
+%             $(P^*, \ell^*)\leftarrow(P, \ell)$\;
+%             {\sffamily pruned}$\leftarrow$\textbf{True}\;
+%         }
+%     }
+%     \If{{\rm \textbf{not} {\sffamily pruned}}}{
+%         $\mathbb{P}\leftarrow\mathbb{P}\cup\{(P^\prime, \hat{\ell})|P^\prime>P\wedge|P^\prime|=|P|+1\}$\;
+%     }
+% }
+% \textbf{return } $(P^*, \ell^*)$\;
+% \end{algorithm}
+
+% The algorithm explores meta-paths in a BFS manner (Line 3-16) and use queue $\mathbb{P}$ to record meta-paths that should be further explored. 
+% Each meta-path in the array $\mathbb{P}$ is attached with a pruning point $\hat{\ell}$, which is an integer denoting that meta-path graphs $g^\ell_P$ with association point $\ell>\hat{\ell}$ are pruned for this meta-path.
+% % $\mathbb{P}$ is initialized with meta-paths of one node denoting node types of $q$ (Line 1). 
+% For each meta-path popped from $\mathbb{P}$, the algorithm checks if $q$ is top-$\theta$ impactful in meta-path graphs that has not been pruned (Line 6-14). 
+% For each association point that has not been pruned, the algorithm first compute the dominating ratio $\gamma^P_{\ell}(q)$ and check if $\gamma^P_{\ell}(q)\geq\theta$. 
+% If so, meta-path graphs of the current meta-path as well as its descendants with association point larger than $\ell$ is pruned according to Theorem~\ref{lemma:dom_mono}, and thus children of the current meta-path are pushed into $\mathbb{P}$ attached with pruning point $\ell-1$;
+% otherwise, the algorithm construct the meta-path graph $g_\ell^P$ and obtain the exact value of $r^\ell_P(q)$.
+% If $q$ is top-$\theta$ impactful, we update $P^*$ and $\ell^*$ with the current meta-path $P$ and association point $\ell$. 
+% If the current meta-path $P$ is not pruned at all association points, children of $P$ are added into $\mathbb{P}$ attached with the pruning point of $P$ (Line 15-16). 
+% Finally, the characteristic meta-path $P^*$ and corresponding association point $\ell^*$ is returned.
+
+% Even equipped with the pruning technique, the exact algorithm can be still time prohibitive. The following theorem presents the time complexity of Alg.~\ref{alg:pruning}.
+
+% \begin{theorem}
+% The time complexity of Alg.~\ref{alg:pruning} is $O()$.
+% \end{theorem}
+
+% \begin{proof}
+% \end{proof}
+
+
+\section{Sketch Propagation Framework}
+\label{sec:scopeprop}
+
+In this section, we introduce a novel \emph{sketch propagation} framework to efficiently estimate the degree of each node in $H$ by constructing cardinality sketches for their neighbors. As a result, it effectively answers \ced queries based on degree centrality.
+In addition, we propose an early termination technique to further accelerate personalized \ced query processing.
+
+\subsection{Sketch Propagation for \ced}
+\label{sec:sketch-framework}
+
+Our basic idea is to approximate the degree of each node in $H$ by constructing KMV sketches for the neighborhood $\nset(v)$ of each node $v\in V$ without materializing $H$. The KMV sketch was initially proposed for distinct-value estimation \cite{beyer2007synopses} and defined as follows.
+\begin{definition}[KMV Sketch]\label{def:kmv}
+  Given a collection $C=\{o_0, o_1,$ $ \dots, o_{|C|}\}$ of items and an integer $k > 0$, the KMV ($k$-th Minimum Value) sketch $\kset(C)$ is built by independently drawing a number uniformly at random from $(0, 1)$ for each item in $C$ and maintaining the $k$ smallest random numbers. The set of random numbers generated for each item in $C$ is called the \emph{basis} for the KMV sketch. The cardinality of $C$ is estimated as $|\widetilde{C}|=\frac{k}{\mathbb{E}[\zeta]}-1$, where $\zeta$ is a random variable by taking the largest number in $\kset(C)$.
+\end{definition}
+
+By constructing multiple (specifically $\theta$) KMV sketches and applying the Bernstein inequality~\cite{audibert2007tuning}, an estimation of the collection size with high probability can be obtained. 
+\begin{lemma}\label{theorem:dconcentration}
+  For any $\delta, p \in (0, 1)$, if $\theta = \Theta(\frac{|C|}{\delta k}\log{\frac{1}{p}})$, we have $(1 - \delta) |C| \leq |\widetilde{C}| \leq (1+\delta) |C|$ with probability at least $1 - p$.
+\end{lemma}
+
+Note that the KMV sketch is designed primarily for stream processing \cite{estan2003bitmap, alon1996space, durand2003loglog, heule2013hyperloglog, gibbons2001distinct}, where a one-pass scan over the collection $C$ is required.
+However, for \ced queries, scanning the neighborhood of each node is quite expensive, as discussed in the description of exact algorithms.
+To address this challenge, we propose the \emph{sketch propagation} framework that constructs a KMV sketch for $\nset(v)$ of each $v \in V$ without explicitly generating and scanning $\nset(v)$ and offers a different estimator with a tight error bound for the case where $\nset(v)$ is relatively small based on the notion of \emph{images}.
+\begin{definition}[Images]
+  The image of a matching node $u \in \vset_i$, denoted as $\iset(u)$, contains a node $v \in \vset_0$ if there exists an instance $M$ of $\mset$ including both $u$ and $v$, i.e., 
+  $$\iset(u) = \{ v \in \vset_0 \mid \exists M \triangleright \mset, M(x_0) = v \wedge M(x_i) = u \}.$$
+\end{definition}
+\begin{example}
+  In Fig.~\ref{fig:propagation}$(a)$, the image $\iset(p_1)$ contains two nodes $a_2$ and $a_3$, as they are connected with $p_1$ via $M(a_2, p_1, v_0, \bar{p}_0,$ $\bar{a}_0)$ and $M(a_3, p_1, v_0, \bar{p}_0, \bar{a}_0)$, respectively.
+\end{example}
+An important observation is that $\nset(u) = \iset(\bar{u})$ for each node $u \in V=\vset_0$ in the relational graph due to its definition.
+
+\vspace{1mm}
+\myp{Sketch Propagation}
+We build a KMV sketch for $\nset(u)$ of each $u \in V$ by iteratively maintaining the sketches for the images of nodes from $\vset_0$ to $\vset_L$.
+First, a random number $r(u)$ is generated for each node $u \in \vset_0$. Since $\iset(u) = \{u\}$, the sketch is initialized as $\kset(\iset(u))=\{r(u)\}$. 
+The sketches for the images of the nodes in $\vset_i$ are then constructed by iteratively propagating the sketches of the nodes in $\vset_{i-1}$.
+Specifically, each node in $\vset_{i-1}$ propagates its sketch to all its successor nodes in $\vset_{i}$ and a node in $\vset_i$ builds its sketch by retaining the $k$ smallest random numbers among all sketches it receives.
+The following lemma ensures the correctness of the \emph{sketch propagation} framework.
+
+\begin{algorithm}[t]
+\caption{Sketch Propagation}\label{alg:propagation}
+    \LinesNumbered
+    \KwIn{KG $\gset$, meta-path $\mset$, quantile parameter $\lambda$, number of propagations $\theta$, KMV sketch size $k$}
+    \KwOut{A set of hubs $S$}
+    \ForAll{$u \in \vset^*$}{\label{algline:initK-begin}
+        \For{$t=1$ \KwTo $\theta$}{
+            $\kset[u][t] \gets \varnothing$\;
+            \textbf{if} $u\in\vset_0$ \textbf{do} add $r(u) = \mathtt{Rand}(0, 1)$ to $\kset[u][t]$\;\label{algline:initK-end}
+        }
+    }
+    $\widetilde{N} \gets$ \texttt{Propagate}$(\kset)$\;
+    $S \gets$ top-$(\lambda\cdot|V|)$ nodes with highest degrees in $H$ w.r.t.~$\widetilde{N}$\;\label{algline:spreturn-begin}
+    \textbf{return} $S$\;\label{algline:spreturn-end}
+    
+    \BlankLine
+    \SetKwFunction{FMain}{Propagate}
+    \SetKwProg{Fn}{Function}{:}{}
+    \Fn{\FMain{$\kset$}}{
+        \For{$i=1$ \KwTo $L$}{ \label{algline:construction-begin}
+            \textbf{forall} $u \in \vset_i$ \textbf{do} \texttt{Receive}$(u, \kset)$\;
+        }\label{algline:construction-end}
+        \ForAll{$u\in\vset_L$}{ \label{algline:estimation-begin}
+            $\widetilde{\mu} \gets 0$\;
+            \For{$t=1$ \KwTo $\theta$}{
+                \uIf{$\left| \kset[u][t] \right| = k$}{
+                    $\widetilde{\mu} \gets \widetilde{\mu} + \frac{\max(\kset[u][t])}{\theta}$\;
+                }
+                \Else{
+                    $\widetilde{\mu} \gets \widetilde{\mu} + \frac{k}{(|\kset[u][t]| + 1) \cdot \theta}$\;
+                }
+            }
+            $\widetilde{N}[u] \gets k/\widetilde{\mu} - 1$\;\label{algline:estimation-end}
+        }
+        \Return{$\widetilde{N}$}\;
+    }
+    \BlankLine
+    \SetKwFunction{FMain}{Receive} 
+    \SetKwProg{Fn}{Function}{:}{} 
+    \Fn{\FMain{$u, \kset$}}{\label{algline:receive}
+        \For{$t=1$ \KwTo $\theta$}{\label{algline:receive-begin}
+            $\kset[u][t] \gets \oplus_{v \in \vset^-(u)}{\kset[v][t]}$\;\label{algline:receive-end}
+        }
+    }
+\end{algorithm}
+
+\begin{lemma}\label{lemma:img}
+  Given a meta-path $\mset$, for each node $u \in \vset_i$ 
+  \begin{equation}\label{equation:img1}
+    \kset(\iset(u))=\oplus_{v\in\vset^-(u)}{\kset(\iset(v))} 
+  \end{equation}
+hold if all KMV sketches are constructed from the same basis on $\vset_0$. The operator $\oplus$ extracts the $k$ smallest random numbers from the union of KMV sketches.
+\end{lemma}
+\techreport{
+\begin{proof}
+  According to \cite[Thm.~5]{beyer2007synopses}, $\kset(A) \oplus \kset(B)$ is a KMV sketch for the collection $A \cup B$ for two collections $A$ and $B$.
+  Therefore, we only need to prove $\iset(u)=\bigcup_{v\in\vset^-(u)}\iset(v)$ for each $u\in\vset_i$.
+
+  On the one hand, for any node $u^\prime\in\iset(u)$, there exists $M\triangleright\mset$ such that $M(x_i)=u$ and $M(x_0)=u^\prime$. 
+  Suppose that $v=M(x_{i-1})$, we have $u^\prime\in\iset(v)$ and $v\in\vset^-(u)$. Thus, $u^\prime\in\bigcup_{v\in\vset^-(u)}\iset(v)$, i.e., $\iset(u)\subseteq\bigcup_{v\in\vset^-(u)}\iset(v)$. 
+
+  On the other hand, for any node $u^\prime\in \bigcup_{v\in\vset^-(u)}\iset(v)$, there exists a node $v\in\vset^-(u)$ such that $u^\prime\in\iset(v)$, i.e., there exists an instance $M^\prime\triangleright\mset$ such that $M^\prime(x_0)=u^\prime$ and $M^\prime(x_{i-1})=v$.
+  Moreover, since $v\in\vset^-(u)$, there exists an instance $M^{\prime\prime}\triangleright\mset$ such that $M^{\prime\prime}(x_{i-1})=v$ and $M^{\prime\prime}(x_i)=u$. 
+  By concatenating $M^\prime(x_0)=u^\prime$ to $M^\prime(x_{i-1})=v$ with $M^{\prime\prime}(x_{i-1})=v$ to $M^{\prime\prime}(x_L)$, we construct an instance $M\triangleright\mset$ such that $M(x_0)=u^\prime$ and $M(x_i)=u$. Thus, $u^\prime\in\iset(u)$, i.e., $\bigcup_{v\in\vset^-(u)}\iset(v)\subseteq\iset(u)$.
+  
+  Thus, we have $\iset(u)=\bigcup_{v\in\vset^-(u)}\iset(v)$ for each $u\in\vset_i$.
+\end{proof}
+}
+
+Algorithm~\ref{alg:propagation} details the \emph{sketch propagation} framework.
+It receives a KG $\gset$, a meta-path $\mset$, a parameter $\lambda \in (0, 1)$, the number of propagations $\theta \in \mathbb{Z}^+$, and the sketch size $k \in \mathbb{Z}^+$ as input, and returns a set of nodes $S$ for the (approximate) \ced query.
+It first initializes an array $\kset$ to store $\theta$ KMV sketches for images of each node $u \in \vset^*$ (Lines~\ref{algline:initK-begin}--\ref{algline:initK-end}).
+Next, it calls the function \texttt{Propagate}, which constructs KMV sketches within $\kset$ (Lines~\ref{algline:construction-begin}--\ref{algline:construction-end}) and estimates the degree of each node $u$ in $H$ using $\kset$ (Lines~\ref{algline:estimation-begin}--\ref{algline:estimation-end}).
+Specifically, the function \texttt{Receive} depicts the step for KMV sketch construction when each node receives the sketches propagated from other nodes.
+Given a node $u$, the array $\kset$ to store sketches, it scans the random numbers in the sketches of all nodes in $\vset^-(u)$ and keeps the $k$ smallest numbers in $\kset[u][t]$ with a min-heap of size $k$ (Lines~\ref{algline:receive-begin} and~\ref{algline:receive-end}).
+Finally, it returns top-$(\lambda \cdot |V|)$ nodes with the highest estimated degrees as $S$ (Lines~\ref{algline:spreturn-begin} \&~\ref{algline:spreturn-end}). The ties are broken arbitrarily.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=8cm]{figure/forward.pdf}
+    \vspace{-1em}
+    \caption{Running example of sketch propagation framework with $k=2$ and $\theta=1$. Subfigure~$(a)$ illustrates the complete sketch propagation process for a \ced query; Subfigure~$(b)$ demonstrates the early terminated sketch propagation for a personalized \ced query with $a_4$ as the query node. The redlined elements are discarded due to the $k$-size limitation.}
+    \label{fig:propagation}
+\end{figure}
+
+\begin{example}
+\label{example:propag}
+  Fig.~\ref{fig:propagation}$(a)$ illustrates the sketch propagation process with $k=2$ and $\theta=1$. To begin with, we generate a random number for each node in $\vset_0$ and then propagate random numbers along the matching graph to $\vset_4$. The sketch $\kset(\iset(v_0))$ is constructed by taking the two smallest numbers from the union of sketches of the images of the nodes in $\vset^-(v_0)$. Thus, $\kset(\iset(v_0))=\{0.4, 0.9\}\oplus\{0.2, 0.6\}=\{0.2, 0.4\}$ and the cardinality of $\iset(v_0)$ is estimated as $\widetilde{I}(v_0)=\frac{2}{0.4}-1=4$.
+\end{example}
+
+\myp{Theoretical Analysis}
+Next, we will prove that \emph{sketch propagation} approximates \ced queries with high probability (w.h.p.) (cf.~Theorem~\ref{theorem:dglobal}).
+Hereafter, we use $I(u)$ to denote the sizes of $\iset(u)$ for any node $u\in\vset^*$.
+We also use $\widetilde{I}(u)$ to denote the estimate of $I(u)$ provided by sketch propagation.
+
+\techreport{
+Moreover, we use $\zeta$ to denote the random variable that takes the maximum random number in the sketch of either $u$'s forward or backward image and $\mu$ to denote the expectation of $\zeta$. 
+
+\begin{lemma}\label{theorem:estimator}
+  For any $u\in\vset^*$, $I = k/\mu - 1$ if $I \geq k$.
+\end{lemma}
+\begin{proof}
+According to \cite{beyer2007synopses}, if $I\geq k$, the probability density function of $\zeta$ will be $f_\zeta(t) = \frac{t^{k-1}(1-t)^{I-k}}{B(k, I-k+1)}$,
+where $B(a,b)$ denotes the beta function.
+Thus, we have
+\begin{equation}
+\begin{split}
+\mu & = \int_{0}^{1} t f_\zeta(t) \,dt = \int_{0}^{1} \frac{t^k(1-t)^{I-k}}{B(k, I-k+1)}\,dt \\
+    & = \frac{B(k+1, I-k+1)}{B(k, I-k+1)} = \frac{k\cdot\tbinom{I}{k}}{(k+1)\cdot\tbinom{I+1}{k+1}} = \frac{k}{I+1},
+\end{split}
+\end{equation}
+which indicates that $I = k/\mu - 1$.
+\end{proof}
+
+\myp{Remark}
+When $I < k$, a KMV sketch directly provides the true value of $I$ with the number of random numbers in the sketch. Furthermore, the original estimator $\mathbb{E}[(k-1)/\zeta]$ in Definition~\ref{def:kmv} is unbiased, but with only asymptotic error bounds. In contrast, our proposed estimator in Lemma~\ref{theorem:estimator} utilizes Bernstein's inequality to establish a tighter confidence bound for arbitrary image sizes.
+
+\begin{theorem}[Bernstein Inequality \cite{audibert2007tuning}]
+  Let $X_1$, $X_2$, \dots, $X_\theta$ be real-valued i.i.d.~random variables such that $X_i\in[0, r]$, $\mathbb{E}[X_i]=\mu$, and $\mathrm{Var}[X_i]=\sigma^2$. Let $\overline{X}_\theta=\frac{1}{\theta}\sum^{\theta}_{i=1}{X_i}$ denote the empirical mean. With probability at least $1-p$, we have
+  $$|\overline{X}-\mu| \leq \sqrt{\frac{\sigma^2\log(2/p)}{\theta}}+\frac{2r\log(1/p)}{\theta}.$$
+\end{theorem}
+}
+
+\techreport{
+\begin{proof}
+When $I < k$, the exact value of $I$ will always be obtained, i.e., $\widetilde{I} = I$, and the lemma holds trivially.
+When $I \geq k$, let $\Delta\mu = |\widetilde{\mu}-\mu|$ and $\Delta I = |\widetilde{I}-I|$. According to Lemma~\ref{theorem:estimator}, $I=\frac{k}{\mu} - 1$ and thus 
+\begin{equation*}
+\Delta I =
+\begin{cases}
+\frac{k}{\mu} - \frac{k}{\mu + \Delta\mu}, & \text{if } \mu < \widetilde{\mu}; \\
+\frac{k}{\mu - \Delta\mu} - \frac{k}{\mu}, & \text{if } \mu \geq \widetilde{\mu}.
+\end{cases}
+\end{equation*}
+For any $\delta \in (0,1)$, it follows that $\Delta I \leq \delta I$ if $\Delta\mu \leq \frac{\delta I k}{(I + 1)(I + 1 + \delta I)}$.
+Furthermore, the variance of $\zeta$ is 
+\begin{equation*}
+\sigma^2=\mathbb{E}[\zeta^2]-\mu^2=\frac{k\cdot(k+1)}{(I+1)(I+2)}-(\frac{k}{I+1})^2=\frac{k(I-k+1)}{(I+1)^2(I+2)}.
+\end{equation*}
+According to Bernstein's inequality, for any $p \in (0, 1)$,
+$$\Delta\mu \leq \sqrt{\frac{\sigma^2 \log(2/p)}{\theta}} + \frac{2\log(1/p)}{\theta}$$
+holds with probability at least $1 - p$. 
+Thus, we ensure $\Delta I\leq\delta I$ with probability at least $1 - p$ by setting $\theta$ such that
+\begin{equation*}
+\sqrt{\frac{\sigma^2 \log(2/p)}{\theta}} + \frac{2\log(1/p)}{\theta} \leq \frac{\delta I k}{(I + 1)(I + 1 + \delta I)}.
+\end{equation*}
+By solving the above inequality as a quadratic inequality in terms of $\sqrt{\theta}$, $\Delta I \leq \delta I$ holds with probability at least $1-p$ if
+\begin{equation*}
+\resizebox{\hsize}{!}{
+$\theta \geq \bigg( \sqrt{\frac{I-k+1}{I+2} \log{\frac{2}{p}}} + \sqrt{\frac{I-k+1}{I+2} \log{\frac{2}{p}} + 8\frac{\delta I(I+1)}{I+1+\delta I}\log{\frac{1}{p}}}\bigg)^2 \frac{(I+1+\delta I)^2}{4\delta^2 I^2 k}$.
+}
+\end{equation*}
+By simplifying the above inequality, we have $\theta = \Theta(\frac{I}{\delta k}\log{\frac{1}{p}})$.
+Since $I \leq n$ for any image, by setting $\theta = \Theta(\frac{n}{\delta k} \log{\frac{1}{p}})$, $\Delta I \leq \delta \cdot I$ holds with probability at least $1 - p$.
+\end{proof}
+}
+
+\begin{theorem}
+\label{theorem:dglobal}
+  Let $\theta=\Theta(\frac{\Lambda}{\epsilon k} \log{\frac{|V|}{p}})$ for any $\epsilon\in (0, 1)$, Algorithm~\ref{alg:propagation} correctly answers an $\epsilon$-approximate \ced query under degree centrality with probability at least $1 - p$.
+\end{theorem}
+
+\techreport{
+\begin{proof}
+  Let $\widetilde{N}(u)$ denote the estimated degree of node $u$ via sketch propagation.
+  Given any $u\in S^+_0(v^\lambda)$ and $v\in S^-_\epsilon(v^\lambda)$, 
+  \begin{align*}
+    \widetilde{N}(v) & \leq (1+\delta) \cdot N(v) \leq (1+\delta)(1-\epsilon) \cdot N(v^\lambda) \\
+                     & \leq (1+\delta)(1-\epsilon) \cdot N(u) \leq \frac{(1+\delta)(1-\epsilon)}{1-\delta} \cdot \widetilde{N}(u)
+  \end{align*}
+  hold by applying Lemma~\ref{theorem:dconcentration} over $\kset(\iset(v))$ and the definitions of $S^-_\epsilon(v^\lambda)$ and $S^+_0(v^\lambda)$.
+  By setting $\delta<\frac{\epsilon}{2-\epsilon}$, we have $\widetilde{N}(v)<\widetilde{N}(u)$, i.e., the sketches rank $v$ lower than $u$, with probability at least $1 - p$.
+  Taking the union bound over all nodes in $S^+_0(v^\lambda)$ and setting $\theta = \Theta(\frac{\Lambda}{\epsilon k}\log{\frac{|V|}{p}})$, the sketches rank all nodes in $S^+_0(v^\lambda)$ higher than $v\in S^-_\epsilon(v^\lambda)$. Since there are at least $\lambda|V|$ nodes in $S^+_0(v^\lambda)$, $v$ will not be included in the result $S$.
+  Similarly, given any nodes $u \in S^-_0(v^\lambda)$ and $v \in S^+_\epsilon(v^\lambda)$, we have $\widetilde{N}(v) \geq (1-\delta) \cdot N(v) \geq (1-\delta)(1+\epsilon) \cdot N(v^\lambda) \geq (1-\delta)(1+\epsilon) \cdot N(u) \geq \frac{(1-\delta)(1+\epsilon)}{1+\delta} \cdot \widetilde{N}(u)$.
+  By setting $\delta<\frac{\epsilon}{2+\epsilon}$, it holds that $\widetilde{N}(v)>\widetilde{N}(u)$, i.e. the sketches rank $v$ higher than $u$, with probability at least $1 - p$.
+  Also taking the union bound over all nodes in $S^-_0(v^\lambda)$ and setting $\theta = \Theta(\frac{\Lambda}{\epsilon k}\log{\frac{|V|}{p}})$, the sketches rank all nodes in $S^-_0(v^\lambda)$ lower than $v \in S^+_\epsilon(v^\lambda)$. Since there are at least $(1-\lambda) |V|$ nodes in $S^-_0(v^\lambda)$, $v$ will be included in $S$.
+  Finally, by taking the union bound over all nodes in $S^+_\epsilon(v^\lambda)$ and $S^-_\epsilon(v^\lambda)$ and setting $\theta=\Theta(\frac{\Lambda}{\epsilon k}\log{\frac{|V|^2}{p}}) = \Theta(\frac{\Lambda}{\epsilon k}\log{\frac{|V|}{p}})$, all nodes in $S^+_\epsilon(v^\lambda)$ are included in $S$, whereas all nodes in $S^-_\epsilon(v^\lambda)$ are excluded from $S$, with probability at least $1 - p$.
+\end{proof}
+}
+
+The time complexity of Algorithm~\ref{alg:propagation} is $O(\frac{\Lambda |\eset^*|}{\epsilon}\log{\frac{|V|}{p}})$.
+Its bottleneck lies in the KMV sketch construction process, which propagates $\theta$ sketches of sizes at most $k$ over the matching graph with $|\eset^*|$ edges.
+Its space complexity is $O(k\theta|\vset^*| + |\eset^*|)$. Compared to the exact algorithm, the additional space is used to store KMV sketches.
+
+\subsection{Early Termination for Personalized \ced}
+\label{sec:degree-personal}
+
+Given a query node $q$, a personalized \ced query can be answered directly using the estimated node degrees through \emph{sketch propagation}.
+Specifically, if $q$ is ranked higher than the $(1-\lambda)$-quantile node in terms of estimated degree, it returns \texttt{TRUE} for the personalized query, and \texttt{FALSE} otherwise.
+The following corollary is a direct extension of Theorem~\ref{theorem:dglobal} for personalized queries.
+
+\begin{corollary}
+  When $\theta = \Theta(\frac{\Lambda}{\epsilon k}\log{\frac{|V|}{p}})$, the sketch propagation correctly answers any personalized $\epsilon$-approximate \ced query under degree centrality with probability at least $1 - p$.
+\end{corollary}
+
+Nevertheless, we can optimize personalized \ced query processing by terminating the \emph{sketch propagation} process once we can determine that $q$ is not a hub with high confidence.
+First, the following lemma inspires the design of early termination optimization.
+\begin{lemma}\label{lemma:earlyterm}
+  Given a query node $q$, if there exists a node $u \in \vset^*$ such that $I(\bar{u}) \geq \lambda |V|$ and $I(u) > N(q)$, then the answer to the personalized \ced query is \texttt{FALSE}.
+\end{lemma}
+\techreport{
+\begin{proof}
+For any node $u \in \vset^*$, any $v_1 \in \iset(\bar{u})$ and $v_2 \in \iset(u)$ must be neighbors in $H$.
+Hence, each node in $\iset(\bar{u})$ has at least $I(u)$ neighbors. Since $I(u) > N(q)$ and $I(\bar{u}) \geq \lambda |V|$, there are at least $\lambda |V|$ nodes with degrees higher than $N(q)$.
+\end{proof}
+}
+
+Based on Lemma~\ref{lemma:earlyterm}, we can terminate the \emph{sketch propagation} process when the estimations $\widetilde{I}(\bar{u})$ and $\widetilde{I}(u)$ of $I(\bar{u})$ and $I(u)$ for $u \in \vset^*$ by KMV sketches satisfy $\widetilde{I}(\bar{u}) \geq \lambda|V|$ and $\widetilde{I}(u) > N(q)$.
+Algorithm~\ref{alg:earlyterm} presents the procedure of \texttt{OptimizedReceive}, an optimized version of \texttt{Receive} at Line~\ref{algline:receive} in Algorithm~\ref{alg:propagation} with early termination.
+Specifically, \texttt{OptimizedReceive} returns whether the sketch propagation should end at node $u$.
+It calls \texttt{Receive} to construct the KMV sketch for the image of $u$ (Line~\ref{algline:orig-receive}) and estimates $I(\bar{u})$ and $I(u)$ accordingly (Lines~\ref{algline:iestimation-begin}--\ref{algline:iestimation-end}).
+Finally, it returns whether the estimated $\widetilde{I}(\bar{u})$ and $\widetilde{I}(u)$ have satisfied the early termination conditions (Lines~\ref{algline:etreturn-begin}--\ref{algline:etreturn-end}).
+
+\begin{algorithm}[t]
+\caption{{\ttfamily OptimizedReceive}}\label{alg:earlyterm}
+\LinesNumbered
+\KwIn{Node $u$, arrays of KMV sketches $\kset$}
+\KwOut{If sketch propagation can be terminated}
+    \texttt{Receive}$(u, \kset)$\; \label{algline:orig-receive}
+    $\widetilde{I} \gets 0$ and $\widetilde{I}^\prime \gets 0$\; \label{algline:iestimation-begin}
+    \For{$t=1$ \KwTo $\theta$}{
+        \textbf{if} $|\kset[\bar{u}][t]| = k$ \textbf{then} $\widetilde{I} \gets \widetilde{I} + \frac{\max(\kset[\bar{u}][t])}{\theta}$\;
+        \textbf{else} $\widetilde{I} \gets \widetilde{I} + \frac{k}{(|\kset[\bar{u}][t]| + 1) \cdot \theta}$\;
+
+        \textbf{if} $|\kset[u][t]| = k$ \textbf{then} $\widetilde{I}^\prime \gets \widetilde{I}^\prime + \frac{\max(\kset[u][t])}{\theta}$\;
+        \textbf{else} $\widetilde{I}^\prime \gets \widetilde{I}^\prime + \frac{k}{(|\kset[u][t]| + 1) \cdot \theta}$\;
+    }
+    $\widetilde{I} \gets k/\widetilde{I} - 1$ and $\widetilde{I}^\prime \gets k/\widetilde{I}^\prime - 1$\;\label{algline:iestimation-end}
+    \textbf{if} $\widetilde{I} \geq \lambda|V|$ \textnormal{and} $\widetilde{I}^\prime \geq N(q)$ \textbf{then} \Return{\texttt{TRUE}}\;\label{algline:etreturn-begin}
+    \Return{\texttt{FALSE}}\; \label{algline:etreturn-end}
+\end{algorithm}
+
+\begin{example}
+Continuing with Example~\ref{example:propag}, Fig.~\ref{fig:propagation}(b) demonstrates the sketch propagation process for a personalized \ced query with $q=a_4$ and $\lambda=0.4$. Once we obtain the sketch $\kset(\iset(\bar{p}_1))=\{0.2, 0.4\}$, we have $\widetilde{I}(\bar{p}_1)=\frac{2}{0.4}-1=4$ and $\widetilde{I}(p_1)=\frac{2}{0.6}-1=2.3$. Thus, there are $\widetilde{I}(\bar{p}_1)>\lambda|V|$ nodes with an estimated degree greater than $N(a_4)=2$. Therefore, the sketch propagation process can be terminated early with a decision \texttt{FALSE}.
+\end{example}
+
+The following theorem bounds the probability that early termination yields false negative results.
+\begin{theorem}\label{theorem:beta:degree}
+  Let $\theta = O(\frac{\Lambda}{\epsilon k}\log{\frac{|V|}{p}})$, the probability that a personalized \ced query with answer \texttt{TRUE} is answered with \texttt{FALSE} due to early termination at node $u$ is at most $2\cdot p^{(\beta-1)/\epsilon}$, where $\beta = \min(\frac{\widetilde{I}(\bar{u})}{\lambda|V|}, \frac{\widetilde{I}(u)}{N(q)})$.
+\end{theorem}
+
+\techreport{
+\begin{proof}
+We first observe that for any $\delta > 0$, we have
+\begin{equation}\label{equation:BigOtransform}
+  O(\frac{\Lambda}{\epsilon k} \log{\frac{|V|}{p}}) = O(\frac{\Lambda}{\delta k}\log{\frac{1}{ p^{\delta/\epsilon}}})
+\end{equation}
+By Lemma~\ref{theorem:dconcentration} and Eqn.~\ref{equation:BigOtransform}, if $\theta = O(\frac{\Lambda}{\epsilon k} \log{\frac{|V|}{p}})$, we have
+\begin{equation}\label{equation:deltarelation}
+    \widetilde{I}(\bar{u}) \leq (1+\delta) \cdot I(\bar{u}); \; \widetilde{I}(u) \leq (1 + \delta) \cdot I(u).
+\end{equation}
+Each holds with probability at least $1- p^{\delta/\epsilon}$. 
+According to Eqn.~\ref{equation:deltarelation}, for any $\delta<\beta-1$, we have
+\begin{equation}
+I(\bar{u})\geq \frac{\widetilde{I}(\bar{u})}{1+\delta}\geq\frac{\beta\lambda|V|}{1+\delta}>\lambda|V|
+\end{equation}
+and
+\begin{equation}
+I(u)\geq\frac{\widetilde{I}(u)}{1+\delta}\geq\frac{\beta N(q)}{1+\delta}>N(q)
+\end{equation}
+holds simultaneously with probability $1- 2\cdot p^{(\beta-1)/\epsilon}$.
+
+Note that the early termination occurring at node $u$ leads to a false negative answer only if $\widetilde{I}(\bar{u}) \geq \lambda|V|$ and $\widetilde{I}(u) > N(q)$, but $I(\bar{u}) < \lambda|V|$ or $I(u)\leq N(q)$. Thus, a personalized \ced query with answer \texttt{TRUE} is incorrectly answered due to an early termination at $u$ with probability at most $2\cdot p^{(\beta-1)/\epsilon}$.
+\end{proof}
+}
+
+
+\section{Experiments}
+\label{sec:exp}
+
+\subsection{Experimental Setup}
+
+\myp{Datasets}
+The statistics of the datasets used in the experiments are reported in Table~\ref{tab:datasets}.
+\dsimdb is a KG describing actors and directors of movies.
+\dsacm and \dsdblp are academic KGs denoting researchers and their publications with corresponding venues.
+\dspubmed is a biomedical KG representing the relationships between genes, chemicals, and diseases of different species.
+\dsfreebase is a general-purpose KG developed by Google.
+\dsyelp is a KG built from user ratings and comments on businesses at different locations.
+\dsbpm represents a series of synthetic datasets generated by the Bipartite Preferential Model~\cite{xirogiannopoulos2017extracting,guillaume2004bipartite,guillaume2006bipartite} for scalability tests (Sect.~\ref{sec:scalable}).
+
+\input{tables/net_stats}
+
+\vspace{1mm}
+\myp{Query Generation}
+For each dataset, we use \textsf{AnyBURL} \cite{meilicke2019anytime} to extract a set of candidate meta-paths $\mathbb{M}$.
+We set the confidence threshold to $0.1$ for \textsf{AnyBURL} and take the snapshot at ten seconds.
+Note that \textsf{AnyBURL} can extract meta-paths with extra node constraints, resulting in a large number of potential meta-paths for validation.
+This makes efficient processing of \ced queries even more necessary. $|\mathbb{M}|$ in Table~\ref{tab:datasets} shows the number of meta-paths found on each dataset.
+For personalized \ced queries, we randomly sample 10 nodes from $\vset_0$ as query nodes for each meta-path.
+
+\vspace{1mm}
+\myp{Compared Methods}
+To the best of our knowledge, there have been no prior studies on the \ced problem.
+Therefore, we compare our proposed methods with exact algorithms based on the state-of-the-art materialization methods.
+The compared methods are listed as follows:
+\begin{itemize}[leftmargin=*]
+  \item \wcd and \wch find exact hub nodes by computing the respective degree and h-indexes of each node using the generic worst-case optimal join~\cite{ngo2018worst, freitag2020adopting, arroyuelo2021worst, veldhuizen2014leapfrog} (\S~\ref{sec:wcoj}).
+  \item \boolap \cite{guo2024efficient} returns exact hubs based on both degree and h-index by materializing the relational graph through boolean matrix multiplication. {\sffamily BoolAP$^+$} is a variant of {\sffamily BoolAP} specially optimized for KGs with locally dense regions.
+  \item \glod and \perd apply the sketch propagation framework (\S~\ref{sec:sketch-framework}) to estimate the degrees of all nodes in $H$. \glod returns the set of hubs based on estimated degrees, whereas \perd decides whether a query node $q$ is a hub.
+  \item \perde optimizes \perd with early termination (\S~\ref{sec:degree-personal}).
+  \item \gloh and \perh apply the pivot-based algorithm (\S~\ref{sec:hindex-global}) based on estimated h-indexes. \gloh recursively partitions the nodes until all hubs are found, while \perh checks if a query node $q$ is a hub using $q$ as a pivot.
+  \item \perhe optimizes \perh with early termination (\S~\ref{sec:hindex-personal}).
+\end{itemize}
+
+\begin{table}[t]
+    \setlength\tabcolsep{5pt}
+    \footnotesize
+    \centering
+    \caption{Statistics of meta-paths in the experiments, where $|\eset^*|$ and $\rho^*$ denote the average number of edges and the density of matching graphs induced by meta-paths on each dataset.}\label{tab:EstarNumEdge}
+    \vspace{-1em}
+    \begin{tabular}{|c|c|c|c|c|c|}
+        \hline
+        & \dsimdb & \dsacm & \dsdblp & \dspubmed & \dsfreebase \\
+        \hline
+        $|\eset^*|$ & 22.3 & 133154  & 28941.4 & 23588.5 & 63526.3 \\
+        \hline
+        $\rho^*$ & 0.975 & 22.64  & 1.598 & 1.614 & 1.808 \\
+        \hline
+    \end{tabular}
+    \vspace{-1em}
+\end{table}
+
+\input{tables/efficiency}
+
+\myp{Parameter Settings}
+By default, we set $\lambda = 0.05$ to find the hubs as the top 5\% of the nodes with the highest degrees or h-indexes in a relational graph.
+Our results in \S~\ref{sec:effective} will show that h-index-based \ced queries are well approximated using smaller values of $\theta$ and $k$ compared to degree-based \ced queries.
+Hence, for algorithms targeting degree-based \ced queries (\glod, \perd, \perde), we set $\theta=8$ and $k=32$ by default, while for algorithms targeting h-index-based \ced queries (\gloh, \perh, \perhe), we set $\theta=8$ and $k=4$.
+These settings also demonstrate that our proposed methods produce accurate results in practice with significantly less stringency than those outlined in the worst-case analysis.
+
+\vspace{1mm}
+\myp{Evaluation Metrics}
+We evaluate the quality of hubs each algorithm returns for global \ced queries (\glod and \gloh) with the F1-score.
+The algorithms return a set $S$ of $\lambda \cdot |V|$ nodes.
+However, there might be more than $\lambda \cdot |V|$ nodes satisfying the criteria of Problem~\ref{def:hub} due to the tied values with $c(v^\lambda)$.
+Thus, we exclude nodes with centrality scores equal to $c(v^\lambda)$ in the recall calculation.
+To assess the effectiveness of \perd, \perde, \perh, and \perhe for personalized \ced queries, we record their accuracy in deciding whether a node $q$ has a centrality score equal to or greater than $c(v^\lambda)$. We report the average F1 and accuracy scores across all meta-paths in Figs.~\ref{fig:effective-d} and~\ref{fig:effective-h}.
+To evaluate the theoretical correctness of our proposed methods, we report the value of $\epsilon$ in Fig.~\ref{fig:epsilon} to measure the approximation ratio our methods achieved.
+For efficiency evaluation, we report the average CPU time of each algorithm to process a \ced query.
+
+\vspace{1mm}
+\myp{Environment}
+All experiments were carried out on a Linux server with AMD EPYC 7643 CPU and 256 GB memory running Ubuntu 20.04.
+All algorithms were implemented in C++ with \texttt{-O3} optimization and executed in a single thread.
+Our source code and data are published at \url{https://github.com/YudongNiu/HUB}.
+
+\subsection{Efficiency Evaluation}
+\label{sec:efficiency}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=7.5cm]{figure/exp/efficiency-varylen-legend.pdf}\\
+    \vspace{-1.5mm}
+    \subfigure[Degree]{
+    \begin{minipage}{4.1cm}
+    \includegraphics[width=3.6cm]{figure/exp/efficiency-yelp-varylen-d.pdf}
+    \end{minipage}
+    \label{fig:yelp-d-varylen}
+    }
+    \subfigure[H-index]{
+    \begin{minipage}{4.1cm}
+    \includegraphics[width=3.6cm]{figure/exp/efficiency-yelp-varylen-h.pdf}
+    \end{minipage}
+    \label{fig:yelp-h-varylen}
+    }
+    \vspace{-1.5em}
+    \caption{Running times of different algorithms on \dsyelp for meta-paths with varying length $L$.}
+    \label{fig:varylen}
+    \vspace{-2em}
+\end{figure}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=4cm]{figure/exp/mpsensitivity/mp_sensitivity_legend_d.pdf}
+    \vspace{-2mm}
+    \\
+    \subfigure[\dsimdb]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.4cm]{figure/exp/mpsensitivity/imdb_mp_sensitivity_efficiency_df1.pdf}
+    \end{minipage}
+    \label{fig:imdb-d-mpsens}
+    }
+    \subfigure[\dsacm]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.4cm]{figure/exp/mpsensitivity/acm_mp_sensitivity_efficiency_df1.pdf}
+    \end{minipage}
+    \label{fig:acm-d-mpsens}
+    }
+    \subfigure[\dsdblp]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.4cm]{figure/exp/mpsensitivity/dblp_mp_sensitivity_efficiency_df1.pdf}
+    \end{minipage}
+    \label{fig:dblp-d-mpsens}
+    }
+    \subfigure[\dspubmed]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.4cm]{figure/exp/mpsensitivity/pubmed_mp_sensitivity_efficiency_df1.pdf}
+    \end{minipage}
+    \label{fig:pubmed-d-mpsens}
+    }
+    \subfigure[\dsfreebase]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.4cm]{figure/exp/mpsensitivity/freebase_mp_sensitivity_efficiency_df1.pdf}
+    \end{minipage}
+    \label{fig:freebase-d-mpsens}
+    }
+    \\
+    \vspace{-1.5mm}
+    \includegraphics[width=4cm]{figure/exp/mpsensitivity/mp_sensitivity_legend_h.pdf}\\
+    \vspace{-2mm}
+    \subfigure[\dsimdb]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.4cm]{figure/exp/mpsensitivity/imdb_mp_sensitivity_efficiency_hf1.pdf}
+    \end{minipage}
+    \label{fig:imdb-h-mpsens}
+    }
+    \vspace{-1mm}
+    \subfigure[\dsacm]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.4cm]{figure/exp/mpsensitivity/acm_mp_sensitivity_efficiency_hf1.pdf}
+    \end{minipage}
+    \label{fig:acm-h-mpsens}
+    }
+    \subfigure[\dsdblp]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.4cm]{figure/exp/mpsensitivity/dblp_mp_sensitivity_efficiency_hf1.pdf}
+    \end{minipage}
+    \label{fig:dblp-h-mpsens}
+    }
+    \subfigure[\dspubmed]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.4cm]{figure/exp/mpsensitivity/pubmed_mp_sensitivity_efficiency_hf1.pdf}
+    \end{minipage}
+    \label{fig:pubmed-h-mpsens}
+    }
+    \subfigure[\dsfreebase]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.4cm]{figure/exp/mpsensitivity/freebase_mp_sensitivity_efficiency_hf1.pdf}
+    \end{minipage}
+    \label{fig:freebase-h-mpsens}
+    }
+    \vspace{-0.5em}
+    \caption{Running time of our methods for each meta-path on \dsfreebase with x-axis representing the number of edges $|\eset^*|$ in the corresponding matching graph. Lines of corresponding colors indicate the linear regression results of each method's running time with respect to $|\eset^*|$. Subfigures (a)-(e): degree based hub queries; Subfigures (f)-(j): h-index based hub queries.}
+    \label{fig:mpsens}
+    \vspace{-1.8em}
+\end{figure*}
+
+In Table~\ref{tab:efficiency}, we present the execution time per query for each method, along with its speedup ratios compared to the fastest exact method across five datasets.
+Based on these results, we make the following observations.
+First, sketch propagation-based algorithms are consistently more efficient than exact baselines \wcd and \wch across all datasets except \dsimdb and provide more than 10$\times$ speedups for degree-based queries (on \dsfreebase, \glod is 29$\times$ faster than \wcd) and up to two orders of magnitude speedups for h-index-based queries (on \dsfreebase, \gloh is 191$\times$ faster than \wch).
+The speedup over degree-based queries is smaller than h-index-based queries because h-index-based queries are accurately approximated with smaller $k$ as discussed in \S~\ref{sec:effective}.
+\glod is slightly slower than \wcd for degree-based queries on \dsimdb since matching graphs of meta-paths on \dsimdb are of relatively small sizes. Specifically, as demonstrated in Table~\ref{tab:EstarNumEdge}, the average number of edges in matching graphs on \dsimdb is 22.3, which is much smaller than matching graphs of meta-paths on other datasets. Therefore, the worst-case optimal join is performed quickly over the matching graph on \dsimdb, whereas our methods require additional costs for sketch construction and degree estimation.
+Nevertheless, \glod answers \ced queries on \dsimdb in 1.3 milliseconds.
+\boolapp, which is specially optimized for relational graph materialization based on matching graphs with dense regions, demonstrates exceptional efficiency on \dsacm, where the matching graphs have a high average density of 22.64.
+Nevertheless, \boolapp is much slower than our sketch propagation methods across other datasets, where the matching graphs are of lower average density, and is less scalable even than \wcd and \wch.
+Thus, in the following, we will only compare our methods with \wcd and \wch.
+Second, the algorithms for personalized queries, i.e., \perde and \perhe, benefit from early termination optimization and achieve more than 2$\times$ additional speedups over \perd and \perh.
+
+\myp{Effect of Selected Meta-Paths}
+We investigate how the properties of specific meta-paths affect the efficiency of different methods.
+Fig.~\ref{fig:varylen} presents the running time of different methods on \dsyelp varying the length of the meta-path $L$. We can observe that $L$ has a significant impact on efficiency, and exact methods \wcd and \wch exceed the 1-hour limit per meta-path when $L=2,3$. On the other hand, our methods based on \emph{sketch propagation} can efficiently process all queries up to $L=3$. Specifically, \glod and \gloh can answer \ced queries based on degree and h-index in 1,438 and 114 seconds, respectively. For personalized queries, \perhe and \perde handle meta-paths of $L=3$ in 893 and 42 seconds.
+
+Fig.~\ref{fig:mpsens} presents the running time of our sketch propagation-based methods for each meta-path across datasets, along with the linear regression results of each method's running time with respect to the number of edges $|\eset^*|$ in the corresponding matching graph. We have the following observations. \underline{\textit{First},} the running time of all our methods generally increases with growing $|\eset^*|$, which aligns with the fact that the time complexity of our method is proportional to $|\eset^*|$.
+\underline{\textit{Second},} the running time of \glod and \perd exhibits a strong correlation with $|\eset^*|$. For example, on \dsfreebase, we have $R^2$ coefficients of 0.91 and 0.78 for \glod and \perd, respectively. On the other hand, the running time of \perde demonstrates a weaker correlation with $|\eset^*|$, with a $R^2$ coefficient of 0.57 on \dsfreebase. By employing early termination during sketch propagation, \perde avoids propagating sketches over the entire matching graph, thereby reducing its dependence on $|\eset^*|$. A similar observation can be made for \gloh and \perh, whose running time is more closely correlated with $|\eset^*|$ compared to \perhe.
+\underline{\textit{Third},} the running time of \glod and \perd generally exhibits a stronger correlation with $|\eset^*|$ compared to the running time of \gloh and \perh. For example, on \dspubmed, the $R^2$ coefficient is 0.91 for \glod and 0.86 for \gloh. This difference arises because \gloh requires multiple iterations of the sketch propagations based on randomly selected pivot nodes, making its running time dependent on both the number of sketch propagations and the time consumption for each propagation, which is influenced by $|\eset^*|$. In contrast, \glod requires a single pass of sketch propagation for the KMV sketch construction.
+
+\leavetotechreport{Due to space limit, the results for memory consumption are deferred to the technical report~\cite{hud2023tr}.}
+We exclude \dsyelp from the remaining experiments on effectiveness evaluations to ensure a fair comparison, as \wcd and \wch cannot complete on all meta-paths.
+
+\techreport{We then report the memory consumption of different methods in Fig.~\ref{fig:mem}. We can observe from Fig.~\ref{fig:mem-d} that \glod, \perd, and \perde take relatively more memory than the exact algorithm \wcd to maintain KMV sketches for images. Nevertheless, our methods take at most 1.93 times more memory than \wcd (on \dsdblp). On the other hand, the gap between the memory consumption of \gloh, \perh, \perhe and the memory consumption of \wch is marginal since h-index-based queries require fewer KMV sketches for accurate estimation. Specifically, our methods take at most 1.21 times more memory than \wch (on \dspubmed).
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=8cm]{figure/exp/efficiency-varylen-legend.pdf}
+    \subfigure[degree]{
+        \begin{minipage}{3.8cm}
+        \includegraphics[width=4cm]{figure/exp/mem-d.pdf}
+        \end{minipage}
+        \label{fig:mem-d}
+    }
+    \subfigure[h-index]{
+        \begin{minipage}{3.8cm}
+        \includegraphics[width=4cm]{figure/exp/mem-h.pdf}
+        \end{minipage}
+        \label{fig:mem-h}
+    }
+    \caption{Memory consumption of compared methods.}
+    \label{fig:mem}
+\end{figure}
+}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=4.5cm]{figure/exp/effect-global/legend-d.pdf}
+    \vspace{-1mm}
+    \\
+    \subfigure[\dsimdb]{
+	\begin{minipage}{3.1cm}
+        \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-d-imdb-varying-R.pdf}
+        \end{minipage}
+        \label{fig:imdb-d-varyingR}
+    }
+    \vspace{-3mm}
+    \subfigure[\dsacm]{
+        \begin{minipage}{3.1cm}
+        \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-d-acm-varying-R.pdf}
+        \end{minipage}
+        \label{fig:acm-d-varyingR}
+    }
+    \subfigure[\dsdblp]{
+	\begin{minipage}{3.1cm}
+        \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-d-dblp-varying-R.pdf}
+        \end{minipage}
+        \label{fig:dblp-d-varyingR}
+    }
+    \subfigure[\dspubmed]{
+        \begin{minipage}{3.1cm}
+        \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-d-pubmed-varying-R.pdf}
+        \end{minipage}
+        \label{fig:pubmed-d-varyingR}
+    }
+    \subfigure[\dsfreebase]{
+        \begin{minipage}{3.1cm}
+        \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-d-freebase-varying-R.pdf}
+        \end{minipage}
+        \label{fig:freebase-d-varyingR}
+    }
+    \subfigure[\dsimdb]{
+        \begin{minipage}{3.1cm}
+        \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-d-imdb-varying-K.pdf}
+        \end{minipage}
+        \label{fig:imdb-d-varyingk}
+    }
+    \vspace{-1mm}
+    \subfigure[\dsacm]{
+        \begin{minipage}{3.1cm}
+        \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-d-acm-varying-K.pdf}
+        \end{minipage}
+        \label{fig:acm-d-varyingk}
+    }
+    \subfigure[\dsdblp]{
+	\begin{minipage}{3.1cm}
+        \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-d-dblp-varying-K.pdf}
+        \end{minipage}
+        \label{fig:dblp-d-varyingk}
+    }
+    \subfigure[\dspubmed]{
+        \begin{minipage}{3.1cm}
+        \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-d-pubmed-varying-K.pdf}
+        \end{minipage}
+        \label{fig:pubmed-d-varyingk}
+    }
+    \subfigure[\dsfreebase]{
+        \begin{minipage}{3.1cm}
+        \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-d-freebase-varying-K.pdf}
+        \end{minipage}
+        \label{fig:freebase-d-varyingk}
+    }
+    \vspace{-0.5em}
+    \caption{Effectiveness of \glod, \perd, and \perde for \ced queries based on degree centrality with varying parameters.
+    Subfigures (a)-(e): varying parameter $\lambda$. Subfigures (f)-(j): varying parameter $k$.} % Subfigures (k)-(o): varying parameter $\theta$.}
+    \label{fig:effective-d}
+    \vspace{-1em}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=4.5cm]{figure/exp/effect-global/legend-h.pdf}
+    \vspace{-1mm}
+    \\
+    \subfigure[\dsimdb]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-h-imdb-varying-R.pdf}
+    \end{minipage}
+    \label{fig:imdb-h-varyingR}
+    }
+    \vspace{-3mm}
+    %
+    \subfigure[\dsacm]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-h-acm-varying-R.pdf}
+    \end{minipage}
+    \label{fig:acm-h-varyingR}
+    }
+    \subfigure[\dsdblp]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-h-dblp-varying-R.pdf}
+    \end{minipage}
+    \label{fig:dblp-h-varyingR}
+    }
+    \subfigure[\dspubmed]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-h-pubmed-varying-R.pdf}
+    \end{minipage}
+    \label{fig:pubmed-h-varyingR}
+    }
+    \subfigure[\dsfreebase]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-h-freebase-varying-R.pdf}
+    \end{minipage}
+    \label{fig:freebase-h-varyingR}
+    }
+    \subfigure[\dsimdb]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-h-imdb-varying-K.pdf}
+    \end{minipage}
+    \label{fig:imdb-h-varyingk}
+    }
+    \vspace{-1mm}
+    \subfigure[\dsacm]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-h-acm-varying-K.pdf}
+    \end{minipage}
+    \label{fig:acm-h-varyingk}
+    }
+    \subfigure[\dsdblp]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-h-dblp-varying-K.pdf}
+    \end{minipage}
+    \label{fig:dblp-h-varyingk}
+    }
+    \subfigure[\dspubmed]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-h-pubmed-varying-K.pdf}
+    \end{minipage}
+    \label{fig:pubmed-h-varyingk}
+    }
+    \subfigure[\dsfreebase]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.45cm]{figure/exp/effect-global/effect-h-freebase-varying-K.pdf}
+    \end{minipage}
+    \label{fig:freebase-h-varyingk}
+    }
+    \vspace{-0.5em}
+    \caption{Effectiveness of \gloh, \perh, and \perhe for \ced queries based on h-index with varying parameters. Subfigures (a)-(e): varying parameter $\lambda$. Subfigures (f)-(j): varying parameter $k$.} % Subfigures (k)-(o): varying parameter $\theta$.}
+    \label{fig:effective-h}
+    \vspace{-1em}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=4.5cm]{figure/exp/epsilon/epsilon_legend.pdf}
+    \vspace{-2mm}
+    \\
+    \subfigure[\dsimdb]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.45cm]{figure/exp/epsilon/epsilon_imdb.pdf}
+    \end{minipage}
+    \label{fig:imdb-epsilon}
+    }
+    %
+    \subfigure[\dsacm]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.45cm]{figure/exp/epsilon/epsilon_acm.pdf}
+    \end{minipage}
+    \label{fig:acm-epsilon}
+    }
+    \subfigure[\dsdblp]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.45cm]{figure/exp/epsilon/epsilon_dblp.pdf}
+    \end{minipage}
+    \label{fig:dblp-epsilon}
+    }
+    \subfigure[\dspubmed]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.45cm]{figure/exp/epsilon/epsilon_pubmed.pdf}
+    \end{minipage}
+    \label{fig:pubmed-epsilon}
+    }
+    \subfigure[\dsfreebase]{
+    \begin{minipage}{3.1cm}
+    \includegraphics[height=2.45cm]{figure/exp/epsilon/epsilon_freebase.pdf}
+    \end{minipage}
+    \label{fig:freebase-epsilon}
+    }
+    \vspace{-0.5em}
+    \caption{Average approximation ratio $\epsilon$ achieved by our methods by varying the sketch size $k$, with shaded area denoting the variance of $\epsilon$ over 10 executions.}
+    \label{fig:epsilon}
+    \vspace{-1em}
+\end{figure*}
+
+\subsection{Effectiveness Evaluation}
+\label{sec:effective}
+
+\myp{Results for Degree-based \ced Queries}
+Figs.~\ref{fig:imdb-d-varyingR}--\ref{fig:freebase-d-varyingR} illustrate the effectiveness of \glod, \perd, and \perde on each dataset by varying the parameter $\lambda$.
+We observe that \glod achieves F1-scores of more than 0.85 across all datasets for \ced queries, and \perd and \perde consistently achieve accuracy rates of at least 0.98 for personalized \ced queries.
+Moreover, \glod provides more accurate answers with increasing $\lambda$ and achieves an F1-score of over 0.9 when $\lambda=0.05$.
+The reason is that for a larger $\lambda$, the $(1-\lambda)$-quantile node $v^\lambda$ has a smaller degree, and \ced queries apply less strict requirements to the hubs, which can be more easily approximated. The effectiveness of \glod varies across datasets: It achieves higher F1-scores on \dsimdb and \dsacm than on the other three datasets. The variation in the effectiveness of \glod is caused by different degree distributions of relational graphs in each dataset. Specifically, matching graphs with higher density on \dsacm result in densely connected relational graphs, where on average 72.7\% of the nodes share the same degree as $v^\lambda$. These nodes are excluded from the recall calculation, leading to a higher F1-score. In contrast, the percentage of nodes with the same degree as $v^\lambda$ is 32.25\% on \dsdblp, 38.64\% on \dspubmed, and 30.6\% on \dsfreebase. \glod achieves a high F1-score on \dsimdb because the matching graphs are relatively small, allowing accurate degree estimation in the relational graphs.
+
+Figs.~\ref{fig:imdb-d-varyingk}--\ref{fig:freebase-d-varyingk} show the effectiveness of \glod, \perd, and \perde on each dataset with varying the parameter $k$. 
+First, \glod, \perd, and \perde all provide better results with increasing $k$. Larger KMV sketches allow the sketch propagation-based methods to approximate \ced queries with higher F1-scores or accuracy rates due to more accurate degree estimations.
+Second, personalized \ced queries are accurately approximated by \perd and \perde, even with relatively smaller values of $k$.
+This is because personalized \ced queries only require comparing the degrees of $q$ and $v^\lambda$, which is relatively easy due to the significant difference between the degrees of $q$ and $v^\lambda$.
+Third, the gap between the accuracy of \perde and \perd is marginal, even when $k=2$ (with a maximum gap of 0.044 on \dsdblp), and narrows further with increasing $k$. This is because a larger $k$ leads to more accurate estimations of image sizes, thus reducing the chance of false early termination.
+
+\vspace{1mm}
+\myp{Results for \ced Queries based on H-index}
+The effectiveness results of \gloh, \perh, and \perhe are presented in Fig.~\ref{fig:effective-h}.
+Similar observations can be made for the methods for h-index-based \ced queries as those for degree-based \ced queries.
+Furthermore, we note that \gloh achieves a higher F1-score for h-index-based \ced queries compared to \glod in the same parameter setting.
+This is because the range of h-index values is much smaller than that of degrees, resulting in a larger number of tied h-index values.
+By excluding nodes with h-index values equal to $c(v^\lambda)$ from the recall calculation, h-index-based \ced queries become much easier to approximate.
+
+% To evaluate the theoretical correctness of our methods in terms of the concept of $\epsilon$-separable, we further study the $\epsilon$ our methods achieved. 
+\myp{Results for Approximation Ratio $\epsilon$}
+Fig.~\ref{fig:epsilon} presents the approximation ratio $\epsilon$ achieved by our sketch propagation-based methods varying sketch size $k$. We have the following observations. \underline{\textit{First},} our methods answer Problems \ref{problem:approxHUB} and \ref{problem:approxPer} accurately with $\epsilon$ consistently remaining below 0.6 under the default parameter setting of $k$ and $\theta$. Specifically, the approximation ratio $\epsilon$ achieved by our methods decreases monotonically with the increase of $k$ across datasets and approaches zero when $k=32$ except on \dsacm. This exception arises due to relational graphs with a substantial proportion of high-degree nodes on \dsacm induced by matching graphs with high density, thereby requiring a larger value of $k$ to effectively identify hubs in these relational graphs, as indicated by Theorems~\ref{theorem:dglobal} and~\ref{theorem:hindex}. \underline{\textit{Second},} given fixed value of $k$, \gloh, \perh and \perhe can achieve smaller $\epsilon$ compared to \glod, \perd and \perde. This observation complies with our observation from Figs.~\ref{fig:effective-d} and~\ref{fig:effective-h} that $h$-index-based queries are easier to approximate due to the large number of tied $h$-index values in relational graphs. Note that \perd and \perh achieve the same approximation ratio as \glod and \gloh, respectively, since the query node for personalized hub queries can be selected as the node leading to the maximum $\epsilon$ in global hub queries.
+
+\vspace{1mm}
+\myp{Summary}
+\glod, \perd, and \perde achieve F1-scores or accuracy rates greater than 0.9 across all datasets when $k=32$ and $\theta=8$ for degree-based \ced queries with $\lambda=0.05$.
+Similarly, for h-index-based \ced queries, \gloh, \perh, and \perhe achieve F1 scores or an accuracy greater than 0.9 across all datasets when $k=4$ and $\theta=8$.
+All of these results confirm the empirical effectiveness as well as theoretical correctness of our proposed methods.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=5cm]{figure/exp/influence_analysis_legend.pdf}
+    \\
+    \includegraphics[width=7.5cm]{figure/exp/influence_analysis.pdf}
+    \vspace{-4mm}
+    \caption{Ratio between the influence scores achieved by hubs revealed by \ced methods and the highest influence scores estimated by the RIS algorithm.}
+    \label{fig:influence}
+    \vspace{-1em}
+\end{figure}
+
+\subsection{Influence Analysis}
+
+We further verify the effectiveness of \ced for influence analysis on relational graphs.
+We adopt the weighted cascade model for influence estimation~\cite{goyal2011data,chen2010scalable}.
+Fig.~\ref{fig:influence} reports the ratio between the influence scores of top-5\% hubs returned by \ced methods (\wcd, \glod, \wch, and \gloh) and the influence scores of top-5\% seeds with the highest influence estimated by a reverse influence sampling (RIS) algorithm for influence maximization~\cite{tang2015influence}. We have the following observations.
+First, all \ced methods consistently achieve more than 90\% of the influence scores achieved by the RIS algorithm, which verifies that the hubs have significant influence over the relational graph and that our proposed methods can serve as effective seeding strategies.
+Second, the h-index-based hubs (obtained by \gloh and \wch) outperform the degree-based hubs (obtained by \glod and \wcd) and maintain over 95\% of the influence scores achieved by the RIS algorithm. In contrast to degree-based hubs, h-index-based hubs have neighbors with higher degrees, which further facilitate the spread of influence to indirect neighbors.
+
+\subsection{Scalability Test}
+\label{sec:scalable}
+
+We further test the scalability of our methods on large synthetic datasets \dsbpm. Fig.~\ref{fig:bpm} reports the running time and memory consumption of different methods by varying the number of nodes. We make the following observations.
+The exact methods \wcd and \wch cannot scale to large datasets. Specifically, \wcd and \wch can only process queries from the smallest \dsbpm datasets with less than 1M nodes and exceed the 1-hour limit on larger datasets. In contrast, our methods based on \emph{sketch propagation} scale linearly with the size of the datasets and can handle queries on \dsbpm datasets with up to 192M nodes and 1.92B edges within 2,552 seconds for degree-based queries and 258 seconds for h-index-based queries.
+In terms of memory consumption, our methods use 118.5 GB and 134 GB memory, respectively, to process queries based on the h-index and degree centrality measures on the largest \dsbpm dataset. The difference between the memory consumption of queries based on different centrality measures is marginal because KMV sketches are memory efficient compared to the matching graph itself.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=8cm]{figure/exp/bipartite-legend.pdf}\\
+    \vspace{-1.5mm}
+    \subfigure[Running Time]{
+        \includegraphics[width=4.1cm]{figure/exp/bipartite-efficiency.pdf}
+        \label{fig:scale:efficiency}
+    }
+    \subfigure[Memory Usage]{
+        \includegraphics[width=4.1cm]{figure/exp/bipartite-mem.pdf}
+        \label{fig:scale:mem}
+    }
+    \vspace{-1em}
+    \caption{Runtime and memory consumption of our methods on the \dsbpm dataset.}
+    \label{fig:bpm}
+    \vspace{-5mm}
+\end{figure}
+
+
+\section{Extension to H-index}
+\label{sec:hindex}
+
+In this section, we extend the sketch propagation framework to approximately process \ced queries based on the h-index.
+To compute the h-index of each node, we should compute the degrees of its neighbors.
+However, KMV sketches can only estimate the neighborhood sizes of a node but fail to provide the degree estimations of its neighbors.
+Therefore, we propose a novel pivot-based algorithm to obtain the set of hubs in terms of h-index without explicitly calculating the h-index of every node in $H$.
+Before delving into the algorithm, we first review the definition of \emph{h-index} \cite{LuZZS16}.
+\begin{definition}[h-index]
+  Given a node $u \in H$, the h-index of $u$ is the largest integer $h(u)$ such that $u$ has no fewer than $h(u)$ neighbors of degrees at least $h(u)$.
+\end{definition}
+
+\subsection{Pivot-based Algorithm for \ced}
+\label{sec:hindex-global}
+
+The basic idea of the pivot-based algorithm is to choose a random pivot node $u \in V$ and iteratively partition the nodes in $H$ into two disjoint sets, $Q^+_u$ and $Q^-_u$, based on their h-index values in comparison with $h(u)$, i.e., $Q^+_u = \{v \in V \,|\, h(v) \geq h(u)\}$ and $Q^-_u = \{v \in V \,|\, h(v) < h(u)\}$.
+As such, we can decide that $Q^+_u \subseteq S^+_0(v_\lambda)$ if $u \in S^+_0(v_\lambda)$ since all nodes in $Q^+_u$ have h-index values no less than $h(u)$ and thus are ranked higher than $u$, or $Q^-_u \cap S^+_0(v_\lambda) = \varnothing$ if $u \in S^-_0(v_\lambda)$ similarly.
+This partitioning strategy allows for efficient bisection when identifying hubs, i.e., $S^+_0(v^\lambda)$.
+If $u \in S^+_0(v_\lambda)$, we can add all nodes in $Q^+_u$ to the result set and exclude them from consideration subsequently.
+In contrast, if $u \in S^-_0(v^\lambda)$, the nodes in $Q^+_u$ may contain those in $S^+_0(v^\lambda)$ and $S^-_0(v^\lambda)$, which require further partitioning in subsequent iterations. Meanwhile, all nodes in $Q^-_u$ must not be in $S^+_0(v^\lambda)$ and are excluded from consideration.
+The iterative process above proceeds until all nodes have been decided.
+Then, all nodes in $S^+_0(v^\lambda)$ are added to the result.
+
+\begin{algorithm}[t]
+\caption{Pivot-based Algorithm}
+\label{alg:hindex}
+\LinesNumbered
+\KwIn{KG $\gset$, meta-path $\mset$, quantile parameter $\lambda$, number of propagations $\theta$, KMV sketch size $k$}
+\KwOut{The set of hubs $S$}
+    \ForAll{$u \in \vset^*$}{ \label{algline:pivotstagei-begin}
+        \For{$t=1$ {\rm \textbf{to}} $\theta$}{
+            $\kset[u][t] \gets \varnothing$\;
+            \textbf{if} $u \in \vset_0$ \textbf{do} add $r(u) = \mathtt{Rand}(0, 1)$ to $\kset[u][t]$\;
+        }
+    }
+    $\widetilde{N} \gets$ \texttt{Propagate}$(\kset)$\; \label{algline:pivotstagei-end}
+    $Q \gets V$ and $S \gets \varnothing$\; 
+    \While{$|Q|>0$}{ \label{algline:iterQ-begin}
+        Sample a random node from $Q$ as the pivot node $u$\; \label{algline:hest-begin}
+        Sort nodes in $\nset(u)$ in descending order by $\widetilde{N}$\;
+        Initialize $\widetilde{h}(u) \gets 0$\;
+        \ForAll{$v \in \nset(u)$ and $\widetilde{N}(v) \geq \widetilde{h}(u)$}{
+            $\widetilde{h}(u) \gets \widetilde{h}(u) + 1$\; \label{algline:hest-end}
+        }
+        \ForAll{$v \in \vset^*$}{ \label{algline:initK2-begin}
+            \For{$t=1$ \KwTo $\theta$}{
+                $\kset[v][t] \gets \varnothing$\;
+                \If{$v \in \vset_0$ and $\widetilde{N}(v) \geq \widetilde{h}(u)$}{
+                    Add $r(v) = \mathtt{Rand}(0, 1)$ to $\kset[v][t]$\; \label{algline:initK2-end}
+                }
+            }
+        }
+        $\widetilde{h} \gets$ \texttt{Propagate}$(\kset)$\; \label{algline:prop2}
+        Initialize $Q^+_u \gets \varnothing$ and $Q^-_u \gets \varnothing$\; \label{algline:partitionQ-begin}
+        \ForAll{$v\in Q$}{
+            \textbf{if} $\widetilde{h}(v) \geq \widetilde{h}(u)$ \textbf{do} add $v$ to $Q^+_u$\; 
+            \textbf{else} add $v$ to $Q^-_u$\; \label{algline:partitionQ-end}
+        }
+        \uIf{$|Q^+_u| + |S| \leq \lambda|V|$}{ \label{algline:updateS-begin}
+            $Q \gets Q^-_u$ and $S \gets S \cup Q^+_u$\;
+            \textbf{if} $|S| \leq \lambda|V|$ \textbf{then} $S \gets S \cup \{u\}$\;
+        }
+        \textbf{else} $Q\gets Q^+_u$\; \label{algline:updateS-end}
+    } \label{algline:iterQ-end}
+    \Return{$S$}\; \label{algline:pivotreturn}
+\end{algorithm}
+
+\vspace{1mm}
+\myp{Pivot-based Partitioning}
+The key challenge lies in partitioning the nodes in $H$ without explicitly computing the h-index of each node.
+In fact, we can compare the h-indexes of two nodes using only one of them.
+By the definition of h-index, for any $u, v \in V$, we have $h(v) \geq h(u)$ iff $v$ has at least $h(u)$ neighbors in $H$ with degrees larger than or equal to $h(u)$.
+Based on the above observation, we introduce a two-stage pivotal partitioning method for our pivot-based algorithm.
+
+\noindent\underline{\textit{Stage (I): Estimate $h(u)$.}}
+We first employ \emph{sketch propagation} on the matching graph to estimate the degrees of all nodes in $H$.
+Subsequently, at each iteration, we scan the set of neighbors $\nset(u)$ of a randomly chosen node $u$ (obtained by a single DFS on the matching graph starting from $u$).
+Based on the degree estimations, we compute an approximate h-index $\widetilde{h}(u)$ of node $u$.
+
+\noindent\underline{\textit{Stage (II): Estimate $Q^+_u$ and $Q^-_u$.}}
+Once we have the approximate h-index $\widetilde{h}(u)$, we proceed to eliminate the nodes in $H$ with degrees smaller than $\widetilde{h}(u)$.
+Next, we perform \emph{sketch propagation} on the subgraph of the matching graph that only includes the remaining nodes.
+The resulting KMV sketches estimate the degrees of nodes in the subgraph of $H$ induced by the set of nodes with degrees greater than or equal to $\widetilde{h}(u)$ in the original graph $H$, denoted as $\widetilde{H}(u)$.
+Finally, we obtain $Q^+_u$ as the set of nodes with estimated degrees greater than $\widetilde{h}(u)$ in the induced subgraph of $\widetilde{H}(u)$, while the remaining nodes are added to $Q^-_u$.
+
+Algorithm~\ref{alg:hindex} depicts the procedure of our pivot-based algorithm.
+It also receives a KG $\gset$, a meta-path $\mset$, the quantile parameter $\lambda$, the number of propagations $\theta$, and the KMV sketch size $k$ as input, and returns a set of nodes $S$ to answer the (approximate) \ced query based on h-index.
+It first calls the same \texttt{Propagate} function as Algorithm~\ref{alg:propagation} over the array $\kset$ of KMV sketches to estimate the degree of each node in $H$ (Lines~\ref{algline:pivotstagei-begin}--\ref{algline:pivotstagei-end}).
+Note that the estimated degrees will be reused across all iterations for partitioning.
+The iterative process proceeds until $Q$, which contains the nodes to be partitioned in each iteration, is empty (Lines~\ref{algline:iterQ-begin}--\ref{algline:iterQ-end}).
+In each iteration, it first randomly chooses a pivot node $u$ from $Q$ and estimates its h-index $\widetilde{h}(u)$ (Lines~\ref{algline:hest-begin}-\ref{algline:hest-end}).
+Then, it re-initializes arrays $\kset$ of KMV sketches for the nodes with degrees greater than $\widetilde{h}(u)$ (Lines~\ref{algline:initK2-begin}--\ref{algline:initK2-end}).
+After that, the \texttt{Propagate} function is performed over $\kset$ to estimate the number of neighbors with degrees greater than $\widetilde{h}(u)$ for each node in $Q$ (Line~\ref{algline:prop2}).
+Accordingly, it divides $Q$ into $Q^+_u$ and $Q^-_u$ according to $\widetilde{h}$ (Lines~\ref{algline:partitionQ-begin}--\ref{algline:partitionQ-end}) and updates the result set $S$ and the candidate node set $Q$ based on $Q^+_u$ and $Q^-_u$ (Lines~\ref{algline:updateS-begin}--\ref{algline:updateS-end}).
+Finally, when $Q$ is empty, the result set $S$ is returned (Line~\ref{algline:pivotreturn}). The ties are broken arbitrarily.
+
+\myp{Theoretical Analysis}
+Algorithm~\ref{alg:hindex} returns the correct answer for any h-index-based \ced query w.h.p.
+We first give the following lemma, which states that Algorithm~\ref{alg:hindex} provides a concentrated estimation of $h(u)$ for the randomly chosen pivot node $u$ in each iteration.
+\begin{lemma}\label{lemma:hq}
+For any $\delta, p\in(0, 1)$, if $\theta=\Theta(\frac{\Lambda}{\delta k}\log{\frac{|V|}{p}})$, we have $(1-\delta) \cdot h(u) \leq \widetilde{h}(u) \leq (1+\delta) \cdot h(u)$ with probability at least $1 - p$ for the pivot node $u$ in each iteration.
+\end{lemma}
+
+\techreport{
+\begin{proof}
+Let us order the nodes in $\nset(u)$ according to their degrees in $H$ descendingly and denote $v_i$ as the $i$-th neighbor of $u$.
+Then, we have $N(v_i) \geq h(u)$ for $0 \leq i \leq h(u) - 1$ and $N(v_i) \leq h(u)$ for $h(u) \leq i \leq N(u) - 1$.
+By combining Lemma~\ref{theorem:dconcentration} with the union bound over $V$, when $\theta = \Theta(\frac{\Lambda}{\delta k}\log{\frac{|V|}{p}})$ in the first stage, we have $\widetilde{N}(v_i) \geq (1-\delta)N(v_i) \geq (1-\delta)h(u)$ for $0 \leq i \leq h(u)-1$ with probability at least $1 - p$.
+Thus, node $u$ has $h(u) \geq (1-\delta) h(u)$ neighbors with estimated degrees of at least $(1-\delta) h(u)$.
+Thus, $\widetilde{h}(u) \geq (1-\delta) h(u)$ with probability at least $1 - p$.
+Similarly, we have $\widetilde{N}(v_i) \leq (1+\delta)N(v_i) \leq (1+\delta) h(u)$ for $i \geq h(u)$ with probability at least $1 - p$.
+Thus, node $u$ has no more than $h(u)$ neighbors with estimated degrees greater than $(1+\delta) h(u)$, and $\widetilde{h}(u) \leq (1+\delta) h(u)$ with probability at least $1 - p$.
+\end{proof}
+}
+
+The following lemma indicates that the pivot-based partitioning method divides candidate nodes into $\epsilon$-separable sets. 
+\begin{lemma}\label{lemma:concenpar}
+  For any $\delta^\prime \in (0, 1)$ and pivot node $u$, by setting $\theta = \Theta(\frac{\Lambda}{\delta^\prime k} \log{\frac{|V|}{p}})$, we have $S^-_{\delta^\prime}(u) \subseteq Q^-_u$ and $S^+_{\delta^\prime}(u) \subseteq Q^+_u$ with probability at least $1 - p$.
+\end{lemma}
+
+\techreport{
+\begin{proof}
+  For any node $v \in S^-_{\delta^\prime}(u)$, let $\nset_u(v)$ denote the neighbors of $v$ in $\widetilde{H}(u)$ and $N_u(v)=|\nset_u(v)|$.
+  Since $h(v) < (1-\delta^\prime) h(u)$, $v$ has at most $(1-\delta^\prime) h(u)$ neighbors with degrees larger than or equal to $(1-\delta^\prime) h(u)$.
+  For each neighbor $v^\prime$ of $v$ with $N(v^\prime) < (1-\delta^\prime) h(u)$, when $\theta = \Theta(\frac{\Lambda}{\delta k} \log{\frac{|V|}{p}})$, $\widetilde{N}(v^\prime) < (1+\delta)N(v^\prime) < (1+\delta)(1-\delta^\prime) h(u) < \frac{(1+\delta)(1-\delta^\prime)}{1-\delta} \widetilde{h}(u)$.
+  By setting $\delta < \frac{\delta^\prime}{2-\delta^\prime}$, we have $\widetilde{N}(v^\prime) < \widetilde{h}(u)$, i.e., $v^\prime$ is filtered out in \textit{Stage (I)}, with probability at least $1 - p$.
+  Thus, we have $N_u(v) < (1-\delta^\prime) h(u)$ with probability at least $1 - p$.
+  Let $\widetilde{N}_u(v)$ denote the estimation of $N_u(v)$ in \textit{Stage (II)} of pivot-based partitioning.
+  We have $\widetilde{N}_u(v) \leq (1+\delta) N_u(u)$ with probability at least $1 - p$, and thus $\widetilde{N}_u(v) \leq (1+\delta) N_u(v) < (1+\delta)(1-\delta^\prime) h(u) \leq \frac{(1+\delta)(1-\delta^\prime)}{1-\delta} \widetilde{h}(u) \leq \widetilde{h}(u)$, i.e., $v$ is added to $Q^-_u$ with probability at least $1 - p$.
+  Thus, by setting $\theta = \Theta(\frac{\Lambda}{\frac{\delta^\prime}{2-\delta^\prime} k} \log{\frac{|V|}{p}}) = \Theta(\frac{\Lambda}{\delta^\prime k} \log{\frac{|V|}{p}})$, we have $S^-_{\delta^\prime}(u) \subseteq Q^-_u$.
+  Similarly, we also get $S^+_{\delta^\prime}(u) \subseteq Q^+_u$ with probability at least $1 - p$ when $\theta = \Theta(\frac{\Lambda}{\delta^\prime k} \log{\frac{|V|}{p}})$.
+\end{proof}
+}
+
+Subsequently, we can formally analyze the correctness of the pivot-based algorithm for processing $\epsilon$-approximate \ced queries based on the h-index in the following theorem.
+\begin{theorem}\label{theorem:hindex}
+  Let $\theta = \Theta(\frac{\Lambda}{\epsilon k} \log{\frac{|V|}{p}})$. Algorithm~\ref{alg:hindex} returns the answer to an $\epsilon$-approximate \ced query based on the h-index correctly with probability at least $1 - p$.
+\end{theorem}
+
+\techreport{
+\begin{proof}
+  We prove the theorem by examining three different cases for the ranges of the h-index $h(u)$ for the pivot node $u$.
+  For each case, we show the correctness of the first iteration in Algorithm~\ref{alg:hindex}, while subsequent iterations are proven by induction.
+  By selecting $\delta^\prime < \frac{\epsilon}{2}$ as Lemma~\ref{lemma:concenpar}, we have:
+  \begin{itemize}[leftmargin=*]
+    \item \textbf{Case 1 ($h(u) > (1+\frac{\epsilon}{2}) h(v^\lambda)$):} Each $v$ with $h(v)\leq h(v^\lambda)$ will be added to $Q^-_u$.
+    Thus, $|Q^-_u| \geq (1-\lambda) |V|$.
+    Therefore, $Q^-_u$ will be used as the candidate set $Q$ in the next iteration, and $Q^+$, which does not contain any node in $S^-_\epsilon(v^\lambda)$, will be added to $S$.
+    \item \textbf{Case 2 ($h(u) < (1-\frac{\epsilon}{2}) h(v^\lambda)$):} Each $v$ with $h(v)\geq h(v^\lambda)$ will be added to $Q^+_u$.
+    Thus, $|Q^+_u| \geq \lambda |V|$.
+    Therefore, $Q^+$, which contains all nodes in $S^+_\epsilon(v^\lambda)$, will be used as the candidate set $Q$ in the next iteration.
+    \item \textbf{Case 3 ($(1-\frac{\epsilon}{2}) h(v^\lambda) < h(u) < (1+\frac{\epsilon}{2}) h(v_\lambda)$):} Any $v$ with $h(v) \geq (1+\epsilon) h(v^\lambda)$ will be added to $Q^+_u$.
+    And any $v^\prime$ with $h(v^\prime) \leq (1-\epsilon) h(v^\lambda)$ will be added to $Q^-_u$.
+    Thus, $Q^+_u$, which contains all nodes in $S^+_\epsilon(v^\lambda)$, will be added to $S$ or used as the candidate set $Q$ in the next iteration; whereas $Q^-_u$, which contains all nodes in $S^-_\epsilon(v^\lambda)$, will be eliminated or used as the candidate set $Q$ for the next iteration.
+  \end{itemize}
+  Considering all of the above cases, it follows that, for any randomly chosen pivot $u$, none of the nodes in $S^-_\epsilon(v^\lambda)$ is added to $S$. In contrast, all nodes in $S^+_\epsilon(v^\lambda)$ have a probability of at least $1 - p$ to be either added to $S$ or retained for the subsequent iteration.
+  Thus, we prove the theorem by applying the union bound over all iterations.
+\end{proof}
+}
+
+Finally, the amortized time complexity of Algorithm~\ref{alg:hindex} is $O(\frac{\Lambda |\eset^*|}{\epsilon} \cdot \log^2{\frac{|V|}{p}})$ because it invokes \emph{sketch propagation} $O(\log{|V|})$ times in amortization. Its space complexity is $O(k\theta|\vset^*|+|\eset^*|)$, which is equal to that of Algorithm~\ref{alg:propagation}.
+
+\subsection{Early Termination for Personalized \ced}
+\label{sec:hindex-personal}
+
+Given a query node $q$, the personalized \ced query based on the h-index can also be answered by performing the pivot-based partitioning method with $q$ as the pivot node to obtain $Q^+_u$ and returning \texttt{FALSE} if $|Q^+_u| > \lambda|V|$ or \texttt{TRUE} otherwise.
+Following Lemma~\ref{lemma:concenpar}, the following corollary indicates that the above algorithm provides correct answers for approximate personalized \ced queries w.h.p.
+\begin{corollary}
+  Let $\theta = \Theta(\frac{\Lambda}{\epsilon k} \log{\frac{|V|}{p}})$ for any $\epsilon\in(0,1)$. Algorithm~\ref{alg:hindex} correctly answers an $\epsilon$-approximate personalized \ced query based on the h-index with probability at least $1 - p$.
+\end{corollary}
+
+\myp{Early Termination}
+An early termination optimization can also accelerate h-index-based personalized \ced queries.
+\begin{lemma}\label{lemma:hearlytermi}
+  Given a query node $q$ and the quantile parameter $\lambda$, if there exists a node $u \in \vset^*$ such that $I(\bar{u}) > h(q)$ and $I(u) \geq \max(h(q), \lambda|V|)$, then the personalized \ced query returns \texttt{FALSE}.
+\end{lemma}
+
+\techreport{
+\begin{proof}
+  Each pair of nodes in $\iset(u)$ and $\iset(\bar{u})$ are neighbors of each other in $H$ according to the proof of Lemma~\ref{lemma:earlyterm}.
+  Thus, each node $v_1 \in \iset(u)$ has at least $I(\bar{u})$ neighbors with degrees larger than or equal to $I(u)$.
+  Since $I(\bar{u}) > h(q)$ and $I(u) \geq \max(h(q),\lambda\cdot|V|)$, there exist at least $I(u) \geq \lambda |V|$ nodes with h-indexes greater than or equal to $h(q)$.
+  Therefore, $q$ is not a hub based on the h-index.
+\end{proof}
+}
+
+Based on Lemma~\ref{lemma:hearlytermi}, \techreport{the sketch propagation can be terminated during \emph{Stage (I)} of the pivot-based partitioning method.
+Specifically, we use the KMV sketches to estimate $I_f(u)$ and $I_b(u)$ for each $u\in\vset^*$.
+If there exists a node $u \in \vset^*$ such that $\widetilde{I}_f(u) > N(q)$ and $\widetilde{I}_b(u)\geq\max(N(q), \lambda|V|)$, the algorithm can be terminated early since $N(q)$ is an upper bound of $h(q)$.}
+once we obtain $\widetilde{h}(q)$ after \emph{Stage (I)}, the algorithm can be terminated without entering \emph{Stage (II)} if there exists a node $u \in \vset^*$ such that $\widetilde{I}(\bar{u}) > \widetilde{h}(q)$ and $\widetilde{I}(u) \geq \max(\widetilde{h}(q), \lambda|V|)$.
+
+The following theorem bounds the probability that an early termination after \textit{Stage (I)} yields a false negative results for personalized \ced queries based on h-index.
+
+\techreport{
+\begin{theorem}\label{theorem:beta}
+  Let $\theta = O(\frac{n}{\epsilon k}\log{\frac{|V|}{p}})$, the probability that a personalized \ced query based on h-index with answer \texttt{TRUE} is incorrectly answered with \texttt{FALSE} due to early termination during Stage (I) at node $u$ is at most $2\cdot p^{(\beta-1)/\epsilon}$, where $\beta = \min(\frac{\widetilde{I}_f(u)}{N(q)}, \frac{\widetilde{I}_b(u)}{\lambda|V|})$.
+\end{theorem}
+
+\begin{proof}
+    According to Eqn.~\ref{equation:deltarelation}, for any $\delta<\beta-1$, we have 
+    \begin{equation}
+        I_f(u)\geq \frac{\widetilde{I}_f(u)}{1+\delta}\geq\frac{\beta N(q)}{1+\delta}>N(q)\geq h(q)
+    \end{equation}
+    and
+    \begin{equation}
+    \begin{aligned}
+        I_b(u)&\geq\frac{\widetilde{I}_b(u)}{1+\delta}\geq\frac{\beta\cdot\max(N(q), \lambda|V|)}{1+\delta} \\ &>\max(N(q), \lambda|V|)\geq\max(h(q),\lambda|V|)
+    \end{aligned}
+    \end{equation}
+    holds simultaneously with probability $1-2p^{(\beta-1)/\epsilon}$.
+
+    Note that the early termination occurs at node $u$ leads to a false negative answer only if $\widetilde{I}_f(u) > h(q)$ and $\widetilde{I}_b(u) \geq \max(h(q),\lambda|V|)$, but $I_f(u) \leq h(q)$ or $I_b(u)< \max(h(q),\lambda|V|)$. Thus, a personalized \ced query with answer \texttt{TRUE} is incorrectly answered due to an early termination at $u$ with probability at most $2p^{(\beta-1)/\epsilon}$. 
+\end{proof}
+}
+
+\begin{theorem}\label{theorem:beta:hindex}
+  Let $\theta = O(\frac{\Lambda}{\epsilon k}\log{\frac{|V|}{p}})$, the probability that a personalized \ced query based on h-index with answer \texttt{TRUE} is incorrectly answered with \texttt{FALSE} due to early termination after Stage (I) at node $u$ is at most $(p+2p^{((1-\epsilon)\beta-1)/\epsilon})$, where $\beta = \min(\frac{\widetilde{I}(\bar{u})}{\widetilde{h}(q)}, \frac{\widetilde{I}(u)}{\lambda|V|})$.
+\end{theorem}
+
+\techreport{
+\begin{proof}
+    By Lemma~\ref{lemma:hq} and Eqn.~\ref{equation:BigOtransform}, for any $\delta<(1-\epsilon)\beta-1$,
+    \begin{equation}
+        I(\bar{u})\geq \frac{\widetilde{I}(\bar{u})}{1+\delta}\geq\frac{\beta \widetilde{h}(q)}{1+\delta}\geq \frac{\beta(1-\epsilon)h(q)}{1+\delta}>h(q)
+    \end{equation}
+    and
+    \begin{equation}
+    \begin{aligned}
+        I(u)&\geq\frac{\widetilde{I}(u)}{1+\delta}\geq\frac{\beta\cdot\max(\widetilde{h}(q), \lambda|V|)}{1+\delta} \\ &\geq\frac{\beta\cdot\max((1-\epsilon)h(q), \lambda|V|)}{1+\delta} >\max(h(q), \lambda|V|)
+    \end{aligned}
+    \end{equation}
+    holds with probability at least $1-2p^{((1-\epsilon)\beta-1)/\epsilon}-p$.
+
+    Note that the early termination occurs at node $u$ leads to a false negative answer only if $\widetilde{I}(\bar{u}) \geq h(q)$ and $\widetilde{I}(u) > \max(h(q), \lambda|V|)$. However, we have $I(\bar{u}) < h(q)$ or $I(u)\leq \max(h(q), \lambda|V|)$. Thus, a personalized \ced query with answer \texttt{TRUE} is incorrectly answered due to an early termination at $u$ with probability at most $p+2p^{((1-\epsilon)\beta-1)/\epsilon}$. 
+\end{proof}
+}
+
+
+\section{Conclusion and Future Work}\label{sec:Conclusion}
+
+We introduced and studied the problem of finding degree- and h-index-based hubs on unmaterialized relational graphs (\ced). We proposed a sketch propagation framework for approximate degree-based \ced queries and extended it to h-index-based \ced queries with a pivot-based algorithm. We also considered personalized \ced queries for both centrality measures and enhanced efficiency with early termination. Theoretically, our sketch propagation and pivot-based algorithms answer approximate \ced queries correctly with high probability. We verified the effectiveness and efficiency of our proposed algorithms with extensive experimentation on real-world heterogeneous data.
+
+For future work, it would be interesting to extend our framework to process hub queries over relational graphs induced by general meta-graphs, which impose substantial technical challenges due to the potentially complex structure of meta-graphs. Another possible direction involves generalizing sketch-based methods for graph analysis tasks over relational graphs other than hub queries~\cite{niu2025sans}.
+
+\section*{Acknowledgment}
+This research is partly supported by the Lee Kong Chian Fellowship of Singapore Management University.
+P. Karras was supported by the Independent Research Fund Denmark (Project 9041-00382B).
+Y. Wang was supported by the National Natural Science Foundation of China (Grant No.~62202169).
+
+
+\noindent
+Dear Meta-Reviewer and Reviewers,
+
+Thank you very much for thoughtful reviews and enlightening comments.
+We have revised our paper to address the concerns raised.
+The revised parts are highlighted by \revise{blue font} and the major changes we make are summarized as follows.
+
+\section*{Summary of Changes}
+\begin{enumerate}
+    \item We thoroughly revised the introduction to highlight real-world applications of hub queries over meta-path induced relational graphs, as well as possible extension of our methods to more complex queries.
+    \item We discussed existing works on applying KMV sketches to graph problems in the Related Work.
+    \item We evaluated the approximation ratio $\epsilon$ achieved by our methods by varying the parameter $k$. The results have further verified that our methods can accurately answer Problems \ref{problem:approxHUB} and \ref{problem:approxPer}, achieving a small value of $\epsilon$ under the default parameter setting.
+    \item We further conducted experiments to evaluate the impact of meta-paths on the performance of our methods. The results indicate that the efficiency of our methods is primarily determined by the number of edges in the corresponding matching graphs.
+    \item We have moved some proofs from the original paper to the technical report~\cite{hud2023tr} due to space limitations.
+\end{enumerate}

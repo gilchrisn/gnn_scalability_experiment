@@ -1,0 +1,166 @@
+\section{Preliminaries}
+\label{sec:preli}
+
+\subsection{Notation and Problem Formulation}
+
+We model a heterogeneous data source as a knowledge graph (KG).
+However, our formulation and methodology are independent of the data format and can be easily adapted to other data sources such as RDBMS.
+
+We denote a KG as $\gset=(\vset, \eset, \lset)$ with $\vset$ and $\eset$ representing the sets of node and edge instances.
+An edge instance $e = (u, v) \in \eset$ connects two nodes $u, v \in \vset$.
+The type function $\lset$ maps each node or edge instance, $v$ or $e$, to its type, $\lset(v)$ or $\lset(e)$.
+For simplicity of presentation, we assume that $\lset(e)$ is determined by the type of its end nodes.
+Nevertheless, our methods can also handle more complex scenarios.
+
+\emph{Meta-paths} are commonly used to induce relational graphs from heterogeneous data \cite{fang2020effective, yang2020effective}.
+We provide the definitions of \emph{meta-path} and its \emph{matching instances} on the KG as follows:
+\begin{definition}[Meta-path]
+  An $L$-hop meta-path is a sequence of node types denoted as $\mset=(x_0, x_1, \dots, x_{L-1}, x_{L})$, where~$x_i$ is the type of the~$i$-th node. The inverse of $\mset$ is denoted as $\mset^{-1}=(x_L, x_{L-1}, \dots, x_1,x_0)$. 
+\end{definition}
+Although our methods support any meta-path~$\mset$, following the established convention \cite{fang2020effective, yang2020effective,jiang2022effective}, we only consider symmetric meta-paths to induce homogeneous relational graphs. A meta-path $\mset$ is symmetric if $\mset=\mset^{-1}$.
+\begin{definition}[Matching Instance]
+  A matching instance $M$ to a meta-path $\mset$ is a sequence of node instances in $\gset$ denoted by $M=(v_0, v_1,\dots,v_{L-1}, v_L) \triangleright \mset$ satisfying:
+  \begin{enumerate}
+    \item $\forall i\in\{0, \dots,L\}$, $\lset(v_i)=x_i$;
+    \item $\forall i\in\{0, \dots,L-1\}$, $(v_i, v_{i+1}) \in \eset$.
+  \end{enumerate}
+  We use $M(x_i)$ to denote the node $v_i$ in $M$.
+\end{definition}
+
+\begin{definition}[Relational Graph]
+  For a KG $\gset$, a (symmetric) meta-path $\mset$ induces a relational graph $H_\mset = (V_\mset, E_\mset)$, where $V_\mset$ contains all nodes in $\vset$ that match $x_0$ in any instance of $\mset$ and $E_\mset$ consists of all edges $(u,v)$ for any two nodes $u, v \in V_\mset$ such that there is an instance $M \triangleright \mset$ in $\gset$ with $M(x_0) = u$ and $M(x_L) = v$.
+\end{definition}
+We denote the neighborhood of $u$ in $H_\mset$ as $\nset(u)$ and \emph{degree} of $u$ in $H_\mset$ as $N(u)=|\nset(u)|$.
+Furthermore, $\Lambda = \max_{u\in H}{N(u)}$ represents the maximum degree among all nodes in $H_\mset$.
+When the context is clear, we will drop $\mset$ and use $H = (V, E)$ to represent a relational graph.
+
+\begin{figure}[t]
+  \centering
+  \subfigure[KG $\gset$\label{fig:hin}]{\includegraphics[width=2.8cm]{figure/hin.pdf}}
+  \hspace{0.5em}
+  \subfigure[Relational graph $H$\label{fig:sub.hg}]{\includegraphics[width=2.8cm]{figure/hg.pdf}}
+  \vspace{-2mm}
+  \caption{An exemplary KG $\gset$ and a relational graph $H$ induced from $\gset$ using a meta-path $\mset(A, P, V, P, A)$.\label{fig:example}}
+\end{figure}
+
+\begin{example}
+  Fig.~\ref{fig:hin} presents an academic KG with three node types $A$ (`author'), $P$ (`paper'), and $V$ (`venue') and two edge types $A \rightarrow P$ (`write') and $P \rightarrow V$ (`publish').
+  A sequence $(A, P, V, P, A)$ denotes a meta-path $\mset$, which induces the relational graph $H$ in Fig.~\ref{fig:sub.hg}, where $a_0$ and $a_2$ are neighbors because there exist an instance $M = (a_0, p_0, v_0,$ $p_1, a_2)$ of $\mset$ in $\gset$.
+  Intuitively, the two authors $a_0$ and $a_2$ are connected since they publish papers in the same venue $v_0$.
+\end{example}
+
+\myp{Problem Statement}
+We study the problem of hub queries in relational graphs.
+Hubs are nodes ranking high according to a function $c: V \rightarrow \mathbb{R}_{\geq 0}$ that measures centrality.
+We use \emph{degree} \cite{DasSP18}, i.e., the number of nodes connected to a node, and \emph{h-index} \cite{LuZZS16}, i.e., the largest integer $h$ such that a node has $h$ neighbors each of degree at least $h$, as centrality measures.
+The \ced query we consider is formalized as follows:
+\begin{problem}[\ced Query]\label{def:hub}
+  Given a relational graph $H$ and a parameter $\lambda\in(0,1)$, find every node $u \in V$ such that $c(u) \geq c(v^{\lambda})$, where $v^{\lambda}$ is the $(1-\lambda)$-quantile node under a centrality measure $c(\cdot)$.
+\end{problem}
+We also consider \emph{personalized} \ced queries to ask whether a given node $q$ is a hub of $H$.
+\begin{problem}[Personalized \ced Query]\label{problem:exactPer}
+  Given a relational graph~$H$, a node~$q$, and~$\lambda \in (0,1)$, decide if~$c(q) \geq c(v^\lambda)$.
+\end{problem}
+
+Processing \ced queries on large-scale relational graphs is computationally expensive. Specifically, computing the exact centrality, such as the degree of each node, requires traversing the matching graph with $|\eset^*|$ edges (as defined in Sect.~\ref{sec:wcoj}) from the corresponding node, leading to a time complexity of $O(|V|\cdot|\eset^*|)$, which is prohibitive for large KGs. Thus, we consider how to answer \ced queries approximately and efficiently under the notion of $\epsilon$-separable sets.
+\begin{definition}[$\epsilon$-Separable Set~\cite{GreenwaldK01}]
+  Given any node $u\in V$ and $\epsilon\in(0,1)$, the two $\epsilon$-separable sets of $u$, denoted as $S^+_\epsilon(u)$ and $S^-_\epsilon(u)$, are the sets of nodes in~$H$ with centrality scores larger and smaller than~$c(u)$ by a relative ratio of~$\epsilon$, respectively, i.e., $S^+_\epsilon(u) = \{v \in V | c(v) > (1+\epsilon) \cdot c(u)\}$ and $S^-_\epsilon(u)=\{v \in V | c(v) < (1-\epsilon) \cdot c(u)\}$.
+\end{definition}
+Consequently, we define the approximate versions of \ced and personalized \ced queries as follows:
+\begin{problem}[$\epsilon$-Approximate \ced Query]\label{problem:approxHUB}
+  Given a relational graph $H$ and $\epsilon, \lambda \in (0, 1)$, return a set $S$ of nodes in $H$ such that $S^+_\epsilon(v^\lambda) \subseteq S$ and $S \cap S^-_\epsilon(v^\lambda) = \varnothing$.
+\end{problem}
+\begin{problem}[$\epsilon$-Approximate Personalized \ced Query]\label{problem:approxPer}
+  Given a relational graph $H$, a node $q$, and $\epsilon, \lambda \in (0, 1)$, return \texttt{TRUE} if $q\in S^+_\epsilon(v^\lambda)$ and \texttt{FALSE} if $q\in S^-_\epsilon(v^\lambda)$.
+\end{problem}
+
+Before presenting our proposed algorithms for \ced queries, we summarize the frequently used symbols in Table~\ref{tab:notations}.
+
+\input{tables/notations}
+
+\subsection{Related Work}
+\label{sec:related}
+
+\myp{Relational Graph Analysis}
+There have been extensive studies on materializing and analyzing relational graphs induced by meta-paths from heterogeneous data.
+Chatzopoulos et al.~\cite{chatzopoulos2023atrapos} accelerated the enumeration of instances for multiple meta-paths by sharing workloads.
+This method can be extended to relational graph materialization.
+Guo et al.~\cite{guo2024efficient} first proposed \boolap, an algorithm for relational graph construction through boolean matrix multiplication.
+They also proposed \boolapp, an optimized algorithm for graphs with locally dense regions.
+Although these methods improve the efficiency of relational graph materialization over na\"ive methods, they are still prohibitively expensive for large relational graphs, as indicated in our experiments (see Sect.~\ref{sec:efficiency}).
+
+Then, great effort \cite{fang2020effective, yang2020effective, jiang2022effective, ZhouFLY23} has been devoted to community search over relational graphs.
+Fang et al.~\cite{fang2020effective} and Yang et al.~\cite{yang2020effective} proposed $(k, \mset)$-core and $(k, \mset)$-truss community models in relational graphs induced by meta-paths.
+Jiang et al.~\cite{jiang2022effective} and Zhou et al.~\cite{ZhouFLY23} extended the $(k, \mset)$-core model by incorporating star schemas and influences.
+We note that these methods introduced edge- and vertex-disjoint meta-paths to induce relational graphs.
+Despite their effectiveness for community definition, they take $O(|V|^2 \cdot |\eset^*|)$ time to extract a relational graph since they incur expensive max-flow computations to find the neighbors of each node on meta-path networks.
+Since the \ced problem is already computationally challenging for non-disjoint meta-paths, we leave the study of disjoint meta-paths for future work.
+
+Xirogiannopoulos et al.~\cite{xirogiannopoulos2017extracting} proposed to construct compact representations of relational graphs induced by \emph{path joins} in databases for memory-efficient query processing. Although they focus on a different problem from ours, the sketch we build can serve as the compact structure in \cite{xirogiannopoulos2017extracting}. In addition, the exact algorithm in Sect.~\ref{sec:wcoj} that leverages the worst-case optimal join for neighborhood computation aligns with the future direction for efficiency improvements suggested in~\cite{xirogiannopoulos2017extracting}.
+
+Meta-paths were also used to rank entities based on centrality measures \cite{10.1145/2020408.2020594, LEE2013684, ShiLYW16} and assess the similarity between entities \cite{sun2011pathsim, xiong2014top, shi2014hetesim, wang2016relsim} within heterogeneous data.
+These methods can operate directly on the original data and do not involve the materialization of relational graphs.
+
+Generally, although relational graphs were widely used in different applications, the fundamental problem of hub queries has received little attention. To the best of our knowledge, this is the first systematic investigation of efficient hub queries over relational graphs induced from heterogeneous data.
+
+\vspace{1mm}
+\myp{Sketch-based Graph Queries}
+Several works have been devoted to accelerating graph queries using cardinality sketches. Cohen~\cite{cohen1997size} introduced the use of cardinality sketches to estimate the size of transitive closure of each node, which was subsequently extended to influence queries~\cite{cohen2014sketch} by estimating the combined reachability size of a query node over sampled graphs under the independent cascade (IC) model. Liu et al.~\cite{liu2023efficient} extended the structural graph clustering to consider the multi-hop neighborhood for similarity computation, employing KMV sketches to accelerate the estimation of multi-hop Jaccard similarities. Furthermore, Zhang et al.~\cite{zhang2022effective} proposed an efficient approach for maintaining neighborhood KMV sketches following graph updates, thereby extending the sketch-based structural graph clustering to dynamic graphs. Chierichetti et al.~\cite{chierichetti2015efficient} utilized cardinality sketches for efficient closeness centrality and reachability tree size estimation within public-private networks from the point of view of each node.
+
+Nevertheless, existing studies that apply cardinality sketches to graph problems primarily focus on accelerating graph queries over materialized graphs by eliminating computationally expensive intermediate results. In contrast, we adopt cardinality sketches to avoid the materialization of relational graphs when performing graph queries.
+
+\vspace{1mm}
+\myp{Hubs in Hidden Networks}
+Another line of literature has studied the problem of finding hubs in hidden networks, where the existence of any edge can only be decided via \emph{probe operations}.
+Tao et al.~\cite{tao2010finding} proposed two instance-optimal exact algorithms over two kinds of probing strategies of hidden networks.
+Wang et al.~\cite{wang2012identifying} extended this problem to include group testing, whereby probes can verify edge connections between multiple nodes.
+Sheng et al.~\cite{sheng2012exact} proposed a sampling algorithm for hub queries, upon which Cao et al.~\cite{cao2015top} subsequently improved.
+Strouthopoulos et al.~\cite{StrouthopoulosP19} studied the discovery of~$k$-cores in hidden networks.
+However, all of the above algorithms face two challenges when applied to \ced queries.
+First, they focus on bipartite networks and potentially take~$O(|V|^2)$ probe operations for \ced queries on relational graphs.
+Second, the probe operations are time-consuming for \ced queries because they involve many breadth-first search (BFS) operations on the matching graph.
+
+\subsection{Memory-Efficient Exact Method for \ced}
+\label{sec:wcoj}
+
+Since the materialization of large relational graphs can often be memory-prohibitive \cite{xirogiannopoulos2017extracting}, we propose a memory-efficient baseline method for exact \ced queries, which computes the exact centrality of each node in $H$ using a generic worst-case optimal join algorithm \cite{ngo2018worst, freitag2020adopting, arroyuelo2021worst, veldhuizen2014leapfrog} on the \emph{matching graph} of $\mset$ over $\gset$ and avoid full materialization.
+We first introduce the notion of \emph{matching graph} of a meta-path.
+\begin{definition}[Matching Graph]
+  Given a KG $\gset$ and a meta-path $\mset$, the \emph{matching graph} of $\mset$ over $\gset$ is a \emph{multi-level} graph $\gset^*=(\vset^*,\eset^*)$ with node set $\vset^*=\bigcup_{0 \leq i \leq L}{\vset_i}$ and edge set $\eset^* = \bigcup_{0 \leq i < L}{\eset_i}$, where $\vset_i$ is the set of all node instances of type $x_i$ contained in any matching instance of $\mset$ and $\eset_i$ consists of all edges that connects two nodes between $\vset_i$ and $\vset_{i+1}$. For each node $u\in\vset_i$, we use $\vset^+(u)$ to denote the nodes in $\vset_{i+1}$ connected with $u$, i.e., \emph{successors} of $u$ in $\gset^*$; and use $\vset^-(u)$ to denote the nodes in $\vset_{i-1}$ connected with $u$, i.e., predecessors of $u$ in $\gset^*$.
+\end{definition}
+
+For each node $u\in\vset_i$, we use $\bar{u}$ to denote the node in $\vset_{L-i}$ corresponding to the same node in $\gset$.
+
+\begin{example}
+  Fig.~\ref{fig:propagation}(a) illustrates the matching graph $\gset^*$ of a meta-path $\mset(A, P, V, P, A)$.
+  The node set $\vset_0=\{a_0, a_1, \dots,$ $a_4\}$ consists of nodes of type $x_0$, i.e., `authors'.
+  Then, the set of successors of $v_0$ is $\vset^+(v_0)=\{\bar{p}_0, \bar{p}_1\}$, which contains the neighbors of $v_0$ in $\vset_3$, and the set of predecessors of $v_0$ is $\vset^-(v_0)=\{p_0, p_1\}$, which contains the neighbors of $v_0$ in $\vset_1$.
+\end{example}
+
+The matching graph $\gset^*$ can be extracted from $\gset$ level by level efficiently using the breadth-first search (BFS).
+Given the matching nodes in $\vset_i$, we iteratively visit all neighbors in $\gset$ of each node in $\vset_i$ and add its neighbors of type $x_{i+1}$ as successors (in $\vset_{i+1}$) of the matching node in the matching graph.
+Based on our experimental findings (see Table~\ref{tab:efficiency}), the cost of extracting $\gset^*$ from $\gset$ is negligible compared to the total computational cost of \ced queries.
+
+\begin{procedure}[t]
+\caption{DFS($u,v$)}
+\label{alg:wcoj}
+    \LinesNumbered
+    \KwIn{The matching graph $\gset^*$}
+    Mark $v$ as visited\;
+    \textbf{if} $v \in \vset_{L}$ \textbf{then} Add $v$ to $\nset(u)$\;\label{algline:addnbr-end}
+    \For{$w \in\vset^+(v)$\label{algline:nextstep-begin}}{
+        \textbf{if} $w$ is not visited \textbf{then} $\texttt{DFS}(u,w)$\;\label{algline:nextstep-end}
+    }
+\end{procedure}
+
+To avoid generating excessive intermediate results, we employ a worst-case optimal join on the matching graph to compute the neighbors of each node $u \in V$ in the relational graph.
+Starting with a depth-first search (DFS) from each node $u$, we traverse the matching instances of~ $\mset$.
+Specifically, DFS$(u, u)$ (Procedure~\ref{alg:wcoj}) runs for each node $u \in V$ and recursively traverses the current node's successors (Lines~\ref{algline:nextstep-begin}--\ref{algline:nextstep-end}).
+Once we visit a node $v$ in $\vset_L$, we add it to $\nset(u)$ (Line~\ref{algline:addnbr-end}).
+After performing DFS for each node, we discard $\nset(u)$ and keep only the degree $|\nset(u)|$ to ensure a small memory footprint.
+To compute the h-indexes of all nodes without \emph{materializing} the relational graph, we perform the worst-case optimal join in two rounds.
+The first round computes and stores the degree of each node $u \in V$; the second round computes the h-index of each node $u$ by combining its neighborhood $\nset(u)$ with the degrees kept in the first round.
+
+Although the memory consumption is bounded by $O(|\vset^*|+|\eset^*|)$ and thus is not a bottleneck, the exact algorithm is still inefficient due to repeated edge traversals.
+Each edge in $\eset^*$ is visited up to $O(|V|)$ times to compute the neighborhood of each node in $V$.
+Consequently, the time complexity of the exact algorithms is $O(|V| \cdot |\eset^*|)$, which can be prohibitively expensive when processing large relational graphs.

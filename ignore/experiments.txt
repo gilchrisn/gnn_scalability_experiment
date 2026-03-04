@@ -1,0 +1,143 @@
+To rigorously validate the journal extension, you need to shift from proving "query accuracy" to proving "inference fidelity." You do **not** need to outperform state-of-the-art architectures (like HAN or MAGNN); you only need to prove that your **KMV Kernel** is a valid, scalable replacement for the **Exact Kernel**.
+
+Here is the complete checklist of experiments required for Section 5 of your journal paper.
+
+### 1. The Core Comparison (The "Control Group")
+
+You must isolate the materialization method as the only variable.
+
+* **Baseline (Control):** `GCN` + `Exact Adjacency Matrix` (SpGEMM).
+* **Ours (Experimental):** `GCN` + `Stochastic Adjacency Matrix` (KMV Sketch).
+
+### 2. Required Datasets
+
+Use the **Heterogeneous Graph Benchmark (HGB)** versions of the domains used in your conference paper to ensuring you have high-quality feature vectors.
+
+| Dataset | Meta-paths (Must match Hub Queries) | Task |
+| --- | --- | --- |
+| **HGB-ACM** |  (Co-author),  (Same Subject) | Node Classification (3 classes) |
+| **HGB-DBLP** |  (Co-author),  (Co-conference) | Node Classification (4 classes) |
+| **HGB-IMDB** |  (Co-actor),  (Co-director) | Node Classification (3 classes) |
+
+---
+
+### 3. Experiment List
+
+#### Experiment A: Fidelity Test (Effectiveness)
+
+**Goal:** Prove that replacing the exact neighborhood with a stochastic sketch does not degrade learning accuracy.
+
+* **Setup:** Train a 2-layer GCN on both `Exact` and `KMV` matrices.
+* **Metric:** Macro-F1 / Micro-F1.
+* **Success Criteria:** The performance gap must be statistically negligible (). This validates the "Robustness" hypothesis.
+* **Output:** A table comparing `Exact` vs. `KMV` accuracy for all datasets.
+
+#### Experiment B: The "Geometric Explosion" (Scalability)
+
+**Goal:** Demonstrate the "Geometric Explosion" problem of exact methods and how KMV solves it. This is your primary efficiency claim.
+
+* **Setup:** Synthesize a long meta-path on DBLP (e.g., ).
+* **Variable:** Increase Meta-path Length  from 2 to 6.
+* **Metric:** Pre-processing Time (seconds) to build the adjacency matrix.
+* **Expectation:**
+* **Exact:** Exponential growth (or OOM at ).
+* **KMV:** Linear growth ().
+
+
+
+#### Experiment C: Sketch Sensitivity (Hyperparameter )
+
+**Goal:** Determine the minimum sketch size  required for stable learning, justifying the "Low Stable Rank" theory.
+
+* **Setup:** Run `GCN + KMV` with varying .
+* **Metric:** Test F1 Score.
+* **Expectation:** Accuracy should rise sharply and plateau around  or . The plateau proves that further neighbors provide redundant information.
+
+#### Experiment D: Semantic Preservation (The "Why")
+
+**Goal:** Provide a diagnostic visualization to satisfy reviewers asking *why* sampling works.
+
+* **Setup:**
+1. Extract the learned node embeddings  from the Exact GCN.
+2. Extract the learned node embeddings  from the KMV GCN.
+
+
+* **Metric:** Calculate the **Centered Kernel Alignment (CKA)** or **KL Divergence** between the two embedding spaces.
+* **Visualization:** A heatmap or curve showing high similarity () even at low .
+
+---
+
+### 4. Summary of Execution Plan
+
+1. **Download HGB:** Get `HGB-ACM`, `HGB-DBLP`, and `HGB-IMDB`.
+2. **Generate Matrices:** Run your `exact.py` and `kmv.py` scripts to save the adjacency matrices for the meta-paths listed above.
+3. **Run Training:** Execute the GCN training loop for all pairs (Exact vs. KMV).
+4. **Plot Scalability:** Run the path-length stress test on DBLP.
+
+This set of experiments is sufficient to support the claim that **Stochastic Materialization** is a lossless, scalable alternative to exact methods for HGNNs.
+
+
+You have hit on the central trade-off of the entire system.
+
+You are correct: **If you fit the exact graph in memory, training on it is faster than regenerating sketches every epoch.**
+
+However, the argument for your journal paper is not just "speed"—it is **Feasibility** and **Regularization**. Here is how to construct the argument to defend against this specific critique.
+
+### 1. The "Pre-computation" Defense (Apples-to-Apples)
+
+You do **not** have to rerun propagation every epoch. You can run the KMV kernel **once** before training (Preprocessing Phase), save the adjacency matrix , and train on it exactly like the baseline.
+
+In this "Static" setting, your method is strictly superior:
+
+* **Exact Materialization:**  time to build. This often takes **hours** or **OOMs** (Out of Memory) for long paths ().
+
+
+* **KMV Materialization:**  time to build. This takes **seconds** and fits in memory.
+
+
+
+**Your Argument:** "For long meta-paths where Exact Materialization is physically impossible due to the 'Geometric Explosion' of neighbors, KMV is the *only* way to materialize the graph at all." 
+
+### 2. The "Dynamic" Defense (Why rerun?)
+
+If you *choose* to rerun it every epoch (Dynamic Mode), you are paying a computational cost to buy **Generalization**.
+
+* **Exact (Static):** You train on the *exact same* neighbors every epoch. The model overfits to the specific edges in the training graph.
+* **KMV (Dynamic):** You see a *slightly different* subset of neighbors every epoch.
+* **Justification:** This acts like **Data Augmentation** or **DropEdge**.
+* 
+**Cost Benefit:** The extra compute time per epoch (which is low, because sketching is linear ) pays off in higher Test Accuracy (F1 Score).
+
+
+
+
+
+### 3. The "Fail-Safe" Argument
+
+The strongest rebuttal is that "Expensive" is relative.
+
+* If the meta-path is short (e.g., ), Exact is fine.
+* If the meta-path is long (e.g., ), Exact Materialization **crashes**.
+
+
+* **Exact:**  (Crash/OOM).
+* **KMV:** .
+
+
+
+### Summary Table for the Paper
+
+Include a "Training Modes" table to clarify this for reviewers:
+
+| Mode | Pre-processing Cost | Training Cost (Per Epoch) | Memory | Benefit |
+| --- | --- | --- | --- | --- |
+| **Exact (Baseline)** | <br>**High** (Exp. Growth) 
+
+ | Low (Sparse MatMul) | **Huge** (Dense) | Ground Truth |
+| **KMV (Static)** | <br>**Tiny** (Linear) 
+
+ | Low (Sparse MatMul) | **Tiny** (Fixed ) | **Scalability** |
+| **KMV (Dynamic)** | **None** | Medium (Sketch + MatMul) | **Tiny** (Fixed ) | **Regularization** |
+
+**Conclusion for your response:**
+You should run your main experiments in **KMV (Static)** mode to prove the scalability point (Experiment B). Then, run a smaller ablation study in **KMV (Dynamic)** mode to show the regularization benefit (Experiment A). This covers all bases.

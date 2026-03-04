@@ -1,0 +1,6 @@
+\begin{abstract}
+Relational graphs encapsulate nontrivial inherent interactions among entities in heterogeneous data sources. Identifying \emph{hubs} in relational graphs is vital in various applications such as fraud detection, influence analysis, and protein complex discovery. However, building relational graphs induced by meta-paths on heterogeneous data entails substantial costs, thus hindering efficient hub discovery. In this paper, we propose a novel sketch propagation framework for approximate hub queries in induced relational graphs that avoids explicitly materializing those graphs. Our framework specifically supports hub queries that ask for all nodes whose centrality scores, based on \emph{degree} or \emph{h-index}, are in the top quantile with provable guarantees under the notion of~$\epsilon$-separable sets. In addition, we devise pruning techniques that efficiently process \emph{personalized} hub queries asking whether a given node is a hub. Extensive experiments on real-world and synthetic data confirm the efficacy and efficiency of our proposals, which achieve orders of magnitude speed-ups over exact methods while consistently attaining accuracy beyond~90\%.
+\end{abstract}
+\begin{IEEEkeywords}
+hub query, relational graph, degree centrality, h-index, KMV sketch.
+\end{IEEEkeywords}
