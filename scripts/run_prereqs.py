@@ -20,44 +20,45 @@ from src.data import DatasetFactory
 from src.bridge import PyGToCppAdapter
 from src.utils import SchemaMatcher
 
-def compile_rule_for_cpp(metapath_str: str, g_hetero, data_dir: str, folder_name: str) -> None:
-    """Replicates the rule compilation logic from run_prereqs.py"""
-    print("   [Staging] Compiling Metapath Rule...")
-    
-    # Deterministic edge mapping (must match the adapter's serialization order)
+def compile_rule_for_cpp(metapath_str: str, instance_id: int, g_hetero, data_dir: str, folder_name: str) -> None:
+    """Compiles rule bytecode to both .limit and .dat to satisfy C++ I/O."""
     sorted_edges = sorted(list(g_hetero.edge_types))
     edge_map = {et: i for i, et in enumerate(sorted_edges)}
     
-    # Parse string to PyG edge tuples
-    path_list = [SchemaMatcher.match(s.strip(), g_hetero) for s in metapath_str.split(',')]
-    
-    try:
-        rule_ids = [edge_map[edge] for edge in path_list]
-    except KeyError as e:
-        raise RuntimeError(f"Mined rule contains edge {e} not found in schema.")
-        
-    # Generate Stack Machine Bytecode
+    path_list = [s.strip() for s in metapath_str.split(',')]
     parts = []
-    for i, eid in enumerate(rule_ids):
-        parts.append("-2")
-        if i == len(rule_ids) - 1:
-            parts.append("-1") # Trigger variable mode on last edge
-        parts.append(str(eid))
+    
+    for rel_str in path_list:
+        # Determine Traversal Opcode
+        direction = "-3" if rel_str.startswith("rev_") else "-2"
         
-    # Cleanup stack
-    parts.extend(["-5", "-1"])
-    for _ in rule_ids: parts.append("-4")
-    
-    rule_content = " ".join(parts)
-    
-    filename = f"{folder_name}-cod-global-rules.dat"
-    file_path = os.path.join(data_dir, filename)
-    
-    with open(file_path, "w") as f:
-        f.write(rule_content)
+        # Match Edge ID
+        matched_edge = SchemaMatcher.match(rel_str, g_hetero)
+        try:
+            eid = edge_map[matched_edge]
+        except KeyError as e:
+            raise RuntimeError(f"Mined rule contains edge {e} not found in schema.")
+            
+        parts.extend([direction, str(eid)])
         
-    print(f"   [Staging] Wrote rule bytecode to: {filename}")
-
+    # Append the correct C++ flag
+    if instance_id == -1:
+        parts.append("-1") # Variable mode
+    else:
+        parts.extend(["-5", str(instance_id)]) # Instance mode
+        
+    for _ in path_list: 
+        parts.append("-4") # Pop stack
+        
+    rule_content = " ".join(parts) + "\n"
+    
+    # Write to files
+    file_limit = os.path.join(data_dir, f"cod-rules_{folder_name}.limit")
+    file_dat = os.path.join(data_dir, f"{folder_name}-cod-global-rules.dat")
+    
+    with open(file_limit, "w") as f: f.write(rule_content)
+    with open(file_dat, "w") as f: f.write(rule_content)
+    
 def main():
     parser = argparse.ArgumentParser(description="Isolated Test: Table III Statistics Extraction")
     parser.add_argument('dataset', type=str, help="Dataset name (e.g., HGB_DBLP)")

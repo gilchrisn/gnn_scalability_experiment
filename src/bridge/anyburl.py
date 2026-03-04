@@ -87,8 +87,8 @@ class AnyBURLRunner(RuleMiner):
         else:
             print(f"[AnyBURL] Warning: Expected snapshot {expected_output} not found.")
 
-    def get_top_k_paths(self, k: int = 5, min_conf: float = 0.1) -> List[Tuple[float, str]]:
-        """Parses output file to identify top-K generic paths."""
+    def get_top_k_paths(self, k: int = 5, min_conf: float = 0.1) -> List[Tuple[float, str, int]]:
+        """Parses output file to identify top-K generic OR instance paths."""
         if not os.path.exists(self.rules_file): return []
         
         valid_rules = []
@@ -103,18 +103,16 @@ class AnyBURLRunner(RuleMiner):
         valid_rules.sort(key=lambda x: x[0], reverse=True)
         seen = set()
         unique = []
-        for conf, path in valid_rules:
-            if path not in seen:
-                unique.append((conf, path))
-                seen.add(path)
+        for conf, path, instance_id in valid_rules:
+            # A rule is uniquely identified by BOTH its path and its target instance
+            rule_signature = f"{path}_{instance_id}"
+            if rule_signature not in seen:
+                unique.append((conf, path, instance_id))
+                seen.add(rule_signature)
                 if len(unique) >= k: break
         return unique
 
-    def _parse_single_line(self, line: str, min_conf: float) -> Optional[Tuple[float, str]]:
-        """
-        Parses a single AnyBURL rule line, resolving FOL variable bindings
-        into a strict directed sequential metapath.
-        """
+    def _parse_single_line(self, line: str, min_conf: float) -> Optional[Tuple[float, str, int]]:
         line = line.strip()
         parts = line.split("\t")
         if len(parts) < 4: return None
@@ -125,14 +123,9 @@ class AnyBURLRunner(RuleMiner):
             return None
             
         if conf < min_conf: return None
-        
         rule_str = parts[3]
         
-        # Filter grounded rules (those with specific node IDs)
-        if re.search(r'[a-z]+_\d+', rule_str): return None 
-        
         try:
-            # Isolate the body: target(X,Y) <= rel1(X,A), rel2(Y,A) -> rel1(X,A), rel2(Y,A)
             body = rule_str.split(" <= ")[1]
         except IndexError:
             return None
@@ -142,32 +135,42 @@ class AnyBURLRunner(RuleMiner):
         current_var = None
         
         for i, atom in enumerate(atoms):
-            # Parse atom: relation_name(var1, var2)
-            # Lifted rules use uppercase letters for variables (X, Y, A, B, etc.)
-            match = re.match(r'([a-zA-Z0-9_]+)\(([A-Z]),([A-Z])\)', atom)
+            # Expanded Regex to capture both variables (X) and instances (paper_1998)
+            match = re.match(r'([a-zA-Z0-9_]+)\(([a-zA-Z0-9_]+),([a-zA-Z0-9_]+)\)', atom)
             if not match: 
                 return None
             
             rel, v1, v2 = match.groups()
             
-            # Initialize the walk at the source of the first atom (usually 'X')
+            v1_is_inst = v1[0].islower()
+            v2_is_inst = v2[0].islower()
+            
             if i == 0:
+                # The start of a valid query path must be a variable
+                if v1_is_inst: return None 
                 current_var = v1
                 
-            # Determine traversal direction based on variable tracking
             if current_var == v1:
-                # Forward traversal: current_var -> v2
                 relations.append(rel)
-                current_var = v2
+                if v2_is_inst:
+                    # Target Hit: Return Instance Rule
+                    instance_id = int(v2.split('_')[-1])
+                    return (conf, ",".join(relations), instance_id)
+                else:
+                    current_var = v2
+                    
             elif current_var == v2:
-                # Backward traversal: current_var -> v1
                 relations.append(f"rev_{rel}")
-                current_var = v1
+                if v1_is_inst:
+                    # Target Hit: Return Instance Rule
+                    instance_id = int(v1.split('_')[-1])
+                    return (conf, ",".join(relations), instance_id)
+                else:
+                    current_var = v1
             else:
-                # The rule is disjointed or branches in a way that
-                # cannot be represented as a single sequential walk.
                 return None
                 
+        # If the loop finishes with no instance target found, it is a VARIABLE RULE
         if len(relations) >= 2:
-            return (conf, ",".join(relations))
+            return (conf, ",".join(relations), -1) 
         return None

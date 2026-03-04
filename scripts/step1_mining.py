@@ -73,12 +73,13 @@ class MiningOrchestrator:
             "dataset": self.dataset_key,
             "target_node": self.cfg.target_node,
             "best_rule_str": rules[0][1],
+            "instance_id": rules[0][2],  # EXPLICITLY CAPTURE INSTANCE ID
             "confidence": rules[0][0]
         }
         with open(self.result_file, 'w') as f:
             json.dump(data, f, indent=2)
         logger.info(f"[{self.dataset_key}] Cached results to {self.result_file}")
-
+        
 def main():
     print("=== Phase 1: Mining & Caching ===")
     for ds in TARGET_DATASETS:
