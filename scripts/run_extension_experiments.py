@@ -48,7 +48,7 @@ from scripts.bench_utils import compile_rule_for_cpp, generate_qnodes, setup_glo
 
 DEFAULT_FRACTIONS = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 DEFAULT_K         = 32
-DEFAULT_EPOCHS    = 100
+DEFAULT_EPOCHS    = 50
 DEFAULT_TOPR      = "0.05"
 DEFAULT_MIN_CONF  = 0.1
 
@@ -98,11 +98,21 @@ def _open_csv(path: Path, fields: List[str]) -> Tuple:
     return fh, writer
 
 
-def _done_metapaths(path: Path) -> Set[str]:
+def _done_metapaths(path: Path, expected_snapshots: int) -> Set[str]:
+    """Return metapaths that are complete (all snapshots written) or permanently failed."""
     if not path.exists():
         return set()
+    counts: dict = {}
+    failed: set = set()
     with open(path, newline="", encoding="utf-8") as fh:
-        return {row["metapath"] for row in csv.DictReader(fh)}
+        for row in csv.DictReader(fh):
+            mp = row["metapath"]
+            if row.get("snapshot") == "FAILED":
+                failed.add(mp)
+            else:
+                counts[mp] = counts.get(mp, 0) + 1
+    complete = {mp for mp, n in counts.items() if n >= expected_snapshots}
+    return complete | failed
 
 
 def _train_sage(
@@ -112,8 +122,12 @@ def _train_sage(
     epochs:      int,
     device:      torch.device,
     log:         logging.Logger,
+    patience:    int = 10,
 ) -> torch.nn.Module:
-    """Train a 2-layer SAGE on exactly-materialized H_0. Returns frozen model."""
+    """Train a 2-layer SAGE on exactly-materialized H_0 with early stopping.
+
+    Returns frozen model (moved to *device* — caller may move to CPU afterwards).
+    """
     from src.models import get_model
     model = get_model("SAGE", in_dim, num_classes, config.HIDDEN_DIM).to(device)
     opt   = torch.optim.Adam(model.parameters(),
@@ -125,6 +139,10 @@ def _train_sage(
     train_mask = g_homo.train_mask.to(device)
     val_mask   = g_homo.val_mask.to(device)
 
+    best_val_loss = float("inf")
+    best_state    = None
+    wait          = 0
+
     model.train()
     for epoch in range(1, epochs + 1):
         opt.zero_grad()
@@ -132,14 +150,29 @@ def _train_sage(
         loss = F.cross_entropy(out[train_mask], labels[train_mask])
         loss.backward()
         opt.step()
-        if epoch % 20 == 0:
+
+        # Evaluate every 5 epochs for early stopping
+        if epoch % 5 == 0:
             model.eval()
             with torch.no_grad():
                 val_loss = F.cross_entropy(model(x, edge_index)[val_mask],
                                            labels[val_mask]).item()
-            log.debug("    [SAGE epoch %3d] loss=%.4f  val_loss=%.4f", epoch, loss.item(), val_loss)
+            if epoch % 20 == 0:
+                log.debug("    [SAGE epoch %3d] loss=%.4f  val_loss=%.4f", epoch, loss.item(), val_loss)
+
+            if val_loss < best_val_loss - 1e-4:
+                best_val_loss = val_loss
+                best_state = {k: v.clone() for k, v in model.state_dict().items()}
+                wait = 0
+            else:
+                wait += 1
+                if wait >= patience:
+                    log.info("    [SAGE] Early stop at epoch %d (best val_loss=%.4f)", epoch, best_val_loss)
+                    break
             model.train()
 
+    if best_state is not None:
+        model.load_state_dict(best_state)
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
@@ -275,7 +308,8 @@ def _run_one_metapath(
     ext_w:       csv.DictWriter,
     log:         logging.Logger,
 ) -> None:
-    device      = config.DEVICE
+    infer_device = config.DEVICE  # CPU when --cpu is set (fair timing for Phase 2)
+    train_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     target_ntype = config.get_dataset_config(dataset).target_node
     labels      = info["labels"]
     masks       = info["masks"]
@@ -307,16 +341,8 @@ def _run_one_metapath(
     PyGToCppAdapter(data_dir).convert(snap0.graph)
     compile_rule_for_cpp(metapath, snap0.graph, data_dir, folder)
 
-    # Try exact materialization; fall back to KMV if OOM
-    phase1_method = "exact"
-    try:
-        _, exact_file = _run_cpp_exact(engine, folder, timeout)
-        g_h0 = _load_adj(engine, exact_file, num_target, node_offset, max_adj_mb)
-    except (MemoryError, RuntimeError) as e:
-        log.warning("    [Phase 1] Exact OOM (%s) — training on KMV graph instead", e)
-        phase1_method = "kmv"
-        _, kmv_file = _run_cpp_sketch(engine, folder, k, timeout)
-        g_h0 = _load_adj(engine, kmv_file, num_target, node_offset)
+    _, exact_file = _run_cpp_exact(engine, folder, timeout)
+    g_h0 = _load_adj(engine, exact_file, num_target, node_offset, max_adj_mb)
 
     g_h0.x          = g_full[target_ntype].x
     g_h0.y          = labels
@@ -326,12 +352,13 @@ def _run_one_metapath(
 
     in_dim = g_h0.x.size(1)
     t0_train = time.perf_counter()
-    sage_model = _train_sage(g_h0, in_dim, num_classes, epochs, device, log)
+    sage_model = _train_sage(g_h0, in_dim, num_classes, epochs, train_device, log)
     t_train = time.perf_counter() - t0_train
-    log.info("    [Phase 1] Done. Model frozen. (train=%.2fs, method=%s)", t_train, phase1_method)
+    sage_model = sage_model.to(infer_device)  # move to CPU for fair Phase 2 timing
+    log.info("    [Phase 1] Done. Model frozen. (train=%.2fs, trained on %s)", t_train, train_device)
 
-    test_mask = masks["test"].to(device)
-    labels_d  = labels.to(device)
+    test_mask = masks["test"].to(infer_device)
+    labels_d  = labels.to(infer_device)
 
     for snap in snapshots[1:]:
         log.info("    [Phase 2] %s", snap.label)
@@ -357,11 +384,11 @@ def _run_one_metapath(
                 g_exact   = _load_adj(engine, exact_file, num_target, node_offset, max_adj_mb)
                 g_exact.x = g_full[target_ntype].x
                 t0        = time.perf_counter()
-                z_exact   = _infer(sage_model, g_exact, in_dim, device)
+                z_exact   = _infer(sage_model, g_exact, in_dim, infer_device)
                 t_exact_infer = time.perf_counter() - t0
                 f1_exact  = _f1(z_exact, labels_d, test_mask)
-                layers_exact = _infer_layerwise(sage_model, g_exact, in_dim, device)
-                dirichlet_exact = _dirichlet_energy(z_exact, g_exact.edge_index.to(device), num_target)
+                layers_exact = _infer_layerwise(sage_model, g_exact, in_dim, infer_device)
+                dirichlet_exact = _dirichlet_energy(z_exact, g_exact.edge_index.to(infer_device), num_target)
                 edge_index_exact = g_exact.edge_index  # save for later
                 del g_exact  # free memory before KMV
             except (MemoryError, RuntimeError) as e:
@@ -377,12 +404,12 @@ def _run_one_metapath(
         g_kmv   = _load_adj(engine, kmv_file, num_target, node_offset)
         g_kmv.x = g_full[target_ntype].x
         t0      = time.perf_counter()
-        z_kmv   = _infer(sage_model, g_kmv, in_dim, device)
+        z_kmv   = _infer(sage_model, g_kmv, in_dim, infer_device)
         t_kmv_infer = time.perf_counter() - t0
         f1_kmv  = _f1(z_kmv, labels_d, test_mask)
         n_edges_kmv = _count_edges_from_file(kmv_file)
-        layers_kmv = _infer_layerwise(sage_model, g_kmv, in_dim, device)
-        dirichlet_kmv = _dirichlet_energy(z_kmv, g_kmv.edge_index.to(device), num_target)
+        layers_kmv = _infer_layerwise(sage_model, g_kmv, in_dim, infer_device)
+        dirichlet_kmv = _dirichlet_energy(z_kmv, g_kmv.edge_index.to(infer_device), num_target)
 
         # --- Derived metrics (only when exact loaded successfully) ---
         cka_val        = None
@@ -390,7 +417,7 @@ def _run_one_metapath(
         depthwise_vals = None
         if z_exact is not None:
             cka_val = cka.calculate(
-                z_exact[test_mask].to(device), z_kmv[test_mask].to(device))
+                z_exact[test_mask].to(infer_device), z_kmv[test_mask].to(infer_device))
             pred_agree = _prediction_agreement(z_exact, z_kmv, test_mask)
         if layers_exact is not None:
             depthwise_vals = _depthwise_cka(layers_exact, layers_kmv, test_mask, cka)
@@ -469,8 +496,8 @@ def main() -> None:
     parser.add_argument("--max-adj-mb",      type=float, default=50.0,
                         help="Skip metapaths whose EXACT adjacency file exceeds this size in MB. "
                              "Default: 50 (laptop-safe). Set 0 to disable (no limit, for servers).")
-    parser.add_argument("--timeout",         type=int,   default=600,
-                        help="Per-C++-call subprocess timeout in seconds (default 600). "
+    parser.add_argument("--timeout",         type=int,   default=1800,
+                        help="Per-C++-call subprocess timeout in seconds (default 1800 = 30 min). "
                              "Metapaths that exceed this are marked FAILED and skipped on resume.")
     parser.add_argument("--num-cpu-threads", type=int,   default=2,
                         help="Number of CPU threads for PyTorch (default 2). "
@@ -574,7 +601,8 @@ def main() -> None:
     log.info("")
     log.info("[4/4] Running extension experiments...")
     ext_path = out_dir / f"{args.output_name}.csv"
-    done     = _done_metapaths(ext_path)
+    expected_snapshots = len(args.fractions) - 1  # first fraction is training split
+    done     = _done_metapaths(ext_path, expected_snapshots)
     total    = len(metapaths)
     n_done   = sum(1 for mp in metapaths if mp in done)
     log.info("      %d/%d already done, %d to run.", n_done, total, total - n_done)

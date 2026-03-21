@@ -16,11 +16,11 @@ export PYTHONUTF8=1
 
 # --- Defaults (override via flags below) ---
 MAX_METAPATHS=500
-EPOCHS=100
+EPOCHS=50
 K=32
 FRACTIONS="0.5 0.6 0.7 0.8 0.9 1.0"
 MIN_CONF=0.1
-TIMEOUT=1200
+TIMEOUT=1800
 MAX_ADJ_MB=0          # 0 = no limit (server has RAM)
 NUM_CPU_THREADS=4
 
