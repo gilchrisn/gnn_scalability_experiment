@@ -496,8 +496,8 @@ def main() -> None:
     parser.add_argument("--max-adj-mb",      type=float, default=50.0,
                         help="Skip metapaths whose EXACT adjacency file exceeds this size in MB. "
                              "Default: 50 (laptop-safe). Set 0 to disable (no limit, for servers).")
-    parser.add_argument("--timeout",         type=int,   default=1800,
-                        help="Per-C++-call subprocess timeout in seconds (default 1800 = 30 min). "
+    parser.add_argument("--timeout",         type=int,   default=10800,
+                        help="Per-C++-call subprocess timeout in seconds (default 10800 = 3 hrs). "
                              "Metapaths that exceed this are marked FAILED and skipped on resume.")
     parser.add_argument("--num-cpu-threads", type=int,   default=2,
                         help="Number of CPU threads for PyTorch (default 2). "
