@@ -22,7 +22,7 @@ K=32
 FRACTIONS="0.2 0.4 0.6 0.8 1.0"
 MIN_CONF=0.1
 TIMEOUT=1800
-MAX_ADJ_MB=0          # 0 = no limit (server has RAM)
+MAX_ADJ_MB=50000      # 50 GB cap — prevent OOM-killing on shared server
 NUM_CPU_THREADS=4
 
 # --- Parse args ---
