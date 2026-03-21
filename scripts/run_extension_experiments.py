@@ -46,7 +46,7 @@ from src.bridge.engine import CppEngine
 from scripts.bench_utils import compile_rule_for_cpp, generate_qnodes, setup_global_res_dirs
 
 
-DEFAULT_FRACTIONS = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+DEFAULT_FRACTIONS = [0.2, 0.4, 0.6, 0.8, 1.0]
 DEFAULT_K         = 32
 DEFAULT_EPOCHS    = 50
 DEFAULT_TOPR      = "0.05"
@@ -352,7 +352,16 @@ def _run_one_metapath(
 
     in_dim = g_h0.x.size(1)
     t0_train = time.perf_counter()
-    sage_model = _train_sage(g_h0, in_dim, num_classes, epochs, train_device, log)
+    try:
+        sage_model = _train_sage(g_h0, in_dim, num_classes, epochs, train_device, log)
+    except RuntimeError as e:
+        if "CUDA" in str(e) and train_device.type == "cuda":
+            log.warning("    [Phase 1] GPU OOM — retrying training on CPU")
+            torch.cuda.empty_cache()
+            train_device = torch.device("cpu")
+            sage_model = _train_sage(g_h0, in_dim, num_classes, epochs, train_device, log)
+        else:
+            raise
     t_train = time.perf_counter() - t0_train
     sage_model = sage_model.to(infer_device)  # move to CPU for fair Phase 2 timing
     log.info("    [Phase 1] Done. Model frozen. (train=%.2fs, trained on %s)", t_train, train_device)
@@ -496,8 +505,8 @@ def main() -> None:
     parser.add_argument("--max-adj-mb",      type=float, default=50.0,
                         help="Skip metapaths whose EXACT adjacency file exceeds this size in MB. "
                              "Default: 50 (laptop-safe). Set 0 to disable (no limit, for servers).")
-    parser.add_argument("--timeout",         type=int,   default=10800,
-                        help="Per-C++-call subprocess timeout in seconds (default 10800 = 3 hrs). "
+    parser.add_argument("--timeout",         type=int,   default=1800,
+                        help="Per-C++-call subprocess timeout in seconds (default 1800 = 30 min). "
                              "Metapaths that exceed this are marked FAILED and skipped on resume.")
     parser.add_argument("--num-cpu-threads", type=int,   default=2,
                         help="Number of CPU threads for PyTorch (default 2). "

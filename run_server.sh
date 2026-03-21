@@ -13,14 +13,15 @@
 set -e
 source .venv/bin/activate
 export PYTHONUTF8=1
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}  # override with e.g. CUDA_VISIBLE_DEVICES=1
 
 # --- Defaults (override via flags below) ---
 MAX_METAPATHS=500
 EPOCHS=50
 K=32
-FRACTIONS="0.5 0.6 0.7 0.8 0.9 1.0"
+FRACTIONS="0.2 0.4 0.6 0.8 1.0"
 MIN_CONF=0.1
-TIMEOUT=10800
+TIMEOUT=1800
 MAX_ADJ_MB=0          # 0 = no limit (server has RAM)
 NUM_CPU_THREADS=4
 
