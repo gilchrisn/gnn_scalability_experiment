@@ -17,7 +17,10 @@ if [ ! -d ".venv" ]; then
     python3 -m venv --without-pip .venv
     source .venv/bin/activate
     echo "      Bootstrapping pip..."
-    curl -sS https://bootstrap.pypa.io/get-pip.py | python3
+    PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    PIP_URL="https://bootstrap.pypa.io/pip/${PY_VER}/get-pip.py"
+    # Fall back to latest if version-specific URL doesn't exist (3.9+ only needs generic)
+    curl -sf "$PIP_URL" | python3 || curl -sS https://bootstrap.pypa.io/get-pip.py | python3
 else
     echo "[1/4] Virtual environment already exists."
 fi
