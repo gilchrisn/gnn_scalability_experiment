@@ -38,8 +38,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Datasets to run — add OAG_CS and RCDD_AliRCD once downloaded on the server
-DATASETS=(OGB_MAG)
+# Datasets to run (OAG_CS requires: pip install H2GB — first load downloads ~2GB)
+DATASETS=(OGB_MAG OAG_CS)
 
 COMMON_ARGS=(
     --max-metapaths "$MAX_METAPATHS"

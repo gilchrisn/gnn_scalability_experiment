@@ -113,11 +113,12 @@ class Config:
                 # PAP (rev_writes,writes) excluded: too dense, OOM-kills server
             ]),
 
-            # === OAG (Open Academic Graph, 768-dim XLNet features, ~1.1M nodes) ===
-            # Run scripts/inspect_oag.py after processing on server to confirm edge names.
+            # === OAG (Open Academic Graph, 768-dim XLNet features, 546K papers) ===
             'OAG_CS': DatasetConfig('OAG', 'cs', 'paper', [
-                "rev_write,write",       # PAP (paper-author-paper)
-                "rev_PF_in,PF_in",       # PFP (paper-field-paper)
+                "rev_AP_write_first,AP_write_first",             # PAP via first-author
+                "PF_in_L1,rev_PF_in_L1",                        # PFP via L1 fields (1.2M edges)
+                "PF_in_L3,rev_PF_in_L3",                        # PFP via L3 fields (870K edges)
+                "rev_AP_write_first,in,rev_in,AP_write_first",   # PAIAP via first-author + affiliation
             ]),
 
             # === RCDD (Alibaba risk detection, 13.8M nodes, all types featurized) ===
@@ -163,8 +164,8 @@ class Config:
                 "has_topic,rev_has_topic",
             ]),
             'MINI_OAG_CS': DatasetConfig('MINI', 'OAG_CS', 'paper', [
-                "rev_write,write",
-                "rev_PF_in,PF_in",
+                "rev_AP_write_first,AP_write_first",
+                "PF_in_L1,rev_PF_in_L1",
             ]),
             'MINI_RCDD': DatasetConfig('MINI', 'RCDD_AliRCD', 'item', []),
 

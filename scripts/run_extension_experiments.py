@@ -37,6 +37,8 @@ current_dir  = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
+from torch_geometric.data import HeteroData
+
 from src.config import config
 from src.data import DatasetFactory
 from src.data.streaming import TemporalPartitioner, Snapshot
@@ -51,6 +53,70 @@ DEFAULT_K         = 32
 DEFAULT_EPOCHS    = 50
 DEFAULT_TOPR      = "0.05"
 DEFAULT_MIN_CONF  = 0.1
+
+def _subgraph_by_year(
+    g: HeteroData,
+    fraction: float,
+    time_node_type: str,
+    time_attr: str = "year",
+) -> HeteroData:
+    """Keep only nodes with year in the bottom `fraction` and their induced edges.
+
+    All non-time node types are kept in full (authors, fields, etc.) so that
+    edge indices remain valid.  Only the time node type (e.g. paper) is filtered.
+    """
+    years = getattr(g[time_node_type], time_attr).squeeze()
+    sorted_years, _ = years.sort()
+    cutoff_idx = max(1, int(fraction * len(sorted_years))) - 1
+    year_cutoff = sorted_years[cutoff_idx].item()
+
+    keep_mask = years.squeeze() <= year_cutoff
+    keep_ids = keep_mask.nonzero(as_tuple=False).squeeze(1)
+
+    # Build old→new id mapping for the time node type
+    new_id = torch.full((g[time_node_type].num_nodes,), -1, dtype=torch.long)
+    new_id[keep_ids] = torch.arange(keep_ids.size(0), dtype=torch.long)
+
+    g_sub = HeteroData()
+
+    # Copy node stores — filter time node type, keep others as-is
+    for ntype in g.node_types:
+        if ntype == time_node_type:
+            for key, val in g[ntype].items():
+                if isinstance(val, torch.Tensor) and val.size(0) == g[ntype].num_nodes:
+                    g_sub[ntype][key] = val[keep_ids]
+                else:
+                    g_sub[ntype][key] = val
+            g_sub[ntype].num_nodes = keep_ids.size(0)
+        else:
+            for key, val in g[ntype].items():
+                g_sub[ntype][key] = val
+
+    # Copy edge stores — remap time node endpoints, drop edges to filtered-out nodes
+    for src_type, rel, dst_type in g.edge_types:
+        ei = g[src_type, rel, dst_type].edge_index
+        src_ids, dst_ids = ei[0], ei[1]
+
+        # Remap endpoints that are the time node type
+        if src_type == time_node_type:
+            src_ids = new_id[src_ids]
+        if dst_type == time_node_type:
+            dst_ids = new_id[dst_ids]
+
+        # Keep only edges where both endpoints survived
+        valid = (src_ids >= 0) & (dst_ids >= 0)
+        if valid.any():
+            g_sub[src_type, rel, dst_type].edge_index = torch.stack(
+                [src_ids[valid], dst_ids[valid]], dim=0
+            )
+        else:
+            # Keep the edge type with an empty tensor so schema is preserved
+            g_sub[src_type, rel, dst_type].edge_index = torch.zeros(
+                (2, 0), dtype=torch.long
+            )
+
+    return g_sub
+
 
 _EXT_FIELDS = [
     "dataset", "metapath", "snapshot", "fraction", "k",
@@ -256,9 +322,14 @@ def _infer_layerwise(model, g_homo, in_dim, device):
 
 def _f1(logits, labels, mask):
     from torchmetrics.functional import f1_score
-    preds = logits[mask].argmax(dim=1)
+    # Filter out ignore-label nodes (e.g. -100) within the mask
+    valid = mask.clone()
+    valid[mask] &= (labels[mask] >= 0)
+    if valid.sum() == 0:
+        return 0.0
+    preds = logits[valid].argmax(dim=1)
     return f1_score(
-        preds, labels[mask],
+        preds, labels[valid],
         task="multiclass",
         num_classes=logits.size(1),
         average="macro",
@@ -315,40 +386,70 @@ def _run_one_metapath(
     masks       = info["masks"]
     num_classes = info["num_classes"]
 
-    sorted_ntypes = sorted(g_full.node_types)
-    node_offset   = sum(g_full[nt].num_nodes for nt in sorted_ntypes if nt < target_ntype)
-    num_target    = g_full[target_ntype].num_nodes
-
     # Build streaming snapshots
     time_node_type = next(
         (nt for nt in g_full.node_types if hasattr(g_full[nt], "year")), None
     )
-    rel_to_etype = {et[1]: et for et in g_full.edge_types}
-    meta_path_tuples = [rel_to_etype[r] for r in metapath.split(",")]
-    snapshots: List[Snapshot] = TemporalPartitioner.partition(
-        g=g_full, meta_path=meta_path_tuples,
-        fractions=fractions, time_node_type=time_node_type,
-    )
-    for snap in snapshots:
-        snap.graph[target_ntype].y          = labels
-        snap.graph[target_ntype].train_mask = masks["train"]
-        snap.graph[target_ntype].val_mask   = masks["val"]
-        snap.graph[target_ntype].test_mask  = masks["test"]
+
+    if time_node_type is not None:
+        # Node-level temporal filtering: keep papers with year <= cutoff
+        # Attach labels/masks to g_full so _subgraph_by_year slices them automatically
+        g_full[target_ntype].y          = labels
+        g_full[target_ntype].train_mask = masks["train"]
+        g_full[target_ntype].val_mask   = masks["val"]
+        g_full[target_ntype].test_mask  = masks["test"]
+        log.info("    Using node-level temporal partitioning (year on '%s')", time_node_type)
+        snapshots = []
+        for frac in fractions:
+            g_snap = _subgraph_by_year(g_full, frac, time_node_type)
+            n_papers = g_snap[target_ntype].num_nodes
+            # Propagate labels/masks — only keep entries for surviving nodes
+            # (labels and masks were set on g_full which has all nodes)
+            snapshots.append(Snapshot(
+                graph=g_snap, fraction=frac,
+                label=f"t={len(snapshots)} ({int(frac*100)}%)",
+            ))
+            log.info("      frac=%.0f%%  %s nodes=%d", frac*100, target_ntype, n_papers)
+    else:
+        # Edge-level partitioning for datasets without year (HGB etc.)
+        rel_to_etype = {et[1]: et for et in g_full.edge_types}
+        meta_path_tuples = [rel_to_etype[r] for r in metapath.split(",")]
+        snapshots: List[Snapshot] = TemporalPartitioner.partition(
+            g=g_full, meta_path=meta_path_tuples,
+            fractions=fractions, time_node_type=None,
+        )
+        for snap in snapshots:
+            snap.graph[target_ntype].y          = labels
+            snap.graph[target_ntype].train_mask = masks["train"]
+            snap.graph[target_ntype].val_mask   = masks["val"]
+            snap.graph[target_ntype].test_mask  = masks["test"]
+
+    # Helper: compute node_offset and num_target for a given snapshot graph
+    def _snap_params(g_snap):
+        s_ntypes = sorted(g_snap.node_types)
+        offset = sum(g_snap[nt].num_nodes for nt in s_ntypes if nt < target_ntype)
+        n_target = g_snap[target_ntype].num_nodes
+        return offset, n_target
+
+    node_level = time_node_type is not None
 
     log.info("    [Phase 1] Staging snapshot 0 (%d%%) + training SAGE...",
              int(fractions[0] * 100))
     snap0 = snapshots[0]
     PyGToCppAdapter(data_dir).convert(snap0.graph)
     compile_rule_for_cpp(metapath, snap0.graph, data_dir, folder)
+    if node_level:
+        generate_qnodes(data_dir, folder, target_node_type=target_ntype, g_hetero=snap0.graph)
 
+    offset0, n_target0 = _snap_params(snap0.graph)
     _, exact_file = _run_cpp_exact(engine, folder, timeout)
-    g_h0 = _load_adj(engine, exact_file, num_target, node_offset, max_adj_mb)
+    g_h0 = _load_adj(engine, exact_file, n_target0, offset0, max_adj_mb)
 
-    g_h0.x          = g_full[target_ntype].x
-    g_h0.y          = labels
-    g_h0.train_mask = masks["train"]
-    g_h0.val_mask   = masks["val"]
-    g_h0.test_mask  = masks["test"]
+    g_h0.x          = snap0.graph[target_ntype].x
+    g_h0.y          = snap0.graph[target_ntype].y if node_level else labels
+    g_h0.train_mask = snap0.graph[target_ntype].train_mask if node_level else masks["train"]
+    g_h0.val_mask   = snap0.graph[target_ntype].val_mask if node_level else masks["val"]
+    g_h0.test_mask  = snap0.graph[target_ntype].test_mask if node_level else masks["test"]
 
     in_dim = g_h0.x.size(1)
     t0_train = time.perf_counter()
@@ -366,13 +467,21 @@ def _run_one_metapath(
     sage_model = sage_model.to(infer_device)  # move to CPU for fair Phase 2 timing
     log.info("    [Phase 1] Done. Model frozen. (train=%.2fs, trained on %s)", t_train, train_device)
 
-    test_mask = masks["test"].to(infer_device)
-    labels_d  = labels.to(infer_device)
-
     for snap in snapshots[1:]:
         log.info("    [Phase 2] %s", snap.label)
-        PyGToCppAdapter(data_dir).convert(snap.graph)
-        compile_rule_for_cpp(metapath, snap.graph, data_dir, folder)
+        g_snap = snap.graph
+
+        # Per-snapshot params (node counts change with node-level filtering)
+        snap_offset, snap_n_target = _snap_params(g_snap)
+        snap_x      = g_snap[target_ntype].x
+        snap_labels = g_snap[target_ntype].y if node_level else labels
+        snap_test   = (g_snap[target_ntype].test_mask if node_level else masks["test"]).to(infer_device)
+        snap_labels_d = snap_labels.to(infer_device)
+
+        PyGToCppAdapter(data_dir).convert(g_snap)
+        compile_rule_for_cpp(metapath, g_snap, data_dir, folder)
+        if node_level:
+            generate_qnodes(data_dir, folder, target_node_type=target_ntype, g_hetero=g_snap)
 
         # --- Exact: run C++, then try loading into Python ---
         t_exact_mat      = None
@@ -390,15 +499,14 @@ def _run_one_metapath(
             if os.path.exists(exact_file):
                 adj_mb_exact = os.path.getsize(exact_file) / (1024 * 1024)
             try:
-                g_exact   = _load_adj(engine, exact_file, num_target, node_offset, max_adj_mb)
-                g_exact.x = g_full[target_ntype].x
+                g_exact   = _load_adj(engine, exact_file, snap_n_target, snap_offset, max_adj_mb)
+                g_exact.x = snap_x
                 t0        = time.perf_counter()
                 z_exact   = _infer(sage_model, g_exact, in_dim, infer_device)
                 t_exact_infer = time.perf_counter() - t0
-                f1_exact  = _f1(z_exact, labels_d, test_mask)
+                f1_exact  = _f1(z_exact, snap_labels_d, snap_test)
                 layers_exact = _infer_layerwise(sage_model, g_exact, in_dim, infer_device)
-                dirichlet_exact = _dirichlet_energy(z_exact, g_exact.edge_index.to(infer_device), num_target)
-                edge_index_exact = g_exact.edge_index  # save for later
+                dirichlet_exact = _dirichlet_energy(z_exact, g_exact.edge_index.to(infer_device), snap_n_target)
                 del g_exact  # free memory before KMV
             except (MemoryError, RuntimeError) as e:
                 log.warning("      Exact load/infer OOM: %s", e)
@@ -410,15 +518,15 @@ def _run_one_metapath(
         adj_mb_kmv = None
         if os.path.exists(kmv_file):
             adj_mb_kmv = os.path.getsize(kmv_file) / (1024 * 1024)
-        g_kmv   = _load_adj(engine, kmv_file, num_target, node_offset)
-        g_kmv.x = g_full[target_ntype].x
+        g_kmv   = _load_adj(engine, kmv_file, snap_n_target, snap_offset)
+        g_kmv.x = snap_x
         t0      = time.perf_counter()
         z_kmv   = _infer(sage_model, g_kmv, in_dim, infer_device)
         t_kmv_infer = time.perf_counter() - t0
-        f1_kmv  = _f1(z_kmv, labels_d, test_mask)
+        f1_kmv  = _f1(z_kmv, snap_labels_d, snap_test)
         n_edges_kmv = _count_edges_from_file(kmv_file)
         layers_kmv = _infer_layerwise(sage_model, g_kmv, in_dim, infer_device)
-        dirichlet_kmv = _dirichlet_energy(z_kmv, g_kmv.edge_index.to(infer_device), num_target)
+        dirichlet_kmv = _dirichlet_energy(z_kmv, g_kmv.edge_index.to(infer_device), snap_n_target)
 
         # --- Derived metrics (only when exact loaded successfully) ---
         cka_val        = None
@@ -426,10 +534,10 @@ def _run_one_metapath(
         depthwise_vals = None
         if z_exact is not None:
             cka_val = cka.calculate(
-                z_exact[test_mask].to(infer_device), z_kmv[test_mask].to(infer_device))
-            pred_agree = _prediction_agreement(z_exact, z_kmv, test_mask)
+                z_exact[snap_test].to(infer_device), z_kmv[snap_test].to(infer_device))
+            pred_agree = _prediction_agreement(z_exact, z_kmv, snap_test)
         if layers_exact is not None:
-            depthwise_vals = _depthwise_cka(layers_exact, layers_kmv, test_mask, cka)
+            depthwise_vals = _depthwise_cka(layers_exact, layers_kmv, snap_test, cka)
 
         speedup = None
         if t_exact_mat is not None:
