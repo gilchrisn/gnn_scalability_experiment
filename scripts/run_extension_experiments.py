@@ -524,30 +524,40 @@ def main() -> None:
     # ---- Mine / load metapaths ---------------------------------------------
     log.info("")
     log.info("[2/4] Loading + validating metapaths...")
-    work_dir   = os.path.join(config.DATA_DIR, f"mining_{dataset}")
-    anyburl    = AnyBURLRunner(work_dir, config.ANYBURL_JAR)
-    anyburl.export_for_mining(g_full)
 
-    rules_file = os.path.join(work_dir, "anyburl_rules.txt")
-    if args.force_remine or not os.path.exists(rules_file):
-        log.info("      Mining via AnyBURL (snapshot at %ds)...", args.mining_timeout)
-        anyburl.run_mining(timeout=args.mining_timeout, max_length=6, num_threads=4)
+    # If the dataset has pre-configured metapaths in config, use them directly.
+    # This avoids AnyBURL mining on large datasets (OGB_MAG etc.) where mining
+    # is slow and the good metapaths are already known.
+    if cfg.suggested_paths and not args.force_remine:
+        metapaths = cfg.suggested_paths[:args.max_metapaths]
+        log.info("      Using %d pre-configured metapaths from config (skip AnyBURL).", len(metapaths))
+        for mp in metapaths:
+            log.info("        %s", mp)
     else:
-        log.info("      Using cached rules.")
+        work_dir   = os.path.join(config.DATA_DIR, f"mining_{dataset}")
+        anyburl    = AnyBURLRunner(work_dir, config.ANYBURL_JAR)
+        anyburl.export_for_mining(g_full)
 
-    metapaths, stats = load_validated_metapaths(
-        rules_file=rules_file,
-        g_hetero=g_full,
-        target_node=cfg.target_node,
-        min_conf=args.min_conf,
-        max_n=args.max_metapaths,
-    )
-    log.info("      valid metapaths: %d  (cap=%d)", stats["valid_mirrored"], args.max_metapaths)
-    log.info("      returned:        %d", stats["returned"])
+        rules_file = os.path.join(work_dir, "anyburl_rules.txt")
+        if args.force_remine or not os.path.exists(rules_file):
+            log.info("      Mining via AnyBURL (snapshot at %ds)...", args.mining_timeout)
+            anyburl.run_mining(timeout=args.mining_timeout, max_length=6, num_threads=4)
+        else:
+            log.info("      Using cached rules.")
 
-    if not metapaths:
-        log.error("[ERROR] No valid metapaths. Try --force-remine or lower --min-conf.")
-        sys.exit(1)
+        metapaths, stats = load_validated_metapaths(
+            rules_file=rules_file,
+            g_hetero=g_full,
+            target_node=cfg.target_node,
+            min_conf=args.min_conf,
+            max_n=args.max_metapaths,
+        )
+        log.info("      valid metapaths: %d  (cap=%d)", stats["valid_mirrored"], args.max_metapaths)
+        log.info("      returned:        %d", stats["returned"])
+
+        if not metapaths:
+            log.error("[ERROR] No valid metapaths. Try --force-remine or lower --min-conf.")
+            sys.exit(1)
 
     # ---- Stage C++ data (once for full graph) ------------------------------
     log.info("")
