@@ -13,9 +13,6 @@ from typing import Optional
 from torch_geometric.data import HeteroData
 
 
-# ---------------------------------------------------------------------------
-# Data Staging
-# ---------------------------------------------------------------------------
 
 def generate_qnodes(data_dir: str, folder_name: str, target_node_type: str,
                     g_hetero, max_scan: int = 50000, sample_size: int = 100) -> None:
@@ -43,9 +40,7 @@ def generate_qnodes(data_dir: str, folder_name: str, target_node_type: str,
     with open(qnode_path, 'w') as f:
         f.write("\n".join(selected))
 
-    print(f"   [Staging] Generated {len(selected)} query nodes "
-          f"(type='{target_node_type}', global IDs {offset}–{offset+n_target-1}) "
-          f"→ {qnode_path}")
+    print(f"[stage] qnodes: {len(selected)} nodes of type '{target_node_type}' (IDs {offset}–{offset+n_target-1})")
 
 
 def compile_rule_for_cpp(
@@ -81,7 +76,10 @@ def compile_rule_for_cpp(
     parts = []
 
     for i, rel_str in enumerate(path_list):
-        direction = "-3" if rel_str.startswith("rev_") else "-2"
+        # Always use forward traversal (-2): GraphStandardizer stores ALL edges
+        # (including rev_* ones) as explicit forward entries in link.dat, so
+        # reverse traversal (-3) is never needed and breaks OGB-style datasets.
+        direction = "-2"
         matched_edge = SchemaMatcher.match(rel_str, g_hetero)
         try:
             eid = edge_map[matched_edge]
@@ -115,9 +113,7 @@ def compile_rule_for_cpp(
     with open(file_dat, "w") as f:
         f.write(rule_content)
 
-    print(f"   [Staging] Rule bytecode written → {os.path.basename(file_limit)}, "
-          f"{os.path.basename(file_dat)}")
-    print(f"   rule content: {rule_content.strip()}  (instance_id={instance_id})")
+    print(f"[stage] rule: {rule_content.strip()}  (instance_id={instance_id})")
 
 
 def setup_global_res_dirs(folder_name: str, project_root: str):
@@ -142,9 +138,6 @@ def setup_global_res_dirs(folder_name: str, project_root: str):
     return df1_dir, hf1_dir
 
 
-# ---------------------------------------------------------------------------
-# C++ Execution
-# ---------------------------------------------------------------------------
 
 def run_cpp(
     binary: str,
@@ -170,19 +163,16 @@ def run_cpp(
         Raw stdout string from the C++ process.
     """
     cmd = [binary] + args
-    print(f"  [Engine] Executing: {' '.join(cmd)}")
-    if redirect_path:
-        print(f"           Redirecting stdout → {redirect_path}")
+    print(f"\n> {' '.join(args)}")
 
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, check=True, timeout=timeout
         )
     except subprocess.CalledProcessError as e:
-        print(f"\n[FATAL] C++ Crashed! Exit Code: {e.returncode}")
-        print(f"Command: {' '.join(cmd)}")
-        print(f"--- STDERR ---\n{e.stderr.strip()}")
-        print(f"--- STDOUT ---\n{e.stdout.strip()}")
+        print(f"\n[FATAL] C++ exited {e.returncode}")
+        print(f"STDERR: {e.stderr.strip()}")
+        print(f"STDOUT: {e.stdout.strip()}")
         sys.exit(1)
 
     if redirect_path:
@@ -190,11 +180,7 @@ def run_cpp(
             f.write(result.stdout)
 
     if print_output:
-        print("\n" + "-" * 40)
-        print(f"--- RAW C++ STDOUT ({args[0]}) ---")
-        print("-" * 40)
-        label = result.stdout.strip() if result.stdout.strip() else "[NO OUTPUT — REDIRECTED TO FILE]"
-        print(label)
-        print("-" * 40)
+        out = result.stdout.strip()
+        print(out if out else "[no output]")
 
     return result.stdout

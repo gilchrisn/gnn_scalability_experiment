@@ -20,9 +20,6 @@ from scripts.bench_utils import (
     setup_global_res_dirs,
 )
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 LAMBDAS        = ["0.02", "0.03", "0.04", "0.05"]
 K_VALUES       = [2, 4, 8, 16, 32]
@@ -31,9 +28,6 @@ DEFAULT_K_DEG  = 32
 DEFAULT_K_HIDX = 4
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="Raw Extraction for Figures 5 & 6")
@@ -48,7 +42,7 @@ def main():
     cfg = config.get_dataset_config(args.dataset)
     g_hetero, _ = DatasetFactory.get_data(cfg.source, cfg.dataset_name, cfg.target_node)
     PyGToCppAdapter(data_dir).convert(g_hetero)
-    generate_qnodes(data_dir, folder_name)
+    generate_qnodes(data_dir, folder_name, target_node_type=cfg.target_node, g_hetero=g_hetero)
     compile_rule_for_cpp(args.metapath, g_hetero, data_dir, folder_name)
     setup_global_res_dirs(folder_name, project_root)
 

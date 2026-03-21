@@ -15,12 +15,9 @@ TARGET = bin/graph_prep
 all: $(TARGET)
 
 $(TARGET): $(SRCS)
-	@cmd /C "IF NOT EXIST bin mkdir bin"
+	mkdir -p bin
 	$(CXX) $(CXXFLAGS) -o $(TARGET) $(SRCS)
 
 # Clean rule
 clean:
-	@cmd /C "DEL /F /Q $(subst /,\,$(TARGET))"
-
-
-# g++ -std=c++17 -O3 -o bin/graph_prep.exe HUB/main.cpp HUB/param.cpp
+	rm -f $(TARGET)

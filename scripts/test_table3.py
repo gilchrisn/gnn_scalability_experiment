@@ -47,50 +47,36 @@ def main():
                         help="Path to the C++ binary")
     args = parser.parse_args()
 
-    print(f"{'='*60}")
-    print(f"TABLE III ISOLATED TEST: {args.dataset}")
-    print(f"{'='*60}")
-
     folder_name = f"HGBn-{args.dataset.split('_')[1]}"
     data_dir    = os.path.join(project_root, folder_name)
 
-    # 1. Load and stage data
-    print("\n>>> [Step 1] Loading and Staging Data...")
     cfg = config.get_dataset_config(args.dataset)
     g_hetero, _ = DatasetFactory.get_data(cfg.source, cfg.dataset_name, cfg.target_node)
-
     PyGToCppAdapter(data_dir).convert(g_hetero)
-    generate_qnodes(data_dir, folder_name)
+    generate_qnodes(data_dir, folder_name, target_node_type=cfg.target_node, g_hetero=g_hetero)
     compile_rule_for_cpp(args.metapath, g_hetero, data_dir, folder_name)
 
-    # 2. Execute C++ engine
-    print(f"\n>>> [Step 2] Executing C++ Engine...")
     start_time = time.perf_counter()
     stdout     = run_cpp(args.binary, ["hg_stats", folder_name])
     exec_time  = time.perf_counter() - start_time
 
-    # 3. Parse output
-    print("\n>>> [Step 3] Parsing Output...")
-
-    # One RAW_EDGES_E* entry is emitted per evaluated query node; we average them.
-    edges_matches = re.findall(r"RAW_EDGES_E\*:\s*([0-9.]+)", stdout)
-    density_match = re.search(r"~dens:\s*([0-9.]+)",           stdout)
+    edges_matches = re.findall(r"RAW_EDGES_E\*:\s*([0-9.eE+\-]+)", stdout)
+    peer_match    = re.search(r"~\|peer\|:\s*([0-9.eE+\-]+)",       stdout)
+    density_match = re.search(r"~dens:\s*([0-9.eE+\-]+)",           stdout)
 
     if not edges_matches or not density_match:
-        print("\n[FATAL] Regex parsing failed. Expected tags missing.")
-        print("\n--- RAW STDOUT DUMP FOR DEBUGGING ---")
-        print(stdout.strip())
+        print("\n[FATAL] Regex parsing failed — expected tags missing.")
         sys.exit(1)
 
     raw_edges = sum(float(m) for m in edges_matches) / len(edges_matches)
+    peer_size = float(peer_match.group(1)) if peer_match else float("nan")
     density   = float(density_match.group(1))
 
-    print(f"\n[SUCCESS] Extraction Validated for {args.dataset} / {args.metapath}")
-    print(f"  Queries Evaluated : {len(edges_matches)}")
-    print(f"  |E*| (Avg Edges)  : {raw_edges:,.2f}")
-    print(f"  rho* (Density)    : {density:.6f}")
-    print(f"  Extraction Time   : {exec_time:.4f} seconds")
-    print(f"{'='*60}")
+    print(f"\n[TABLE III]  {args.dataset}  metapath={args.metapath}")
+    print(f"  |E*| (avg per qnode) : {raw_edges:,.2f}")
+    print(f"  ~|peer|              : {peer_size:.2f}")
+    print(f"  ~rho*                : {density:.8f}")
+    print(f"  time                 : {exec_time:.4f}s")
 
 
 if __name__ == "__main__":

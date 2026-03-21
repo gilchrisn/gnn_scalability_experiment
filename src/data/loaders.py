@@ -7,7 +7,12 @@ import pandas as pd
 import torch
 from typing import Tuple, Dict, Any, List
 import torch_geometric.data as tg_data
-from torch_geometric.datasets import HGBDataset, OGB_MAG, DBLP, IMDB, AMiner
+from torch_geometric.datasets import HGBDataset, OGB_MAG, DBLP, IMDB, AMiner, RCDD
+try:
+    from H2GB.datasets import OAGDataset as _OAGDataset
+    _H2GB_AVAILABLE = True
+except ImportError:
+    _H2GB_AVAILABLE = False
 
 from .base import BaseGraphLoader
 
@@ -52,12 +57,10 @@ class GraphStandardizer:
         for (src, rel, dst), index in new_edge_store.items():
             g[src, rel, dst].edge_index = index
             
-        print(f"    [Standardized] Graph now has {len(g.edge_types)} edge types.")
 
 
 class HGBLoader(BaseGraphLoader):
     def load(self, dataset_name: str, target_ntype: str, root_dir: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
-        print(f"[HGBLoader] Loading {dataset_name}...")
 
         dataset_root = os.path.join(root_dir, f'HGB_{dataset_name}')    
         dataset = HGBDataset(root=dataset_root, name=dataset_name)
@@ -81,7 +84,7 @@ class OGBLoader(BaseGraphLoader):
             raise ValueError(f"OGBLoader only supports 'ogbn-mag'")
         
         dataset_root = os.path.join(root_dir, 'OGB')
-        dataset = OGB_MAG(root=dataset_root, preprocess='metapath2vec')
+        dataset = OGB_MAG(root=dataset_root, preprocess=None)
         g = dataset[0]
         
         GraphStandardizer.standardize(g)
@@ -183,6 +186,76 @@ class HNELoader(BaseGraphLoader):
                 torch.tensor(group['dst_idx'].values, dtype=torch.long)
             ], dim=0)
             g[src_type, rel_name, dst_type].edge_index = edge_index
+
+class OAGLoader(BaseGraphLoader):
+    def load(self, dataset_name: str, target_ntype: str, root_dir: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
+        if not _H2GB_AVAILABLE:
+            raise ImportError("H2GB is not installed. Run: pip install H2GB")
+        name = dataset_name.lower()  # 'cs', 'engineering', 'chemistry'
+        print(f"[OAGLoader] Loading OAG-{name} (768-dim XLNet features, ~1.1M nodes)...")
+        dataset_root = os.path.join(root_dir, 'OAG')
+        dataset = _OAGDataset(root=dataset_root, name=name)
+        g = dataset[0]
+
+        GraphStandardizer.standardize(g)
+
+        labels, num_classes = self._extract_labels(g, target_ntype)
+        features = self._ensure_features(g, target_ntype)
+
+        train_mask = g[target_ntype].get('train_mask', None)
+        train_mask, val_mask, test_mask = self._create_random_masks(
+            g[target_ntype].num_nodes, train_mask
+        )
+
+        info = self.create_info_dict(g, target_ntype, features, labels,
+                                     train_mask, val_mask, test_mask, num_classes)
+        return g, info
+
+
+class RCDDLoader(BaseGraphLoader):
+    def load(self, dataset_name: str, target_ntype: str, root_dir: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
+        print("[RCDDLoader] Loading RCDD (Alibaba risk-detection, 13.8M nodes)...")
+        dataset_root = os.path.join(root_dir, 'RCDD')
+        dataset = RCDD(root=dataset_root)
+        g = dataset[0]
+
+        GraphStandardizer.standardize(g)
+
+        labels, num_classes = self._extract_labels(g, target_ntype)
+        features = self._ensure_features(g, target_ntype)
+
+        train_mask = g[target_ntype].get('train_mask', None)
+        test_mask  = g[target_ntype].get('test_mask',  None)
+        train_mask, val_mask, test_mask = self._create_random_masks(
+            g[target_ntype].num_nodes, train_mask
+        )
+
+        info = self.create_info_dict(g, target_ntype, features, labels,
+                                     train_mask, val_mask, test_mask, num_classes)
+        return g, info
+
+
+class MiniLoader(BaseGraphLoader):
+    """Loads a pre-sampled mini graph saved by scripts/make_mini_datasets.py."""
+    def load(self, dataset_name: str, target_ntype: str, root_dir: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:
+        path = os.path.join(root_dir, f"{dataset_name}_mini", "data.pt")
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"Mini dataset not found at {path}. "
+                f"Run: python scripts/make_mini_datasets.py --datasets {dataset_name}"
+            )
+        print(f"[MiniLoader] Loading {dataset_name} mini sample from {path}")
+        g = torch.load(path, weights_only=False)
+        # Graph was already standardized when the mini was created — skip re-standardization.
+
+        features = self._ensure_features(g, target_ntype)
+        labels, num_classes = self._extract_labels(g, target_ntype)
+        train_mask, val_mask, test_mask = self._create_random_masks(g[target_ntype].num_nodes)
+
+        info = self.create_info_dict(g, target_ntype, features, labels,
+                                     train_mask, val_mask, test_mask, num_classes)
+        return g, info
+
 
 class CustomLoader(HNELoader):
     """

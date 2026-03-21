@@ -247,9 +247,7 @@ class GraphPrepRunner:
         Execution order: ExactD+ → ExactD → ExactH+ → ExactH
         """
         topr = self._canonical_topr(topr)
-        print(f"\n{'='*60}")
-        print(f"  Generating Ground Truth: {dataset}  topr={topr}")
-        print(f"{'='*60}")
+        print(f"\n[ground truth] {dataset}  topr={topr}")
 
         d_plus  = self.run_exact("ExactD+", dataset, topr)
         d_strict = self.run_exact("ExactD",  dataset, topr)
@@ -445,9 +443,9 @@ class GraphPrepRunner:
     ) -> str:
         """Execute the binary and return stdout.  Raises SystemExit on crash."""
         cmd = [self.binary] + args
-        print(f"\n  [Runner] {' '.join(cmd)}")
+        print(f"\n> {' '.join(args)}")
         if redirect_path:
-            print(f"           stdout → {redirect_path}")
+            print(f"  -> {redirect_path}")
 
         try:
             result = subprocess.run(
@@ -472,13 +470,9 @@ class GraphPrepRunner:
         if redirect_path:
             Path(redirect_path).write_text(result.stdout)
 
-        if self.verbose:
-            sep = "-" * 50
-            print(f"\n{sep}")
-            print(f"  {args[0]} stdout:")
-            print(sep)
-            print(result.stdout.strip() or "[empty — written to file]")
-            print(sep)
+        if self.verbose and not redirect_path:
+            out = result.stdout.strip()
+            print(out if out else "[no output]")
 
         return result.stdout
 

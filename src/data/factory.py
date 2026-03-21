@@ -5,7 +5,7 @@ from typing import Tuple, Dict, Any, Type
 import torch_geometric.data as tg_data
 
 from .base import BaseGraphLoader
-from .loaders import HGBLoader, OGBLoader, PyGStandardLoader, HNELoader, CustomLoader
+from .loaders import HGBLoader, OGBLoader, PyGStandardLoader, HNELoader, CustomLoader, RCDDLoader, OAGLoader, MiniLoader
 from ..config import config
 
 
@@ -15,10 +15,13 @@ class DatasetFactory:
     """
     
     _LOADER_REGISTRY: Dict[str, Type[BaseGraphLoader]] = {
-        'HGB': HGBLoader,
-        'OGB': OGBLoader,
-        'PyG': PyGStandardLoader,
-        'HNE': HNELoader,
+        'HGB':  HGBLoader,
+        'OGB':  OGBLoader,
+        'OAG':  OAGLoader,
+        'MINI': MiniLoader,
+        'PyG':  PyGStandardLoader,
+        'HNE':  HNELoader,
+        'RCDD': RCDDLoader,
         'CUSTOM': CustomLoader,
     }
     

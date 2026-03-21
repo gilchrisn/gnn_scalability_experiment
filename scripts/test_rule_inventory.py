@@ -415,9 +415,9 @@ def validate_rule(
     stdout = run_cpp(binary, ["hg_stats", folder_name], print_output=False)
     elapsed = time.perf_counter() - t0
 
-    edges_matches = re.findall(r"RAW_EDGES_E\*:\s*([0-9.]+)", stdout)
-    density_match = re.search(r"~dens:\s*([0-9.]+)",           stdout)
-    peer_match    = re.search(r"~\|peer\|:\s*([0-9.]+)",       stdout)
+    edges_matches = re.findall(r"RAW_EDGES_E\*:\s*([0-9.eE+\-]+)", stdout)
+    density_match = re.search(r"~dens:\s*([0-9.eE+\-]+)",           stdout)
+    peer_match    = re.search(r"~\|peer\|:\s*([0-9.eE+\-]+)",       stdout)
 
     raw_edges = (
         sum(float(x) for x in edges_matches) / len(edges_matches)
@@ -490,7 +490,7 @@ def main() -> None:
     if not args.skip_stage:
         print(f"\n[2/4] Staging C++ files → {data_dir}/")
         PyGToCppAdapter(data_dir).convert(g_hetero)
-        generate_qnodes(data_dir, folder_name)
+        generate_qnodes(data_dir, folder_name, target_node_type=cfg.target_node, g_hetero=g_hetero)
     else:
         print(f"\n[2/4] Staging skipped (--skip-stage).")
 

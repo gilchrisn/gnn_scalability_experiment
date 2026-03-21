@@ -32,11 +32,15 @@ class CppEngine(ExecutionEngine):
         """
         return os.path.abspath(path).replace('\\', '/')
     
-    def run_command(self, mode: str, rule_file: str, output_file: str, 
-                    k: int = None, l_val: int = 1, seed: int = None) -> float:
+    def run_command(self, mode: str, rule_file: str, output_file: str,
+                    k: int = None, l_val: int = 1, seed: int = None,
+                    timeout: int = 600) -> float:
         """
         Invokes the C++ engine. Parses internal algorithmic timer if available,
         otherwise falls back to total end-to-end execution time.
+
+        Args:
+            timeout: Subprocess timeout in seconds. Raises RuntimeError on expiry.
         """
         bin_path = self._sanitize_path(self.executable)
         data_path = self._sanitize_path(self.data_dir)
@@ -57,8 +61,9 @@ class CppEngine(ExecutionEngine):
         start_fallback = time.perf_counter()
 
         try:
-            res = subprocess.run(cmd, check=True, capture_output=True, text=True)
-            
+            res = subprocess.run(cmd, check=True, capture_output=True, text=True,
+                                 timeout=timeout)
+
             # 1. Try to intercept Pure C++ Algorithmic Time (For Benchmarking Mode)
             for line in res.stdout.split('\n'):
                 line = line.strip().lower()
@@ -67,14 +72,19 @@ class CppEngine(ExecutionEngine):
                         return float(line.split(":")[1].strip())
                     except ValueError:
                         pass
-                        
+
             # 2. Fallback to Total Pipeline Time (For Data Generation Mode like 'sketch')
             return time.perf_counter() - start_fallback
 
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"C++ binary timed out after {timeout}s (mode={mode}). "
+                "Increase --timeout or skip this metapath."
+            ) from None
         except subprocess.CalledProcessError as e:
             if "std::bad_alloc" in e.stderr:
                 raise MemoryError("C++ backend exhausted available RAM.") from None
-            
+
             print(f"\n    [C++] STDERR: {e.stderr}")
             print(f"    [C++] STDOUT: {e.stdout}")
             raise RuntimeError(f"C++ binary failed with exit code {e.returncode}") from e

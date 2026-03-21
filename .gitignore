@@ -3,7 +3,6 @@ hehe.sh
 .venv/
 
 
-HUB/
 bin/
 checkpoints/
 results/
@@ -12,12 +11,10 @@ exp_data/
 
 *.csv
 *.png
-*.jar
 __pycache__/
 output/
 
 de/
-tools/
 
 IMPORTANT_REMINDER.md
 script.ps1
@@ -25,3 +22,18 @@ script.ps1
 HGB*
 lightning_logs
 global_res
+
+hub-conf 
+springer
+bench*
+*.ps1
+RUNBOOK.md
+parallel-k-P-core-decomposition-code
+CLAUDE.md
+cs470
+documents
+.claude
+.pytest_cache
+HUB 
+markdown
+
