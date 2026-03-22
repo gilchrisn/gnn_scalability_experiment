@@ -237,6 +237,16 @@ def _train_sage(
     train_mask = g_homo.train_mask.to(device)
     val_mask   = g_homo.val_mask.to(device)
 
+    # Filter out ignore-label nodes (-100) from masks — otherwise cross_entropy
+    # returns nan and early stopping never triggers.
+    valid_labels = labels >= 0
+    train_mask = train_mask & valid_labels
+    val_mask   = val_mask & valid_labels
+    if val_mask.sum() == 0:
+        log.warning("    [SAGE] No valid labels in val_mask — training %d epochs without early stop", epochs)
+    if train_mask.sum() == 0:
+        log.error("    [SAGE] No valid labels in train_mask — model will not learn!")
+
     best_val_loss = float("inf")
     best_state    = None
     wait          = 0
