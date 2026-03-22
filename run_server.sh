@@ -39,7 +39,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Datasets to run (OAG_CS requires: pip install H2GB — first load downloads ~2GB)
-DATASETS=(OGB_MAG OAG_CS)
+DATASETS=(OAG_CS OGB_MAG)
 
 COMMON_ARGS=(
     --max-metapaths "$MAX_METAPATHS"
