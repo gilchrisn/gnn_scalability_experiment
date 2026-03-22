@@ -10,11 +10,16 @@ import torch_geometric.data as tg_data
 from torch_geometric.datasets import HGBDataset, OGB_MAG, DBLP, IMDB, AMiner, RCDD
 try:
     # H2GB's __init__ imports its full model zoo (layers, networks) which pulls in
-    # turtle→tkinter (unavailable on headless servers) and performer-pytorch.
-    # Stub out tkinter before importing so the unused goat_model.py doesn't crash.
+    # goat_model.py → turtle → tkinter (unavailable on headless servers).
+    # Stub out turtle itself so the import chain doesn't break.
     import sys as _sys
     if 'tkinter' not in _sys.modules:
-        _sys.modules['tkinter'] = type(_sys)('tkinter')
+        _tk_stub = type(_sys)('tkinter')
+        _tk_stub.Frame = type('Frame', (), {})
+        _sys.modules['tkinter'] = _tk_stub
+        _turtle_stub = type(_sys)('turtle')
+        _turtle_stub.xcor = lambda: 0
+        _sys.modules['turtle'] = _turtle_stub
     from H2GB.datasets import OAGDataset as _OAGDataset
     _H2GB_AVAILABLE = True
 except ImportError:
