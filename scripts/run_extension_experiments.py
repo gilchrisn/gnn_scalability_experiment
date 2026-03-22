@@ -431,30 +431,13 @@ def _run_one_metapath(
         g_full[target_ntype].val_mask   = masks["val"]
         g_full[target_ntype].test_mask  = masks["test"]
         log.info("    Using node-level temporal partitioning (year on '%s')", time_node_type)
-        snapshots = []
+        # Preview node counts without keeping all snapshots in memory
         for frac in fractions:
             g_snap = _subgraph_by_year(g_full, frac, time_node_type)
-            n_papers = g_snap[target_ntype].num_nodes
-            # Propagate labels/masks — only keep entries for surviving nodes
-            # (labels and masks were set on g_full which has all nodes)
-            snapshots.append(Snapshot(
-                graph=g_snap, fraction=frac,
-                label=f"t={len(snapshots)} ({int(frac*100)}%)",
-            ))
-            log.info("      frac=%.0f%%  %s nodes=%d", frac*100, target_ntype, n_papers)
-    else:
-        # Edge-level partitioning for datasets without year (HGB etc.)
-        rel_to_etype = {et[1]: et for et in g_full.edge_types}
-        meta_path_tuples = [rel_to_etype[r] for r in metapath.split(",")]
-        snapshots: List[Snapshot] = TemporalPartitioner.partition(
-            g=g_full, meta_path=meta_path_tuples,
-            fractions=fractions, time_node_type=None,
-        )
-        for snap in snapshots:
-            snap.graph[target_ntype].y          = labels
-            snap.graph[target_ntype].train_mask = masks["train"]
-            snap.graph[target_ntype].val_mask   = masks["val"]
-            snap.graph[target_ntype].test_mask  = masks["test"]
+            log.info("      frac=%.0f%%  %s nodes=%d", frac*100, target_ntype,
+                     g_snap[target_ntype].num_nodes)
+            del g_snap
+        import gc; gc.collect()
 
     # Helper: compute node_offset and num_target for a given snapshot graph
     def _snap_params(g_snap):
@@ -465,23 +448,46 @@ def _run_one_metapath(
 
     node_level = time_node_type is not None
 
-    log.info("    [Phase 1] Staging snapshot 0 (%d%%) + training SAGE...",
-             int(fractions[0] * 100))
-    snap0 = snapshots[0]
-    PyGToCppAdapter(data_dir).convert(snap0.graph)
-    compile_rule_for_cpp(metapath, snap0.graph, data_dir, folder)
-    if node_level:
-        generate_qnodes(data_dir, folder, target_node_type=target_ntype, g_hetero=snap0.graph)
+    def _make_snap(frac):
+        """Lazily create a single snapshot (node-level or edge-level)."""
+        if node_level:
+            return _subgraph_by_year(g_full, frac, time_node_type)
+        else:
+            # Edge-level: build just this fraction via TemporalPartitioner
+            rel_to_etype = {et[1]: et for et in g_full.edge_types}
+            meta_path_tuples = [rel_to_etype[r] for r in metapath.split(",")]
+            snaps = TemporalPartitioner.partition(
+                g=g_full, meta_path=meta_path_tuples,
+                fractions=[frac], time_node_type=None,
+            )
+            g_snap = snaps[0].graph
+            g_snap[target_ntype].y          = labels
+            g_snap[target_ntype].train_mask = masks["train"]
+            g_snap[target_ntype].val_mask   = masks["val"]
+            g_snap[target_ntype].test_mask  = masks["test"]
+            return g_snap
 
-    offset0, n_target0 = _snap_params(snap0.graph)
+    # Phase 1: Train on the LARGEST fraction (best label coverage).
+    # For temporal datasets the oldest slice (20%) often has poor labels.
+    train_frac = fractions[-1]  # 1.0 = full graph
+    log.info("    [Phase 1] Staging training snapshot (%.0f%%) + training SAGE...",
+             train_frac * 100)
+    g_train = _make_snap(train_frac)
+    PyGToCppAdapter(data_dir).convert(g_train)
+    compile_rule_for_cpp(metapath, g_train, data_dir, folder)
+    if node_level:
+        generate_qnodes(data_dir, folder, target_node_type=target_ntype, g_hetero=g_train)
+
+    offset0, n_target0 = _snap_params(g_train)
     _, exact_file = _run_cpp_exact(engine, folder, timeout)
     g_h0 = _load_adj(engine, exact_file, n_target0, offset0, max_adj_mb)
 
-    g_h0.x          = snap0.graph[target_ntype].x
-    g_h0.y          = snap0.graph[target_ntype].y if node_level else labels
-    g_h0.train_mask = snap0.graph[target_ntype].train_mask if node_level else masks["train"]
-    g_h0.val_mask   = snap0.graph[target_ntype].val_mask if node_level else masks["val"]
-    g_h0.test_mask  = snap0.graph[target_ntype].test_mask if node_level else masks["test"]
+    g_h0.x          = g_train[target_ntype].x
+    g_h0.y          = g_train[target_ntype].y if node_level else labels
+    g_h0.train_mask = g_train[target_ntype].train_mask if node_level else masks["train"]
+    g_h0.val_mask   = g_train[target_ntype].val_mask if node_level else masks["val"]
+    g_h0.test_mask  = g_train[target_ntype].test_mask if node_level else masks["test"]
+    del g_train; import gc; gc.collect()
 
     in_dim = g_h0.x.size(1)
     t0_train = time.perf_counter()
@@ -496,12 +502,15 @@ def _run_one_metapath(
         else:
             raise
     t_train = time.perf_counter() - t0_train
+    del g_h0; gc.collect()
     sage_model = sage_model.to(infer_device)  # move to CPU for fair Phase 2 timing
     log.info("    [Phase 1] Done. Model frozen. (train=%.2fs, trained on %s)", t_train, train_device)
 
-    for snap in snapshots[1:]:
-        log.info("    [Phase 2] %s", snap.label)
-        g_snap = snap.graph
+    # Phase 2: Compare exact vs KMV at each fraction (computed lazily)
+    for i, frac in enumerate(fractions):
+        label = f"t={i} ({int(frac*100)}%)"
+        log.info("    [Phase 2] %s", label)
+        g_snap = _make_snap(frac)
 
         # Per-snapshot params (node counts change with node-level filtering)
         snap_offset, snap_n_target = _snap_params(g_snap)
@@ -599,8 +608,8 @@ def _run_one_metapath(
         ext_w.writerow({
             "dataset":          dataset,
             "metapath":         metapath,
-            "snapshot":         snap.label,
-            "fraction":         snap.fraction,
+            "snapshot":         label,
+            "fraction":         frac,
             "k":                k,
             "n_edges_exact":    n_edges_exact if n_edges_exact is not None else "",
             "n_edges_kmv":      n_edges_kmv,
@@ -621,7 +630,7 @@ def _run_one_metapath(
             "speedup_kmv":      _fmt(speedup, 4),
         })
         # Free per-snapshot tensors
-        del g_kmv, z_kmv, layers_kmv
+        del g_snap, g_kmv, z_kmv, layers_kmv
         if z_exact is not None:
             del z_exact, layers_exact
         import gc; gc.collect()
@@ -757,7 +766,7 @@ def main() -> None:
     log.info("")
     log.info("[4/4] Running extension experiments...")
     ext_path = out_dir / f"{args.output_name}.csv"
-    expected_snapshots = len(args.fractions) - 1  # first fraction is training split
+    expected_snapshots = len(args.fractions)  # Phase 2 runs all fractions
     done     = _done_metapaths(ext_path, expected_snapshots)
     total    = len(metapaths)
     n_done   = sum(1 for mp in metapaths if mp in done)
