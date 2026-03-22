@@ -108,9 +108,9 @@ class Config:
 
             # === OGB DATASETS ===
             'OGB_MAG': DatasetConfig('OGB', 'ogbn-mag', 'paper', [
+                "rev_writes,writes",                                    # PAP (sketch fix makes this feasible)
                 "has_topic,rev_has_topic",                               # PFP
                 "rev_writes,affiliated_with,rev_affiliated_with,writes", # PAIAP
-                # PAP (rev_writes,writes) excluded: too dense, OOM-kills server
             ]),
 
             # === OAG (Open Academic Graph, 768-dim XLNet features, 546K papers) ===
