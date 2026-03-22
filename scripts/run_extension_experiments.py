@@ -467,9 +467,9 @@ def _run_one_metapath(
             g_snap[target_ntype].test_mask  = masks["test"]
             return g_snap
 
-    # Phase 1: Train on the LARGEST fraction (best label coverage).
-    # For temporal datasets the oldest slice (20%) often has poor labels.
-    train_frac = fractions[-1]  # 1.0 = full graph
+    # Phase 1: Train on second-largest fraction (good label coverage,
+    # feasible materialization). 100% can OOM/timeout on exact materialize.
+    train_frac = fractions[-2] if len(fractions) >= 2 else fractions[-1]
     log.info("    [Phase 1] Staging training snapshot (%.0f%%) + training SAGE...",
              train_frac * 100)
     g_train = _make_snap(train_frac)
