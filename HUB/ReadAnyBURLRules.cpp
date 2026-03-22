@@ -1440,6 +1440,10 @@ void run_sketch_sampling(const std::string& dataset, const std::string& rule_fil
     for (unsigned int l = 0; l <= qp->ETypes.size(); l++) ractive->push_back(new std::vector<unsigned int>(g.NT.size(), 0));
     for (unsigned int n = 0; n < g.NT.size(); n++) for (unsigned int l : *active->at(n)) ractive->at(l)->at(n) = 1;
 
+    auto t_peers = std::chrono::steady_clock::now();
+    std::cout << "[sketch-timing] peers+active: "
+              << std::chrono::duration<double>(t_peers - t_start).count() << "s" << std::endl;
+
     // 4. Setup: Build hidden edges and synopses cache (same as prop::COD)
     auto synopses_cache = new std::vector<std::vector<jsy::Synopse>*>();
     for(unsigned int l = 0; l <= qp->ETypes.size(); l++){
@@ -1452,6 +1456,12 @@ void run_sketch_sampling(const std::string& dataset, const std::string& rule_fil
             }
         }
     }
+
+    auto t_synalloc = std::chrono::steady_clock::now();
+    std::cout << "[sketch-timing] synopse alloc: "
+              << std::chrono::duration<double>(t_synalloc - t_peers).count() << "s" << std::endl;
+    for(unsigned int l = 0; l <= qp->ETypes.size(); l++)
+        std::cout << "[sketch-timing]   layer " << l << " synopses: " << synopses_cache->at(l)->size() << std::endl;
 
     auto hidden_edges = new std::vector<HiddenEdge>();
     for(unsigned int l=0; l < qp->ETypes.size(); l++){
@@ -1471,13 +1481,24 @@ void run_sketch_sampling(const std::string& dataset, const std::string& rule_fil
                             hidden_edges->push_back(he);
     }}}}}
     }
-    
+
+    auto t_hedges = std::chrono::steady_clock::now();
+    std::cout << "[sketch-timing] hidden_edges: "
+              << std::chrono::duration<double>(t_hedges - t_synalloc).count() << "s  count="
+              << hidden_edges->size() << std::endl;
+
     // 5. *** RUN THE EXTRACTED LOGIC ***
-    unsigned int meta_layer = qp->ETypes.size(); 
+    unsigned int meta_layer = qp->ETypes.size();
     if(qp->instance != -1) meta_layer = qp->ETypes.size() - 1;
+
+    std::cout << "[sketch-timing] K=" << K << " L=" << L << " meta_layer=" << meta_layer << std::endl;
 
     // Propagate sketches and get the random-to-peer mappings
     auto rand2ps = jsy::gnn_synopses(meta_layer, hidden_edges, synopses_cache);
+
+    auto t_prop = std::chrono::steady_clock::now();
+    std::cout << "[sketch-timing] gnn_synopses: "
+              << std::chrono::duration<double>(t_prop - t_hedges).count() << "s" << std::endl;
 
     auto t_end = std::chrono::steady_clock::now();
     double algo_seconds = std::chrono::duration<double>(t_end - t_start).count();
@@ -1534,6 +1555,12 @@ void run_sketch_sampling(const std::string& dataset, const std::string& rule_fil
         }
         out_file.close();
     }
+
+    auto t_write = std::chrono::steady_clock::now();
+    std::cout << "[sketch-timing] sampling+write: "
+              << std::chrono::duration<double>(t_write - t_prop).count() << "s" << std::endl;
+    std::cout << "[sketch-timing] TOTAL: "
+              << std::chrono::duration<double>(t_write - t_start).count() << "s" << std::endl;
 
     // 7. Cleanup
     delete qp;

@@ -12,6 +12,7 @@
 #include <math.h>
 #include <sstream>
 #include <unordered_map>
+#include <limits>
 #include <map>
 #include <chrono>
 #include "pattern.cpp"
@@ -278,9 +279,11 @@ namespace jsy {  //join-synopses
                                                 std::vector<std::vector<Synopse> *> *synopses,
                                                 std::vector<bool> *qualified_nodes = nullptr) {
 
-        
+
         std::mt19937 generator(SEED);
-        std::uniform_int_distribution<std::mt19937::result_type> distribute(1, RAND_MAX);
+        // Use full 32-bit range (not RAND_MAX which is only 32767 on 32-bit MinGW)
+        static constexpr unsigned int GNN_HASH_MAX = std::numeric_limits<unsigned int>::max();
+        std::uniform_int_distribution<std::mt19937::result_type> distribute(1, GNN_HASH_MAX);
 
         auto rand2ps = new std::vector<std::unordered_map<unsigned int, unsigned int>*>();
         for(unsigned int l=0;l<L;l++) rand2ps->push_back(new std::unordered_map<unsigned int, unsigned int>());

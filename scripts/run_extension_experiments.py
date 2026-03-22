@@ -60,10 +60,12 @@ def _subgraph_by_year(
     time_node_type: str,
     time_attr: str = "year",
 ) -> HeteroData:
-    """Keep only nodes with year in the bottom `fraction` and their induced edges.
+    """Keep only time-nodes with year in the bottom `fraction`, then prune
+    all other node types to only those still referenced by surviving edges.
 
-    All non-time node types are kept in full (authors, fields, etc.) so that
-    edge indices remain valid.  Only the time node type (e.g. paper) is filtered.
+    This is a true induced subgraph: filtering papers also removes orphaned
+    authors, fields, institutions, etc., dramatically reducing total node count
+    for the C++ binary.
     """
     years = getattr(g[time_node_type], time_attr).squeeze()
     sorted_years, _ = years.sort()
@@ -74,46 +76,76 @@ def _subgraph_by_year(
     keep_ids = keep_mask.nonzero(as_tuple=False).squeeze(1)
 
     # Build old→new id mapping for the time node type
-    new_id = torch.full((g[time_node_type].num_nodes,), -1, dtype=torch.long)
-    new_id[keep_ids] = torch.arange(keep_ids.size(0), dtype=torch.long)
+    id_maps = {}
+    id_maps[time_node_type] = torch.full(
+        (g[time_node_type].num_nodes,), -1, dtype=torch.long
+    )
+    id_maps[time_node_type][keep_ids] = torch.arange(
+        keep_ids.size(0), dtype=torch.long
+    )
 
-    g_sub = HeteroData()
+    # --- Pass 1: filter edges, collect referenced non-time node IDs ----------
+    filtered_edges = {}
+    referenced = {nt: set() for nt in g.node_types if nt != time_node_type}
 
-    # Copy node stores — filter time node type, keep others as-is
-    for ntype in g.node_types:
-        if ntype == time_node_type:
-            for key, val in g[ntype].items():
-                if isinstance(val, torch.Tensor) and val.size(0) == g[ntype].num_nodes:
-                    g_sub[ntype][key] = val[keep_ids]
-                else:
-                    g_sub[ntype][key] = val
-            g_sub[ntype].num_nodes = keep_ids.size(0)
-        else:
-            for key, val in g[ntype].items():
-                g_sub[ntype][key] = val
-
-    # Copy edge stores — remap time node endpoints, drop edges to filtered-out nodes
     for src_type, rel, dst_type in g.edge_types:
         ei = g[src_type, rel, dst_type].edge_index
-        src_ids, dst_ids = ei[0], ei[1]
+        src_ids, dst_ids = ei[0].clone(), ei[1].clone()
 
-        # Remap endpoints that are the time node type
+        # Mark edges touching filtered-out time nodes as invalid
+        valid = torch.ones(ei.size(1), dtype=torch.bool)
         if src_type == time_node_type:
-            src_ids = new_id[src_ids]
+            valid &= id_maps[time_node_type][src_ids] >= 0
         if dst_type == time_node_type:
-            dst_ids = new_id[dst_ids]
+            valid &= id_maps[time_node_type][dst_ids] >= 0
 
-        # Keep only edges where both endpoints survived
-        valid = (src_ids >= 0) & (dst_ids >= 0)
-        if valid.any():
-            g_sub[src_type, rel, dst_type].edge_index = torch.stack(
-                [src_ids[valid], dst_ids[valid]], dim=0
-            )
+        src_ids, dst_ids = src_ids[valid], dst_ids[valid]
+        filtered_edges[(src_type, rel, dst_type)] = (src_ids, dst_ids)
+
+        # Track which non-time node IDs are still referenced
+        if src_type != time_node_type and src_ids.numel() > 0:
+            referenced[src_type].update(src_ids.tolist())
+        if dst_type != time_node_type and dst_ids.numel() > 0:
+            referenced[dst_type].update(dst_ids.tolist())
+
+    # --- Build id maps for non-time node types (keep only referenced) --------
+    for ntype in g.node_types:
+        if ntype == time_node_type:
+            continue
+        if referenced[ntype]:
+            old_ids = torch.tensor(sorted(referenced[ntype]), dtype=torch.long)
         else:
-            # Keep the edge type with an empty tensor so schema is preserved
+            old_ids = torch.zeros(0, dtype=torch.long)
+        mapping = torch.full((g[ntype].num_nodes,), -1, dtype=torch.long)
+        mapping[old_ids] = torch.arange(old_ids.size(0), dtype=torch.long)
+        id_maps[ntype] = mapping
+
+    # --- Pass 2: build the subgraph ------------------------------------------
+    g_sub = HeteroData()
+
+    # Copy node stores — filter all types to their surviving IDs
+    for ntype in g.node_types:
+        mapping = id_maps[ntype]
+        surviving = (mapping >= 0).nonzero(as_tuple=False).squeeze(1)
+        for key, val in g[ntype].items():
+            if isinstance(val, torch.Tensor) and val.size(0) == g[ntype].num_nodes:
+                g_sub[ntype][key] = val[surviving]
+            else:
+                g_sub[ntype][key] = val
+        g_sub[ntype].num_nodes = surviving.size(0)
+
+    # Remap edge endpoints and store
+    for (src_type, rel, dst_type), (src_ids, dst_ids) in filtered_edges.items():
+        if src_ids.numel() == 0:
             g_sub[src_type, rel, dst_type].edge_index = torch.zeros(
                 (2, 0), dtype=torch.long
             )
+            continue
+        new_src = id_maps[src_type][src_ids]
+        new_dst = id_maps[dst_type][dst_ids]
+        g_sub[src_type, rel, dst_type].edge_index = torch.stack(
+            [new_src, new_dst], dim=0
+        )
 
     return g_sub
 
