@@ -9,6 +9,12 @@ from typing import Tuple, Dict, Any, List
 import torch_geometric.data as tg_data
 from torch_geometric.datasets import HGBDataset, OGB_MAG, DBLP, IMDB, AMiner, RCDD
 try:
+    # H2GB's __init__ imports its full model zoo (layers, networks) which pulls in
+    # turtle→tkinter (unavailable on headless servers) and performer-pytorch.
+    # Stub out tkinter before importing so the unused goat_model.py doesn't crash.
+    import sys as _sys
+    if 'tkinter' not in _sys.modules:
+        _sys.modules['tkinter'] = type(_sys)('tkinter')
     from H2GB.datasets import OAGDataset as _OAGDataset
     _H2GB_AVAILABLE = True
 except ImportError:
