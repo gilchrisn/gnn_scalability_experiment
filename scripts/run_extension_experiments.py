@@ -539,7 +539,7 @@ def _run_one_metapath(
                 f1_exact  = _f1(z_exact, snap_labels_d, snap_test)
                 layers_exact = _infer_layerwise(sage_model, g_exact, in_dim, infer_device)
                 dirichlet_exact = _dirichlet_energy(z_exact, g_exact.edge_index.to(infer_device), snap_n_target)
-                del g_exact  # free memory before KMV
+                del g_exact; import gc; gc.collect()  # free memory before KMV
             except (MemoryError, RuntimeError) as e:
                 log.warning("      Exact load/infer OOM: %s", e)
         except (MemoryError, RuntimeError) as e:
@@ -620,7 +620,14 @@ def _run_one_metapath(
             "depthwise_cka":    str(depthwise_vals) if depthwise_vals is not None else "",
             "speedup_kmv":      _fmt(speedup, 4),
         })
+        # Free per-snapshot tensors
+        del g_kmv, z_kmv, layers_kmv
+        if z_exact is not None:
+            del z_exact, layers_exact
+        import gc; gc.collect()
 
+    # Free per-metapath tensors before next iteration
+    import gc; gc.collect()
     # Re-stage the full graph for the next metapath
     PyGToCppAdapter(data_dir).convert(g_full)
 
