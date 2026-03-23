@@ -587,9 +587,9 @@ def _run_one_metapath(
                 t_exact_infer = time.perf_counter() - t0
                 log.info("      [mem] after exact infer: [RSS=%s]", _mem_mb())
                 f1_exact  = _f1(z_exact, snap_labels_d, snap_test)
-                layers_exact = _infer_layerwise(sage_model, g_exact, in_dim, infer_device)
-                log.info("      [mem] after layerwise:   [RSS=%s]", _mem_mb())
-                dirichlet_exact = _dirichlet_energy(z_exact, g_exact.edge_index.to(infer_device), snap_n_target)
+                # Skip layerwise + dirichlet to save memory (each re-runs full forward pass)
+                # layers_exact = _infer_layerwise(sage_model, g_exact, in_dim, infer_device)
+                # dirichlet_exact = _dirichlet_energy(z_exact, g_exact.edge_index.to(infer_device), snap_n_target)
                 del g_exact; gc.collect()  # free memory before KMV
                 log.info("      [mem] after exact cleanup: [RSS=%s]", _mem_mb())
             except (MemoryError, RuntimeError) as e:
@@ -612,9 +612,9 @@ def _run_one_metapath(
         log.info("      [mem] after KMV infer:   [RSS=%s]", _mem_mb())
         f1_kmv  = _f1(z_kmv, snap_labels_d, snap_test)
         n_edges_kmv = _count_edges_from_file(kmv_file)
-        layers_kmv = _infer_layerwise(sage_model, g_kmv, in_dim, infer_device)
-        log.info("      [mem] after KMV layers:  [RSS=%s]", _mem_mb())
-        dirichlet_kmv = _dirichlet_energy(z_kmv, g_kmv.edge_index.to(infer_device), snap_n_target)
+        # Skip layerwise + dirichlet to save memory
+        layers_kmv = None
+        dirichlet_kmv = None
 
         # --- Derived metrics (only when exact loaded successfully) ---
         cka_val        = None
@@ -677,9 +677,9 @@ def _run_one_metapath(
             "speedup_kmv":      _fmt(speedup, 4),
         })
         # Free per-snapshot tensors
-        del g_snap, g_kmv, z_kmv, layers_kmv
+        del g_snap, g_kmv, z_kmv
         if z_exact is not None:
-            del z_exact, layers_exact
+            del z_exact
         gc.collect()
         log.info("      [cleanup done]  [RSS=%s]", _mem_mb())
 
