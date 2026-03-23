@@ -32,17 +32,20 @@ from typing import List, Optional, Set, Tuple
 
 
 def _mem_mb() -> str:
-    """Current RSS in MB."""
+    """Current (not peak) RSS in MB."""
     try:
-        import resource
-        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # KB on Linux
-        return f"{rss / 1024:.0f}MB"
+        # Linux: read current VmRSS from /proc
+        with open('/proc/self/status') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return f"{int(line.split()[1]) / 1024:.0f}MB"
+    except FileNotFoundError:
+        pass
+    try:
+        import psutil
+        return f"{psutil.Process().memory_info().rss / 1e6:.0f}MB"
     except ImportError:
-        try:
-            import psutil
-            return f"{psutil.Process().memory_info().rss / 1e6:.0f}MB"
-        except ImportError:
-            return "?MB"
+        return "?MB"
 
 import torch
 import torch.nn.functional as F
