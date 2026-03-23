@@ -541,10 +541,13 @@ def _run_one_metapath(
         snap_test   = (g_snap[target_ntype].test_mask if node_level else masks["test"]).to(infer_device)
         snap_labels_d = snap_labels.to(infer_device)
 
+        log.info("      [mem] after _make_snap:  [RSS=%s]", _mem_mb())
         PyGToCppAdapter(data_dir).convert(g_snap)
         compile_rule_for_cpp(metapath, g_snap, data_dir, folder)
         if node_level:
             generate_qnodes(data_dir, folder, target_node_type=target_ntype, g_hetero=g_snap)
+
+        log.info("      [mem] after staging:     [RSS=%s]", _mem_mb())
 
         # --- Exact: run C++, then try loading into Python ---
         t_exact_mat      = None
@@ -561,34 +564,43 @@ def _run_one_metapath(
             n_edges_exact = _count_edges_from_file(exact_file)
             if os.path.exists(exact_file):
                 adj_mb_exact = os.path.getsize(exact_file) / (1024 * 1024)
+            log.info("      [mem] after exact C++:   [RSS=%s]", _mem_mb())
             try:
                 g_exact   = _load_adj(engine, exact_file, snap_n_target, snap_offset, max_adj_mb)
                 g_exact.x = snap_x
+                log.info("      [mem] after exact load:  [RSS=%s]", _mem_mb())
                 t0        = time.perf_counter()
                 z_exact   = _infer(sage_model, g_exact, in_dim, infer_device)
                 t_exact_infer = time.perf_counter() - t0
+                log.info("      [mem] after exact infer: [RSS=%s]", _mem_mb())
                 f1_exact  = _f1(z_exact, snap_labels_d, snap_test)
                 layers_exact = _infer_layerwise(sage_model, g_exact, in_dim, infer_device)
+                log.info("      [mem] after layerwise:   [RSS=%s]", _mem_mb())
                 dirichlet_exact = _dirichlet_energy(z_exact, g_exact.edge_index.to(infer_device), snap_n_target)
-                del g_exact; import gc; gc.collect()  # free memory before KMV
+                del g_exact; gc.collect()  # free memory before KMV
+                log.info("      [mem] after exact cleanup: [RSS=%s]", _mem_mb())
             except (MemoryError, RuntimeError) as e:
                 log.warning("      Exact load/infer OOM: %s", e)
         except (MemoryError, RuntimeError) as e:
             log.warning("      Exact C++ OOM: %s", e)
 
         # --- KMV: always runs (capped at K × |peers| edges) ---
+        log.info("      [mem] before KMV C++:    [RSS=%s]", _mem_mb())
         t_kmv_mat, kmv_file = _run_cpp_sketch(engine, folder, k, timeout)
         adj_mb_kmv = None
         if os.path.exists(kmv_file):
             adj_mb_kmv = os.path.getsize(kmv_file) / (1024 * 1024)
         g_kmv   = _load_adj(engine, kmv_file, snap_n_target, snap_offset)
         g_kmv.x = snap_x
+        log.info("      [mem] after KMV load:    [RSS=%s]", _mem_mb())
         t0      = time.perf_counter()
         z_kmv   = _infer(sage_model, g_kmv, in_dim, infer_device)
         t_kmv_infer = time.perf_counter() - t0
+        log.info("      [mem] after KMV infer:   [RSS=%s]", _mem_mb())
         f1_kmv  = _f1(z_kmv, snap_labels_d, snap_test)
         n_edges_kmv = _count_edges_from_file(kmv_file)
         layers_kmv = _infer_layerwise(sage_model, g_kmv, in_dim, infer_device)
+        log.info("      [mem] after KMV layers:  [RSS=%s]", _mem_mb())
         dirichlet_kmv = _dirichlet_energy(z_kmv, g_kmv.edge_index.to(infer_device), snap_n_target)
 
         # --- Derived metrics (only when exact loaded successfully) ---
