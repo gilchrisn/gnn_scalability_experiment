@@ -24,7 +24,6 @@ import csv
 import logging
 import gc
 import os
-import resource
 import sys
 import time
 from datetime import datetime
@@ -33,12 +32,17 @@ from typing import List, Optional, Set, Tuple
 
 
 def _mem_mb() -> str:
-    """Current RSS in MB (Linux only, 0 on Windows)."""
+    """Current RSS in MB."""
     try:
+        import resource
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # KB on Linux
         return f"{rss / 1024:.0f}MB"
-    except Exception:
-        return "?MB"
+    except ImportError:
+        try:
+            import psutil
+            return f"{psutil.Process().memory_info().rss / 1e6:.0f}MB"
+        except ImportError:
+            return "?MB"
 
 import torch
 import torch.nn.functional as F
@@ -469,24 +473,30 @@ def _run_one_metapath(
 
     node_level = time_node_type is not None
 
+    # For edge-level datasets (HGB etc.), precompute all snapshots upfront
+    # (they're small). TemporalPartitioner requires fractions[-1]==1.0 so
+    # we can't call it per-fraction.
+    _edge_level_snaps = {}
+    if not node_level:
+        rel_to_etype = {et[1]: et for et in g_full.edge_types}
+        meta_path_tuples = [rel_to_etype[r] for r in metapath.split(",")]
+        all_snaps = TemporalPartitioner.partition(
+            g=g_full, meta_path=meta_path_tuples,
+            fractions=fractions, time_node_type=None,
+        )
+        for snap, frac in zip(all_snaps, fractions):
+            snap.graph[target_ntype].y          = labels
+            snap.graph[target_ntype].train_mask = masks["train"]
+            snap.graph[target_ntype].val_mask   = masks["val"]
+            snap.graph[target_ntype].test_mask  = masks["test"]
+            _edge_level_snaps[frac] = snap.graph
+
     def _make_snap(frac):
         """Lazily create a single snapshot (node-level or edge-level)."""
         if node_level:
             return _subgraph_by_year(g_full, frac, time_node_type)
         else:
-            # Edge-level: build just this fraction via TemporalPartitioner
-            rel_to_etype = {et[1]: et for et in g_full.edge_types}
-            meta_path_tuples = [rel_to_etype[r] for r in metapath.split(",")]
-            snaps = TemporalPartitioner.partition(
-                g=g_full, meta_path=meta_path_tuples,
-                fractions=[frac], time_node_type=None,
-            )
-            g_snap = snaps[0].graph
-            g_snap[target_ntype].y          = labels
-            g_snap[target_ntype].train_mask = masks["train"]
-            g_snap[target_ntype].val_mask   = masks["val"]
-            g_snap[target_ntype].test_mask  = masks["test"]
-            return g_snap
+            return _edge_level_snaps[frac]
 
     # Phase 1: Train on second-largest fraction (good label coverage,
     # feasible materialization). 100% can OOM/timeout on exact materialize.
