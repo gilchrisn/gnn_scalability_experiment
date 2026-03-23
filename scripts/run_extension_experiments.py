@@ -22,12 +22,23 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import gc
 import os
+import resource
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Set, Tuple
+
+
+def _mem_mb() -> str:
+    """Current RSS in MB (Linux only, 0 on Windows)."""
+    try:
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # KB on Linux
+        return f"{rss / 1024:.0f}MB"
+    except Exception:
+        return "?MB"
 
 import torch
 import torch.nn.functional as F
@@ -480,8 +491,8 @@ def _run_one_metapath(
     # Phase 1: Train on second-largest fraction (good label coverage,
     # feasible materialization). 100% can OOM/timeout on exact materialize.
     train_frac = fractions[-2] if len(fractions) >= 2 else fractions[-1]
-    log.info("    [Phase 1] Staging training snapshot (%.0f%%) + training SAGE...",
-             train_frac * 100)
+    log.info("    [Phase 1] Staging training snapshot (%.0f%%) + training SAGE...  [RSS=%s]",
+             train_frac * 100, _mem_mb())
     g_train = _make_snap(train_frac)
     PyGToCppAdapter(data_dir).convert(g_train)
     compile_rule_for_cpp(metapath, g_train, data_dir, folder)
@@ -514,12 +525,13 @@ def _run_one_metapath(
     t_train = time.perf_counter() - t0_train
     del g_h0; gc.collect()
     sage_model = sage_model.to(infer_device)  # move to CPU for fair Phase 2 timing
-    log.info("    [Phase 1] Done. Model frozen. (train=%.2fs, trained on %s)", t_train, train_device)
+    log.info("    [Phase 1] Done. Model frozen. (train=%.2fs, trained on %s)  [RSS=%s]",
+             t_train, train_device, _mem_mb())
 
     # Phase 2: Compare exact vs KMV at each fraction (computed lazily)
     for i, frac in enumerate(fractions):
         label = f"t={i} ({int(frac*100)}%)"
-        log.info("    [Phase 2] %s", label)
+        log.info("    [Phase 2] %s  [RSS=%s]", label, _mem_mb())
         g_snap = _make_snap(frac)
 
         # Per-snapshot params (node counts change with node-level filtering)
@@ -643,7 +655,8 @@ def _run_one_metapath(
         del g_snap, g_kmv, z_kmv, layers_kmv
         if z_exact is not None:
             del z_exact, layers_exact
-        import gc; gc.collect()
+        gc.collect()
+        log.info("      [cleanup done]  [RSS=%s]", _mem_mb())
 
     # Free per-metapath tensors before next iteration
     import gc; gc.collect()
