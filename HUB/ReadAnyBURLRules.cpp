@@ -1521,7 +1521,11 @@ void run_sketch_sampling(const std::string& dataset, const std::string& rule_fil
         return base.substr(0, dot_pos) + "_" + std::to_string(idx) + base.substr(dot_pos);
     };
 
-    auto final_synopses = synopses_cache->at(0); // Get sketches for all peers
+    // Read from the LAST layer of the forward pass (meta_layer), NOT layer 0.
+    // Layer 0 after backward pass contains a superset (2*meta_layer hops instead
+    // of meta_layer hops) because the backward pass propagates accumulated hashes
+    // through shared intermediate nodes, creating false positives.
+    auto final_synopses = synopses_cache->at(meta_layer);
 
     // --- LOOP THROUGH ALL LAYERS (0 to L-1) ---
     for (unsigned int l = 0; l < L; l++) {
