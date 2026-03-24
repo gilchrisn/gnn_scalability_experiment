@@ -1,7 +1,9 @@
 # Sketch Edge Overcount Analysis
 
 **Date:** 2026-03-25
-**Status:** Hypothesis — needs verification before code changes
+**Status:** Root cause confirmed — fundamental limitation of global sketch propagation
+
+**UPDATE (2026-03-25 later):** Edge-type filtering was applied (ET parallel array) and confirmed working (hidden_edges dropped from ~2M to 550K). However, violators persisted (124K/125K). The real root cause is NOT edge-type leakage — it's the global propagation mixing hashes through shared intermediate nodes. See "Root Cause: Global Propagation Hash Mixing" below.
 
 ## Observation
 
@@ -126,8 +128,32 @@ This causes hash values to propagate along non-metapath edges, inflating the ske
 - Report sketch edges honestly, note the edge-type leakage
 - Focus the paper's scalability argument on materialization TIME, not edge count
 
-## Related: Layer 0 vs Layer meta_layer fix (already applied)
+## Root Cause: Global Propagation Hash Mixing
 
-A separate issue was found and fixed: the sketch was reading from layer 0 (after backward pass = 2*L hop neighborhoods) instead of layer meta_layer (end of forward pass = L hop neighborhoods). This reduced sketch edges from 1.9M to 1.3M on OAG_CS. The remaining 1.3M > 371K is due to the edge-type leakage described above.
+The edge-type hypothesis (above) was **partially correct but not the main issue**. After applying edge-type filtering via ET parallel arrays, hidden_edges dropped from ~2M to 550K (type filtering works), but violators INCREASED to 124K/125K with 4M sketch edges.
 
-On HGB_ACM, the layer fix + no edge-type leakage = 0 violators (correct behavior).
+**The real issue:** `gnn_synopses` is a GLOBAL propagation — all papers send hashes simultaneously through shared authors. With only **233 active first-authors** for 125K papers:
+
+1. Forward pass layer 0→1: 125K papers send hashes to 233 authors
+2. Each author accumulates hashes from hundreds/thousands of papers, keeps min(K=32, fan-in) = 32
+3. Forward pass layer 1→2: authors send their 32 hashes to ALL connected papers
+4. **Every paper connected to a shared author gets 32 hashes from that author's GLOBAL pool** — not just from its own PAP neighborhood
+
+**Example:** Paper P has exact degree 1 (self-loop via author A). But author A is first-author on 500 papers. In global propagation, A accumulates 500 hashes, keeps 32 smallest. P receives A's 32 global hashes → sketch degree 32. In exact BFS, P→A→{only papers reachable from P via A} = {P} → exact degree 1.
+
+**This is NOT a bug** — it's a fundamental property of KMV sketch propagation. The sketch is designed for COUNTING (cardinality estimation via min-hash), not for RECONSTRUCTION (identifying specific neighbors). GloD (degree estimation) works correctly with this propagation because it only needs the count, not the identity of neighbors.
+
+### Impact on the extension paper
+
+For the journal extension, we need RECONSTRUCTION (build H̃ → GNN inference). The global propagation produces a noisy graph with false edges. Options:
+
+1. **Accept the noise:** CKA was 0.83-0.87 even with false edges. The GNN is robust to extra edges (they're essentially random noise from the same graph distribution).
+2. **Use datasets without shared intermediates:** OGB_MAG with PAP (rev_writes,writes) has 931K authors for 152K papers at 20% — much less sharing. HGB datasets also have low sharing → 0 violators.
+3. **Reduce K:** Smaller K means fewer false positives per node, but also more approximation error.
+4. **Per-node sketch:** Would require running gnn_synopses separately per query node — O(N) times slower, defeating the purpose.
+
+## Fixes Applied (chronological)
+
+1. **Layer 0 → meta_layer fix:** Read from end of forward pass instead of after backward pass. Reduced OAG_CS from 1.9M to 1.3M edges. Correct for HGB_ACM (0 violators).
+2. **Edge-type filtering (ET arrays):** Filter hidden_edges by metapath edge type. Reduced hidden_edges from ~2M to 550K. Did NOT fix the violator issue (global propagation is the root cause).
+3. **Both fixes remain applied** — they are correct improvements, just insufficient for the fan-out problem.
