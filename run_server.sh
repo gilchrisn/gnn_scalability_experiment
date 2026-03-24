@@ -1,76 +1,62 @@
 #!/usr/bin/env bash
 # Run all extension experiments on the server.
-# Must run setup_server.sh first.
 #
-# Usage:
-#   ./run_server.sh                         # full run, all datasets
-#   ./run_server.sh --max-metapaths 3       # quick test (3 metapaths per dataset)
-#   ./run_server.sh --epochs 50 --k 16      # custom SAGE / sketch settings
+# Treats 40% OGB_MAG and 20% OAG_CS as the "full" datasets.
+# Trains on the largest fraction, infers on all fractions.
+# Dense metapaths that OOM/timeout on exact are handled gracefully
+# (KMV still runs, exact fields left blank in CSV).
 #
 # Results saved to: results/<DATASET>/extension.csv
 # Resume-safe: interrupted runs pick up where they left off.
 
-set -e
+set -euo pipefail
 source .venv/bin/activate
 export PYTHONUTF8=1
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}  # override with e.g. CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
 
-# --- Defaults (override via flags below) ---
-MAX_METAPATHS=500
 EPOCHS=50
 K=32
-FRACTIONS="0.2 0.4 0.6 0.8 1.0"
-MIN_CONF=0.1
 TIMEOUT=1800
-MAX_ADJ_MB=50000      # 50 GB cap — prevent OOM-killing on shared server
+MAX_ADJ_MB=5000       # 5 GB — enough for PAP at 40% OGB_MAG (2 GB)
 NUM_CPU_THREADS=2
 
-# --- Parse args ---
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --max-metapaths) MAX_METAPATHS="$2"; shift 2 ;;
-        --epochs)        EPOCHS="$2";        shift 2 ;;
-        --k)             K="$2";             shift 2 ;;
-        --min-conf)      MIN_CONF="$2";      shift 2 ;;
-        --timeout)       TIMEOUT="$2";       shift 2 ;;
-        --threads)       NUM_CPU_THREADS="$2"; shift 2 ;;
-        *) echo "Unknown flag: $1"; exit 1 ;;
-    esac
-done
-
-# Datasets to run (OAG_CS requires: pip install H2GB — first load downloads ~2GB)
-DATASETS=(OAG_CS OGB_MAG)
-
-COMMON_ARGS=(
-    --max-metapaths "$MAX_METAPATHS"
-    --min-conf      "$MIN_CONF"
-    --fractions     $FRACTIONS
-    --epochs        "$EPOCHS"
-    --k             "$K"
-    --timeout       "$TIMEOUT"
-    --max-adj-mb    "$MAX_ADJ_MB"
-    --num-cpu-threads "$NUM_CPU_THREADS"
-    --cpu
-)
+# Clean old results so the mask fix takes effect
+rm -f results/OGB_MAG/extension.csv results/OAG_CS/extension.csv
 
 echo "=================================================="
-echo "  Extension Experiments — Server Run"
-echo "  datasets:      ${DATASETS[*]}"
-echo "  max-metapaths: $MAX_METAPATHS"
-echo "  epochs:        $EPOCHS   k: $K"
-echo "  fractions:     $FRACTIONS"
-echo "  timeout:       ${TIMEOUT}s per C++ call"
+echo "  Extension Experiments — Server Overnight Run"
+echo "  $(date)"
 echo "=================================================="
 echo ""
 
-for DATASET in "${DATASETS[@]}"; do
-    echo "--------------------------------------------------"
-    echo "  Dataset: $DATASET"
-    echo "--------------------------------------------------"
-    python scripts/run_extension_experiments.py "$DATASET" "${COMMON_ARGS[@]}"
-    echo ""
-done
+# --- OGB_MAG: treat 40% as full dataset ---
+# Fractions relative to full graph: 0.08, 0.16, 0.24, 0.32, 0.40
+# = 20%, 40%, 60%, 80%, 100% of the 40% subgraph
+echo "=========================================="
+echo "  OGB_MAG (40% as full, 5 snapshots)"
+echo "=========================================="
+python scripts/run_extension_experiments.py OGB_MAG \
+    --fractions 0.08 0.16 0.24 0.32 0.40 \
+    --epochs "$EPOCHS" --k "$K" --timeout "$TIMEOUT" \
+    --max-adj-mb "$MAX_ADJ_MB" --num-cpu-threads "$NUM_CPU_THREADS" \
+    --cpu 2>&1 | tee -a results/server_run.log
+echo ""
+
+# --- OAG_CS: treat 20% as full dataset ---
+# Fractions: 0.04, 0.08, 0.12, 0.16, 0.20
+# = 20%, 40%, 60%, 80%, 100% of the 20% subgraph
+echo "=========================================="
+echo "  OAG_CS (20% as full, 5 snapshots)"
+echo "=========================================="
+python scripts/run_extension_experiments.py OAG_CS \
+    --fractions 0.04 0.08 0.12 0.16 0.20 \
+    --epochs "$EPOCHS" --k "$K" --timeout "$TIMEOUT" \
+    --max-adj-mb "$MAX_ADJ_MB" --num-cpu-threads "$NUM_CPU_THREADS" \
+    --cpu 2>&1 | tee -a results/server_run.log
+echo ""
 
 echo "=================================================="
-echo "  All done. Results in results/<DATASET>/extension.csv"
+echo "  All done. $(date)"
+echo "  Results: results/OGB_MAG/extension.csv"
+echo "           results/OAG_CS/extension.csv"
 echo "=================================================="
