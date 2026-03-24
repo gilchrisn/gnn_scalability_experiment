@@ -1463,23 +1463,59 @@ void run_sketch_sampling(const std::string& dataset, const std::string& rule_fil
     for(unsigned int l = 0; l <= qp->ETypes.size(); l++)
         std::cout << "[sketch-timing]   layer " << l << " synopses: " << synopses_cache->at(l)->size() << std::endl;
 
+    // Build hidden_edges using type-filtered edge access (NGET/rNGET Guards).
+    // The old code used g.EL[p] which contains ALL edge types, causing false
+    // positives when multiple edge types exist between the same node-type pair
+    // (e.g. OAG_CS has AP_write_first, AP_write_other, AP_write_last).
+    // This mirrors the Guard pattern used by MidHop/rMidHop in peer.cpp.
     auto hidden_edges = new std::vector<HiddenEdge>();
     for(unsigned int l=0; l < qp->ETypes.size(); l++){
+        unsigned int etype = qp->ETypes[l];
         for(unsigned int p=0; p < g.NT.size(); p++){
             if(ractive->at(l)->at(p) > 0){
                 int s_idx = ractive->at(l)->at(p) - 1;
                 if (qp->EDirect[l] == 1) {
-                    for (unsigned int nbr: *(g.EL[p])) {
-                        if (ractive->at(l + 1)->at(nbr) > 0) {
-                            HiddenEdge he{.s=s_idx, .t=(ractive->at(l+1)->at(nbr) - 1), .l=l};
-                            hidden_edges->push_back(he);
-                }}}
+                    // Forward: use NGET + ETL (same as peer.cpp:43-62)
+                    int guard_begin=-1, guard_end=-1;
+                    for (auto &guard : *g.NGET[p]) {
+                        if (guard.etype == etype) {
+                            guard_begin = guard.begin;
+                            guard_end = guard.end;
+                            break;
+                        }
+                    }
+                    if (guard_begin >= 0) {
+                        for (auto i=(unsigned int)guard_begin; i<(unsigned int)guard_end; i++) {
+                            unsigned int nbr = g.ETL[etype]->at(i);
+                            if (ractive->at(l + 1)->at(nbr) > 0) {
+                                HiddenEdge he{.s=(unsigned int)s_idx, .t=(ractive->at(l+1)->at(nbr) - 1), .l=l};
+                                hidden_edges->push_back(he);
+                            }
+                        }
+                    }
+                }
                 else {
-                    for (unsigned int nbr: *(g.rEL[p])) {
-                        if (ractive->at(l + 1)->at(nbr) > 0) {
-                            HiddenEdge he{.s=s_idx, .t=(ractive->at(l+1)->at(nbr) - 1), .l=l};
-                            hidden_edges->push_back(he);
-    }}}}}
+                    // Reverse: use rNGET + rETL (same as peer.cpp:64-84)
+                    int guard_begin=-1, guard_end=-1;
+                    for (auto &guard : *g.rNGET[p]) {
+                        if (guard.etype == etype) {
+                            guard_begin = guard.begin;
+                            guard_end = guard.end;
+                            break;
+                        }
+                    }
+                    if (guard_begin >= 0) {
+                        for (auto i=(unsigned int)guard_begin; i<(unsigned int)guard_end; i++) {
+                            unsigned int nbr = g.rETL[etype]->at(i);
+                            if (ractive->at(l + 1)->at(nbr) > 0) {
+                                HiddenEdge he{.s=(unsigned int)s_idx, .t=(ractive->at(l+1)->at(nbr) - 1), .l=l};
+                                hidden_edges->push_back(he);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     auto t_hedges = std::chrono::steady_clock::now();
