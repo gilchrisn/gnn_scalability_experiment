@@ -497,7 +497,31 @@ def _run_one_metapath(
     def _make_snap(frac):
         """Lazily create a single snapshot (node-level or edge-level)."""
         if node_level:
-            return _subgraph_by_year(g_full, frac, time_node_type)
+            g_snap = _subgraph_by_year(g_full, frac, time_node_type)
+            # H2GB datasets have train/val/test masks for recent papers only.
+            # After temporal slicing to oldest papers, the masks may have zero
+            # valid entries. Recreate random 80/10/10 masks over labeled nodes.
+            snap_labels = g_snap[target_ntype].y
+            valid = snap_labels >= 0
+            n_valid = valid.sum().item()
+            snap_val = g_snap[target_ntype].val_mask
+            if n_valid > 0 and (snap_val & valid).sum() == 0:
+                log.info("      Recreating masks: %d valid labels, old masks had 0 valid val entries", n_valid)
+                idx = valid.nonzero(as_tuple=False).squeeze(1)
+                perm = idx[torch.randperm(idx.size(0))]
+                n = idx.size(0)
+                n_train = int(0.8 * n)
+                n_val = int(0.1 * n)
+                new_train = torch.zeros(snap_labels.size(0), dtype=torch.bool)
+                new_val = torch.zeros(snap_labels.size(0), dtype=torch.bool)
+                new_test = torch.zeros(snap_labels.size(0), dtype=torch.bool)
+                new_train[perm[:n_train]] = True
+                new_val[perm[n_train:n_train + n_val]] = True
+                new_test[perm[n_train + n_val:]] = True
+                g_snap[target_ntype].train_mask = new_train
+                g_snap[target_ntype].val_mask = new_val
+                g_snap[target_ntype].test_mask = new_test
+            return g_snap
         else:
             return _edge_level_snaps[frac]
 
