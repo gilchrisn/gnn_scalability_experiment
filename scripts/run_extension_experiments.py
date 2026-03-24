@@ -611,6 +611,7 @@ def _run_one_metapath(
         t_kmv_infer = time.perf_counter() - t0
         log.info("      [mem] after KMV infer:   [RSS=%s]", _mem_mb())
         f1_kmv  = _f1(z_kmv, snap_labels_d, snap_test)
+        log.info("      [mem] after f1_kmv:      [RSS=%s]", _mem_mb())
         n_edges_kmv = _count_edges_from_file(kmv_file)
         # Skip layerwise + dirichlet to save memory
         layers_kmv = None
@@ -621,9 +622,12 @@ def _run_one_metapath(
         pred_agree     = None
         depthwise_vals = None
         if z_exact is not None:
+            log.info("      [mem] before CKA:        [RSS=%s]", _mem_mb())
             cka_val = cka.calculate(
                 z_exact[snap_test].to(infer_device), z_kmv[snap_test].to(infer_device))
+            log.info("      [mem] after CKA:         [RSS=%s]", _mem_mb())
             pred_agree = _prediction_agreement(z_exact, z_kmv, snap_test)
+            log.info("      [mem] after pred_agree:   [RSS=%s]", _mem_mb())
         if layers_exact is not None:
             depthwise_vals = _depthwise_cka(layers_exact, layers_kmv, snap_test, cka)
 
