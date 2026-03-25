@@ -6,7 +6,8 @@
 #
 # Resume-safe: interrupted runs pick up where they left off.
 
-set -euo pipefail
+set -uo pipefail
+# NOTE: no set -e — individual datasets can fail without stopping the whole run
 source .venv/bin/activate
 export PYTHONUTF8=1
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
