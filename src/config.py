@@ -90,20 +90,19 @@ class Config:
         return {
             # === HGB DATASETS ===
             'HGB_DBLP': DatasetConfig('HGB', 'DBLP', 'author', [
-                "author_to_paper,paper_to_author",             # APA
-                "author_to_paper,paper_to_venue,venue_to_paper,paper_to_author" # APVPA
+                "author_to_paper,paper_to_author",                              # APA
+                "author_to_paper,paper_to_term,term_to_paper,paper_to_author",  # APTPA
+                "author_to_paper,paper_to_venue,venue_to_paper,paper_to_author",# APVPA
             ]),
             'HGB_ACM': DatasetConfig('HGB', 'ACM', 'paper', [
-                "paper_to_author,author_to_paper",             # PAP
-                "paper_to_subject,subject_to_paper"            # PSP
+                "paper_to_author,author_to_paper",              # PAP
+                "paper_to_subject,subject_to_paper",            # PSP
+                "paper_to_term,term_to_paper",                  # PTP
             ]),
             'HGB_IMDB': DatasetConfig('HGB', 'IMDB', 'movie', [
-                "movie_to_actor,actor_to_movie",               # MAM
-                "movie_to_director,director_to_movie"          # MDM
-            ]),
-            'HGB_Freebase': DatasetConfig('HGB', 'Freebase', 'book', [
-                "book_to_people,people_to_book",               # BPB (Shared connections like authors/characters)
-                "book_to_film,film_to_book"                    # BFB (Books adapted to films)
+                "movie_to_actor,actor_to_movie",                # MAM
+                "movie_to_director,director_to_movie",          # MDM
+                "movie_to_keyword,keyword_to_movie",            # MKM
             ]),
 
             # === OGB DATASETS ===
