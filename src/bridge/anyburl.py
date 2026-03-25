@@ -363,16 +363,17 @@ class AnyBURLRunner(RuleMiner):
         safe_triples = self.triples_file.replace(os.sep, '/')
         safe_rules = self.rules_file.replace(os.sep, '/')
         
-        config_content = f"""PATH_TRAINING = {safe_triples}
-            PATH_OUTPUT = {safe_rules}
-            SNAPSHOTS_AT = {timeout}
-            WORKER_THREADS = {num_threads}
-            MAX_LENGTH_CYCLIC = {max_length}
-            ZERO_RULES_ACTIVE = false
-            THRESHOLD_CORRECT_PREDICTIONS = 2
-            THRESHOLD_CONFIDENCE = 0.0001
-            RANDOM_SEED = {seed}
-        """
+        config_content = (
+            f"PATH_TRAINING = {safe_triples}\n"
+            f"PATH_OUTPUT = {safe_rules}\n"
+            f"SNAPSHOTS_AT = {timeout}\n"
+            f"WORKER_THREADS = {num_threads}\n"
+            f"MAX_LENGTH_CYCLIC = {max_length}\n"
+            f"ZERO_RULES_ACTIVE = false\n"
+            f"THRESHOLD_CORRECT_PREDICTIONS = 2\n"
+            f"THRESHOLD_CONFIDENCE = 0.0001\n"
+            f"RANDOM_SEED = {seed}\n"
+        )
         with open(self.config_file, 'w') as f:
             f.write(config_content)
         
