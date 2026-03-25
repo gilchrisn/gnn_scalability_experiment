@@ -441,12 +441,14 @@ class GraphPrepRunner:
         args:          List[str],
         redirect_path: Optional[str] = None,
     ) -> str:
-        """Execute the binary and return stdout.  Raises SystemExit on crash."""
+        """Execute the binary and return stdout.  Raises RuntimeError on crash/timeout."""
+        import time as _time
         cmd = [self.binary] + args
-        print(f"\n> {' '.join(args)}")
+        print(f"\n> {' '.join(args)}  (timeout={self.timeout}s)")
         if redirect_path:
             print(f"  -> {redirect_path}")
 
+        t0 = _time.perf_counter()
         try:
             result = subprocess.run(
                 cmd,
@@ -457,14 +459,17 @@ class GraphPrepRunner:
                 cwd            = self.working_dir,
             )
         except subprocess.CalledProcessError as e:
-            msg = f"graph_prep exited with code {e.returncode}: {' '.join(args)}"
+            elapsed = _time.perf_counter() - t0
+            msg = f"graph_prep exited with code {e.returncode} after {elapsed:.1f}s: {' '.join(args)}"
             print(f"\n[ERROR] {msg}")
             if e.stderr: print(f"STDERR: {e.stderr.strip()}")
             raise RuntimeError(msg)
         except subprocess.TimeoutExpired:
-            msg = f"graph_prep timed out after {self.timeout}s: {' '.join(args)}"
-            print(f"\n[ERROR] {msg}")
-            raise RuntimeError(msg)
+            print(f"\n[TIMEOUT] {' '.join(args)} — killed after {self.timeout}s")
+            raise RuntimeError(f"graph_prep timed out after {self.timeout}s: {' '.join(args)}")
+
+        elapsed = _time.perf_counter() - t0
+        print(f"  done in {elapsed:.1f}s")
 
         if redirect_path:
             Path(redirect_path).write_text(result.stdout)
