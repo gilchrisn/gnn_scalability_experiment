@@ -525,9 +525,10 @@ def _run_one_metapath(
         else:
             return _edge_level_snaps[frac]
 
-    # Phase 1: Train on second-largest fraction (good label coverage,
-    # feasible materialization). 100% can OOM/timeout on exact materialize.
-    train_frac = fractions[-2] if len(fractions) >= 2 else fractions[-1]
+    # Phase 1: Train on the smallest fraction (historical snapshot).
+    # Simulates "train once on early data, use KMV for efficient inference as graph grows."
+    # Mask recreation (above) ensures valid train/val labels even on old temporal subsets.
+    train_frac = fractions[0]
     log.info("    [Phase 1] Staging training snapshot (%.0f%%) + training SAGE...  [RSS=%s]",
              train_frac * 100, _mem_mb())
     g_train = _make_snap(train_frac)
