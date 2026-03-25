@@ -429,6 +429,13 @@ def main() -> None:
         min_conf=args.min_conf,
         max_n=args.max_metapaths,
     )
+    # Filter out long metapaths (>4 hops) — they're exponentially expensive for ExactD
+    max_hops = 4
+    before = len(metapaths)
+    metapaths = [mp for mp in metapaths if len(mp.split(",")) <= max_hops]
+    if len(metapaths) < before:
+        log.info("      Filtered %d metapaths with >%d hops (%d remaining)",
+                 before - len(metapaths), max_hops, len(metapaths))
 
     # Log full validation stats
     log.info("")
