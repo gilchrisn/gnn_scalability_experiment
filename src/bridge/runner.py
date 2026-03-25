@@ -457,15 +457,14 @@ class GraphPrepRunner:
                 cwd            = self.working_dir,
             )
         except subprocess.CalledProcessError as e:
-            print(f"\n[FATAL] graph_prep exited with code {e.returncode}")
-            print(f"Command : {' '.join(cmd)}")
-            print(f"STDERR  :\n{e.stderr.strip()}")
-            print(f"STDOUT  :\n{e.stdout.strip()}")
-            sys.exit(1)
+            msg = f"graph_prep exited with code {e.returncode}: {' '.join(args)}"
+            print(f"\n[ERROR] {msg}")
+            if e.stderr: print(f"STDERR: {e.stderr.strip()}")
+            raise RuntimeError(msg)
         except subprocess.TimeoutExpired:
-            print(f"\n[FATAL] graph_prep timed out after {self.timeout}s")
-            print(f"Command: {' '.join(cmd)}")
-            sys.exit(1)
+            msg = f"graph_prep timed out after {self.timeout}s: {' '.join(args)}"
+            print(f"\n[ERROR] {msg}")
+            raise RuntimeError(msg)
 
         if redirect_path:
             Path(redirect_path).write_text(result.stdout)
