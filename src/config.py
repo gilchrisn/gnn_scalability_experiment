@@ -55,7 +55,7 @@ class Config:
         # External Tools
         _exe = "graph_prep.exe" if os.name == "nt" else "graph_prep"
         self.CPP_EXECUTABLE = os.path.join(self.PROJECT_ROOT, "bin", _exe)
-        self.ANYBURL_JAR = os.path.join(self.PROJECT_ROOT, "tools", "AnyBURL-22-1.jar")
+        self.ANYBURL_JAR = os.path.join(self.PROJECT_ROOT, "tools", "AnyBURL-23-1x.jar")
         
         # Benchmark Settings
         self.METAPATH_LENGTH = 3

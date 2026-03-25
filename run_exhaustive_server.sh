@@ -11,6 +11,10 @@ set -uo pipefail
 source .venv/bin/activate
 export PYTHONUTF8=1
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
+# Local JDK 25 for AnyBURL (doesn't affect other users)
+if [ -d "$HOME/jdk-25" ]; then
+    export PATH="$HOME/jdk-25/bin:$PATH"
+fi
 
 TIMEOUT=1800
 MAX_METAPATHS=10
