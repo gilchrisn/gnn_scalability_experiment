@@ -170,10 +170,14 @@ def run_cpp(
             cmd, capture_output=True, text=True, check=True, timeout=timeout
         )
     except subprocess.CalledProcessError as e:
-        print(f"\n[FATAL] C++ exited {e.returncode}")
-        print(f"STDERR: {e.stderr.strip()}")
-        print(f"STDOUT: {e.stdout.strip()}")
-        sys.exit(1)
+        msg = f"C++ exited {e.returncode}: {' '.join(args)}"
+        print(f"\n[ERROR] {msg}")
+        if e.stderr: print(f"STDERR: {e.stderr.strip()}")
+        raise RuntimeError(msg)
+    except subprocess.TimeoutExpired:
+        msg = f"C++ timed out after {timeout}s: {' '.join(args)}"
+        print(f"\n[TIMEOUT] {msg}")
+        raise RuntimeError(msg)
 
     if redirect_path:
         with open(redirect_path, 'w') as f:

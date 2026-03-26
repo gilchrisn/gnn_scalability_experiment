@@ -184,7 +184,7 @@ def _run_hg_stats(
 ) -> None:
     """Run hg_stats for one metapath and write a row to table3 CSV."""
     stdout = run_cpp(config.CPP_EXECUTABLE, ["hg_stats", folder],
-                     print_output=False, timeout=None)
+                     print_output=False, timeout=600)
     edges_m = re.findall(r"RAW_EDGES_E\*:\s*([0-9.eE+\-]+)", stdout)
     peer_m  = re.search(r"~\|peer\|:\s*([0-9.eE+\-]+)",       stdout)
     dens_m  = re.search(r"~dens:\s*([0-9.eE+\-]+)",            stdout)
