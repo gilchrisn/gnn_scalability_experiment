@@ -443,8 +443,9 @@ class GraphPrepRunner:
     ) -> str:
         """Execute the binary and return stdout.  Raises RuntimeError on crash/timeout."""
         import time as _time
+        from datetime import datetime as _dt
         cmd = [self.binary] + args
-        print(f"\n> {' '.join(args)}  (timeout={self.timeout}s)")
+        print(f"\n[{_dt.now().strftime('%H:%M:%S')}] > {' '.join(args)}  (timeout={self.timeout}s)")
         if redirect_path:
             print(f"  -> {redirect_path}")
 
@@ -469,7 +470,7 @@ class GraphPrepRunner:
             raise RuntimeError(f"graph_prep timed out after {self.timeout}s: {' '.join(args)}")
 
         elapsed = _time.perf_counter() - t0
-        print(f"  done in {elapsed:.1f}s")
+        print(f"  [{_dt.now().strftime('%H:%M:%S')}] done in {elapsed:.1f}s")
 
         if redirect_path:
             Path(redirect_path).write_text(result.stdout)
