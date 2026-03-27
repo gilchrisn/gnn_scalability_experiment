@@ -223,7 +223,7 @@ def _done_metapaths(path: Path, expected_snapshots: int) -> Set[str]:
     with open(path, newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
             mp = row["metapath"]
-            if row.get("snapshot") == "FAILED":
+            if row.get("snapshot", "").startswith("FAILED"):
                 failed.add(mp)
             else:
                 counts[mp] = counts.get(mp, 0) + 1
@@ -874,10 +874,10 @@ def main() -> None:
                 ext_fh.flush()
             except SystemExit as exc:
                 n_failed += 1
-                log.warning("  [%3d/%d] CRASH (C++ exit %s) — marking FAILED, will skip on resume: %s",
-                             idx, total, exc.code, metapath[:70])
+                reason = f"FAILED:CRASH(exit={exc.code})"
+                log.warning("  [%3d/%d] %s: %s", idx, total, reason, metapath[:70])
                 log.debug("Full traceback:", exc_info=True)
-                ext_w.writerow({"dataset": dataset, "metapath": metapath, "snapshot": "FAILED",
+                ext_w.writerow({"dataset": dataset, "metapath": metapath, "snapshot": reason,
                                  "fraction": "", "k": "", "n_edges_exact": "", "n_edges_kmv": "",
                                  "adj_mb_exact": "", "adj_mb_kmv": "",
                                  "t_train": "", "t_exact_mat": "",
@@ -889,10 +889,16 @@ def main() -> None:
                 done.add(metapath)
             except Exception as exc:
                 n_failed += 1
-                log.warning("  [%3d/%d] ERROR (%s) — marking FAILED, will skip on resume: %s",
-                             idx, total, exc, metapath[:70])
+                exc_str = str(exc)
+                if "timed out" in exc_str:
+                    reason = f"FAILED:TIMEOUT({args.timeout}s)"
+                elif "bad_alloc" in exc_str or "SIGKILL" in exc_str or "Cannot allocate" in exc_str:
+                    reason = "FAILED:OOM"
+                else:
+                    reason = f"FAILED:{exc_str[:80]}"
+                log.warning("  [%3d/%d] %s: %s", idx, total, reason, metapath[:70])
                 log.debug("Full traceback:", exc_info=True)
-                ext_w.writerow({"dataset": dataset, "metapath": metapath, "snapshot": "FAILED",
+                ext_w.writerow({"dataset": dataset, "metapath": metapath, "snapshot": reason,
                                  "fraction": "", "k": "", "n_edges_exact": "", "n_edges_kmv": "",
                                  "adj_mb_exact": "", "adj_mb_kmv": "",
                                  "t_train": "", "t_exact_mat": "",

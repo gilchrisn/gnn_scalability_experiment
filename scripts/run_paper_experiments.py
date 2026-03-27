@@ -140,7 +140,11 @@ def _done_metapaths_for_method(path: Path, method: str) -> Set[str]:
 
 def _failed_metapaths(path: Path) -> Set[str]:
     """Return metapaths permanently marked FAILED (timed out / OOM on a previous run)."""
-    return _done_metapaths_for_method(path, "FAILED")
+    if not path.exists():
+        return set()
+    with open(path, newline="", encoding="utf-8") as fh:
+        return {row["metapath"] for row in csv.DictReader(fh)
+                if row.get("method", "").startswith("FAILED")}
 
 
 _KMV_METHODS = {"GloD", "PerD", "PerD+", "GloH", "PerH", "PerH+"}
@@ -571,22 +575,28 @@ def main() -> None:
 
             except SystemExit as exc:
                 n_failed += 1
-                log.warning("  [%3d/%d] CRASH (C++ exit %s) — marking FAILED, will skip on resume: %s",
-                             idx, total, exc.code, metapath[:70])
+                reason = f"FAILED:CRASH(exit={exc.code})"
+                log.warning("  [%3d/%d] %s: %s", idx, total, reason, metapath[:70])
                 log.debug("Full traceback:", exc_info=True)
                 if need_kmv:
                     t4_w.writerow({"dataset": dataset, "metapath": metapath,
-                                   "method": "FAILED", "f1_or_acc": "", "avg_time_s": "", "rule_count": ""})
+                                   "method": reason, "f1_or_acc": "", "avg_time_s": "", "rule_count": ""})
                     t4_fh.flush()
                     done_failed.add(metapath)
             except Exception as exc:
                 n_failed += 1
-                log.warning("  [%3d/%d] ERROR (%s) — marking FAILED, will skip on resume: %s",
-                             idx, total, exc, metapath[:70])
+                exc_str = str(exc)
+                if "timed out" in exc_str:
+                    reason = f"FAILED:TIMEOUT({args.timeout}s)"
+                elif "bad_alloc" in exc_str or "SIGKILL" in exc_str or "Cannot allocate" in exc_str:
+                    reason = "FAILED:OOM"
+                else:
+                    reason = f"FAILED:{exc_str[:80]}"
+                log.warning("  [%3d/%d] %s: %s", idx, total, reason, metapath[:70])
                 log.debug("Full traceback:", exc_info=True)
                 if need_kmv:
                     t4_w.writerow({"dataset": dataset, "metapath": metapath,
-                                   "method": "FAILED", "f1_or_acc": "", "avg_time_s": "", "rule_count": ""})
+                                   "method": reason, "f1_or_acc": "", "avg_time_s": "", "rule_count": ""})
                     t4_fh.flush()
                     done_failed.add(metapath)
 
