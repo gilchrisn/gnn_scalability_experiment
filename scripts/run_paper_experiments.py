@@ -226,6 +226,10 @@ def _run_main(
 
     # --- Record WcD / WcH exact baseline times ---
     for exact_task in ["ExactD", "ExactH"]:
+        # Skip h-index exact baseline if ground truth is unavailable
+        if "H" in exact_task and gt.hf1_inclusive is None:
+            log.debug("  table4 | WcH    SKIPPED (no h-index ground truth)")
+            continue
         wc_name = "WcD" if "D" in exact_task else "WcH"
         exact_r = runner.run_exact(exact_task, folder, topr=topr)
         wc_time = None
@@ -248,6 +252,10 @@ def _run_main(
             log.debug("  table4 | %-6s  f1/acc=1.0000  time=%.4fs  (exact baseline)", wc_name, wc_time)
 
     for kind, task, k, beta in _METHOD_SPECS:
+        # Skip h-index methods if ground truth is unavailable
+        if "H" in task and gt.hf1_inclusive is None:
+            log.debug("  table4 | %-6s  SKIPPED (no h-index ground truth)", task)
+            continue
         r = _call(runner, kind, task, folder, topr, k, beta)
         score = _score(r)
 

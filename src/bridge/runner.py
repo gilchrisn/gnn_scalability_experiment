@@ -76,12 +76,12 @@ class GroundTruthSet:
     """
     df1_inclusive: Path
     df1_strict:    Path
-    hf1_inclusive: Path
-    hf1_strict:    Path
+    hf1_inclusive: Optional[Path] = None
+    hf1_strict:    Optional[Path] = None
 
     def assert_all_exist(self) -> None:
-        """Raise FileNotFoundError if any .res file is missing or empty."""
-        for attr in ("df1_inclusive", "df1_strict", "hf1_inclusive", "hf1_strict"):
+        """Raise FileNotFoundError if any required .res file is missing."""
+        for attr in ("df1_inclusive", "df1_strict"):
             p: Path = getattr(self, attr)
             if not p.exists():
                 raise FileNotFoundError(
@@ -249,16 +249,22 @@ class GraphPrepRunner:
         topr = self._canonical_topr(topr)
         print(f"\n[ground truth] {dataset}  topr={topr}")
 
-        d_plus  = self.run_exact("ExactD+", dataset, topr)
+        d_plus   = self.run_exact("ExactD+", dataset, topr)
         d_strict = self.run_exact("ExactD",  dataset, topr)
-        h_plus  = self.run_exact("ExactH+", dataset, topr)
-        h_strict = self.run_exact("ExactH",  dataset, topr)
+
+        # H-index is much slower than degree — allow it to fail gracefully
+        h_plus = h_strict = None
+        try:
+            h_plus  = self.run_exact("ExactH+", dataset, topr)
+            h_strict = self.run_exact("ExactH",  dataset, topr)
+        except RuntimeError as e:
+            print(f"  [WARN] H-index ground truth failed ({e}), degree-only mode")
 
         gt = GroundTruthSet(
             df1_inclusive = d_plus.res_path,
             df1_strict    = d_strict.res_path,
-            hf1_inclusive = h_plus.res_path,
-            hf1_strict    = h_strict.res_path,
+            hf1_inclusive = h_plus.res_path if h_plus else None,
+            hf1_strict    = h_strict.res_path if h_strict else None,
         )
         gt.assert_all_exist()
         return gt
