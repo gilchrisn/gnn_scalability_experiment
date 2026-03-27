@@ -19,8 +19,16 @@ fi
 TIMEOUT=1800
 MAX_METAPATHS=10
 EPOCHS=50
-K=32
+K=8
 MAX_ADJ_MB=5000
+BOOLAP_D="parallel-k-P-core-decomposition-code/BoolAPCoreD"
+BOOLAP_G="parallel-k-P-core-decomposition-code/BoolAPCoreG"
+
+# Compile BoolAP if not already built
+if [ ! -f "$BOOLAP_D" ]; then
+    echo "Compiling BoolAP binaries..."
+    make -C parallel-k-P-core-decomposition-code BoolAPCoreD BoolAPCoreG 2>&1 || echo "[WARN] BoolAP compile failed"
+fi
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG="results/server_run_${TIMESTAMP}.log"
@@ -43,10 +51,14 @@ echo "=== Part 1: Base Paper Reproduction ===" | tee -a "$LOG"
 for DS in HGB_ACM HGB_DBLP HGB_IMDB OGB_MAG OAG_CS; do
     echo "" | tee -a "$LOG"
     echo "--- $DS (Table III/IV, Figures 4-6) ---" | tee -a "$LOG"
+    BOOLAP_ARGS=""
+    [ -f "$BOOLAP_D" ] && BOOLAP_ARGS="$BOOLAP_ARGS --boolap-binary $BOOLAP_D"
+    [ -f "$BOOLAP_G" ] && BOOLAP_ARGS="$BOOLAP_ARGS --boolap-plus-binary $BOOLAP_G"
     python scripts/run_paper_experiments.py "$DS" \
         --max-metapaths "$MAX_METAPATHS" \
         --mining-timeout 10 \
         --timeout "$TIMEOUT" \
+        $BOOLAP_ARGS \
         2>&1 | tee -a "$LOG" || echo "  [WARN] $DS failed, continuing..." | tee -a "$LOG"
 done
 
