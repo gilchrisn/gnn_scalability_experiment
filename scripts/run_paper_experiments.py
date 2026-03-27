@@ -412,8 +412,8 @@ def main() -> None:
     log.info("[2/4] Loading + validating metapaths...")
 
     # Prefer pre-configured metapaths from config (curated, known to work)
-    if cfg.metapaths:
-        metapaths = list(cfg.metapaths)
+    if cfg.suggested_paths:
+        metapaths = list(cfg.suggested_paths)
         log.info("      Using %d pre-configured metapaths from config.", len(metapaths))
         for mp in metapaths:
             log.info("        %s", mp)
