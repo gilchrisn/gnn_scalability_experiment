@@ -407,51 +407,59 @@ def main() -> None:
     log.info("      edge types  : %s", [et[1] for et in g_hetero.edge_types])
     log.info("      target node : %s", cfg.target_node)
 
-    # ---- Mine / load metapaths ---------------------------------------------
+    # ---- Load metapaths (config first, then mine if needed) -----------------
     log.info("")
     log.info("[2/4] Loading + validating metapaths...")
-    work_dir   = os.path.join(config.DATA_DIR, f"mining_{dataset}")
-    anyburl    = AnyBURLRunner(work_dir, config.ANYBURL_JAR)
-    anyburl.export_for_mining(g_hetero)
 
-    rules_file = os.path.join(work_dir, "anyburl_rules.txt")
-    if args.force_remine or not os.path.exists(rules_file):
-        log.info("      Mining metapaths via AnyBURL (snapshot at %ds)...", args.mining_timeout)
-        anyburl.run_mining(timeout=args.mining_timeout, max_length=6, num_threads=4)
+    # Prefer pre-configured metapaths from config (curated, known to work)
+    if cfg.metapaths:
+        metapaths = list(cfg.metapaths)
+        log.info("      Using %d pre-configured metapaths from config.", len(metapaths))
+        for mp in metapaths:
+            log.info("        %s", mp)
     else:
-        log.info("      Using cached rules (pass --force-remine to re-run).")
+        # Fallback: mine via AnyBURL
+        work_dir   = os.path.join(config.DATA_DIR, f"mining_{dataset}")
+        anyburl    = AnyBURLRunner(work_dir, config.ANYBURL_JAR)
+        anyburl.export_for_mining(g_hetero)
 
-    log.info("      Running validation pipeline (parse → normalize → mirror → validate)...")
-    metapaths, stats = load_validated_metapaths(
-        rules_file=rules_file,
-        g_hetero=g_hetero,
-        target_node=cfg.target_node,
-        min_conf=args.min_conf,
-        max_n=args.max_metapaths,
-    )
-    # Filter out long metapaths (>4 hops) — they're exponentially expensive for ExactD
-    max_hops = 4
-    before = len(metapaths)
-    metapaths = [mp for mp in metapaths if len(mp.split(",")) <= max_hops]
-    if len(metapaths) < before:
-        log.info("      Filtered %d metapaths with >%d hops (%d remaining)",
-                 before - len(metapaths), max_hops, len(metapaths))
+        rules_file = os.path.join(work_dir, "anyburl_rules.txt")
+        if args.force_remine or not os.path.exists(rules_file):
+            log.info("      Mining metapaths via AnyBURL (snapshot at %ds)...", args.mining_timeout)
+            anyburl.run_mining(timeout=args.mining_timeout, max_length=6, num_threads=4)
+        else:
+            log.info("      Using cached rules (pass --force-remine to re-run).")
 
-    # Log full validation stats
-    log.info("")
-    log.info("  Metapath validation summary:")
-    log.info("    total parsed lines   : %d", stats["total_parsed"])
-    log.info("    after conf >= %-5s  : %d", args.min_conf, stats["after_conf_filter"])
-    log.info("    unique raw paths     : %d", stats["unique_raw_paths"])
-    log.info("    valid mirrored paths : %d", stats["valid_mirrored"])
-    log.info("    failed (schema miss) : %d", stats["fail_schema"])
-    log.info("    failed (no target)   : %d", stats["fail_trim"])
-    log.info("    failed (asymmetric)  : %d", stats["fail_symmetry"])
-    log.info("    returned (capped)    : %d  (cap=%d)", stats["returned"], args.max_metapaths)
+        log.info("      Running validation pipeline (parse → normalize → mirror → validate)...")
+        metapaths, stats = load_validated_metapaths(
+            rules_file=rules_file,
+            g_hetero=g_hetero,
+            target_node=cfg.target_node,
+            min_conf=args.min_conf,
+            max_n=args.max_metapaths,
+        )
+        # Filter out long metapaths (>4 hops)
+        max_hops = 4
+        before = len(metapaths)
+        metapaths = [mp for mp in metapaths if len(mp.split(",")) <= max_hops]
+        if len(metapaths) < before:
+            log.info("      Filtered %d metapaths with >%d hops (%d remaining)",
+                     before - len(metapaths), max_hops, len(metapaths))
+
+        log.info("")
+        log.info("  Metapath validation summary:")
+        log.info("    total parsed lines   : %d", stats["total_parsed"])
+        log.info("    after conf >= %-5s  : %d", args.min_conf, stats["after_conf_filter"])
+        log.info("    unique raw paths     : %d", stats["unique_raw_paths"])
+        log.info("    valid mirrored paths : %d", stats["valid_mirrored"])
+        log.info("    failed (schema miss) : %d", stats["fail_schema"])
+        log.info("    failed (no target)   : %d", stats["fail_trim"])
+        log.info("    failed (asymmetric)  : %d", stats["fail_symmetry"])
+        log.info("    returned (capped)    : %d  (cap=%d)", stats["returned"], args.max_metapaths)
     log.info("")
 
     if not metapaths:
-        log.error("[ERROR] No valid metapaths found after validation pipeline.")
+        log.error("[ERROR] No valid metapaths found.")
         log.error("  Try: --force-remine, lower --min-conf, or inspect with:")
         log.error("  python scripts/inspect_mined_paths.py %s --min-conf %s", dataset, args.min_conf)
         sys.exit(1)
