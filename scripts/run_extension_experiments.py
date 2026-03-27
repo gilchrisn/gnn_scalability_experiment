@@ -614,6 +614,12 @@ def _run_one_metapath(
                 t_exact_infer = time.perf_counter() - t0
                 log.info("      [mem] after exact infer: [RSS=%s]", _mem_mb())
                 f1_exact  = _f1(z_exact, snap_labels_d, snap_test)
+                # Compute dirichlet + layerwise BEFORE deleting g_exact
+                try:
+                    dirichlet_exact = _dirichlet_energy(z_exact, g_exact.edge_index.to(infer_device), snap_n_target)
+                    layers_exact = _infer_layerwise(sage_model, g_exact, in_dim, infer_device)
+                except (MemoryError, RuntimeError):
+                    log.warning("      Dirichlet/layerwise OOM on exact — skipping")
                 del g_exact; gc.collect()
                 log.info("      [mem] after exact cleanup: [RSS=%s]", _mem_mb())
             except MemoryError as e:
@@ -645,9 +651,13 @@ def _run_one_metapath(
         f1_kmv  = _f1(z_kmv, snap_labels_d, snap_test)
         log.info("      [mem] after f1_kmv:      [RSS=%s]", _mem_mb())
         n_edges_kmv = _count_edges_from_file(kmv_file)
-        # Skip layerwise + dirichlet to save memory
-        layers_kmv = None
         dirichlet_kmv = None
+        layers_kmv = None
+        try:
+            dirichlet_kmv = _dirichlet_energy(z_kmv, g_kmv.edge_index.to(infer_device), snap_n_target)
+            layers_kmv = _infer_layerwise(sage_model, g_kmv, in_dim, infer_device)
+        except (MemoryError, RuntimeError):
+            log.warning("      Dirichlet/layerwise OOM on KMV — skipping")
 
         # --- Derived metrics (only when exact loaded successfully) ---
         cka_val        = None
