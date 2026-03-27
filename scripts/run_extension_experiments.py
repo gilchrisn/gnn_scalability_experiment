@@ -173,6 +173,7 @@ _EXT_FIELDS = [
     "n_edges_exact", "n_edges_kmv",
     "adj_mb_exact", "adj_mb_kmv",
     "t_train",
+    "exact_status",
     "t_exact_mat", "t_exact_infer",
     "f1_exact",
     "t_kmv_mat", "t_kmv_infer",
@@ -596,6 +597,7 @@ def _run_one_metapath(
         t_exact_infer    = None
         layers_exact     = None
         dirichlet_exact  = None
+        _exact_status    = "OK"
 
         try:
             t_exact_mat, exact_file = _run_cpp_exact(engine, folder, timeout)
@@ -612,15 +614,20 @@ def _run_one_metapath(
                 t_exact_infer = time.perf_counter() - t0
                 log.info("      [mem] after exact infer: [RSS=%s]", _mem_mb())
                 f1_exact  = _f1(z_exact, snap_labels_d, snap_test)
-                # Skip layerwise + dirichlet to save memory (each re-runs full forward pass)
-                # layers_exact = _infer_layerwise(sage_model, g_exact, in_dim, infer_device)
-                # dirichlet_exact = _dirichlet_energy(z_exact, g_exact.edge_index.to(infer_device), snap_n_target)
-                del g_exact; gc.collect()  # free memory before KMV
+                del g_exact; gc.collect()
                 log.info("      [mem] after exact cleanup: [RSS=%s]", _mem_mb())
-            except (MemoryError, RuntimeError) as e:
+            except MemoryError as e:
+                _exact_status = f"LOAD_OOM({adj_mb_exact:.0f}MB)" if adj_mb_exact else "LOAD_OOM"
                 log.warning("      Exact load/infer OOM: %s", e)
-        except (MemoryError, RuntimeError) as e:
+            except RuntimeError as e:
+                _exact_status = f"INFER_OOM" if "allocate" in str(e) else f"INFER_ERR:{str(e)[:60]}"
+                log.warning("      Exact load/infer error: %s", e)
+        except MemoryError as e:
+            _exact_status = "MAT_OOM"
             log.warning("      Exact C++ OOM: %s", e)
+        except RuntimeError as e:
+            _exact_status = "MAT_TIMEOUT" if "timed out" in str(e) else f"MAT_ERR:{str(e)[:60]}"
+            log.warning("      Exact C++ error: %s", e)
 
         # --- KMV: always runs (capped at K × |peers| edges) ---
         log.info("      [mem] before KMV C++:    [RSS=%s]", _mem_mb())
@@ -692,6 +699,7 @@ def _run_one_metapath(
             "adj_mb_exact":     _fmt(adj_mb_exact, 2),
             "adj_mb_kmv":       _fmt(adj_mb_kmv, 2),
             "t_train":          round(t_train, 6),
+            "exact_status":     _exact_status,
             "t_exact_mat":      _fmt(t_exact_mat),
             "t_exact_infer":    _fmt(t_exact_infer),
             "f1_exact":         _fmt(f1_exact),
