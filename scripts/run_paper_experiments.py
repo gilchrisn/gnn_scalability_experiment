@@ -588,9 +588,11 @@ def main() -> None:
 
         total = len(run_list)
         for idx, (metapath, instance_id, label) in enumerate(run_list, start=1):
-            need_kmv      = metapath not in done_kmv and metapath not in done_failed
-            need_boolap   = boolap_run  and metapath not in done_boolap
-            need_boolap_p = boolap_plus and metapath not in done_boolap_p
+            # Unique rule ID for CSV: includes instance_id to avoid duplicates
+            rule_id = metapath if instance_id == -1 else f"{metapath}[inst={instance_id}]"
+            need_kmv      = rule_id not in done_kmv and rule_id not in done_failed
+            need_boolap   = boolap_run  and rule_id not in done_boolap
+            need_boolap_p = boolap_plus and rule_id not in done_boolap_p
 
             if not need_kmv and not need_boolap and not need_boolap_p:
                 log.info("  [%3d/%d] skip  %s", idx, total, label[:70])
@@ -606,42 +608,42 @@ def main() -> None:
                 compile_rule_for_cpp(metapath, g_hetero, data_dir, folder, instance_id=instance_id)
 
                 if need_kmv:
-                    if metapath not in done_t3:
+                    if rule_id not in done_t3:
                         try:
-                            _run_hg_stats(dataset, folder, metapath, t3_w, log,
+                            _run_hg_stats(dataset, folder, rule_id, t3_w, log,
                                          runner=runner, data_dir=data_dir)
                             t3_fh.flush()
                         except Exception as e:
-                            log.warning("  hg_stats failed (%s) — continuing with experiments", e)
+                            log.warning("  table3 failed (%s) — continuing", e)
 
-                    _run_main(runner, dataset, folder, metapath, args.topr, t4_w, f4_w, log)
+                    _run_main(runner, dataset, folder, rule_id, args.topr, t4_w, f4_w, log)
                     t4_fh.flush()
                     f4_fh.flush()
 
                     if not args.skip_sweeps:
-                        _run_sweeps(runner, dataset, folder, metapath, f5_w, f6_w, log)
+                        _run_sweeps(runner, dataset, folder, rule_id, f5_w, f6_w, log)
                         f5_fh.flush()
                         f6_fh.flush()
 
                 if need_boolap:
                     _run_boolap_table4(boolap_conv, boolap_run,  g_hetero, dataset,
-                                       folder, metapath, "BoolAP",  t4_w, log)
+                                       folder, rule_id, "BoolAP",  t4_w, log)
                     t4_fh.flush()
                 if need_boolap_p:
                     _run_boolap_table4(boolap_conv, boolap_plus, g_hetero, dataset,
-                                       folder, metapath, "BoolAP+", t4_w, log)
+                                       folder, rule_id, "BoolAP+", t4_w, log)
                     t4_fh.flush()
 
             except SystemExit as exc:
                 n_failed += 1
                 reason = f"FAILED:CRASH(exit={exc.code})"
-                log.warning("  [%3d/%d] %s: %s", idx, total, reason, metapath[:70])
+                log.warning("  [%3d/%d] %s: %s", idx, total, reason, label[:70])
                 log.debug("Full traceback:", exc_info=True)
                 if need_kmv:
-                    t4_w.writerow({"dataset": dataset, "metapath": metapath,
+                    t4_w.writerow({"dataset": dataset, "metapath": rule_id,
                                    "method": reason, "f1_or_acc": "", "avg_time_s": "", "rule_count": ""})
                     t4_fh.flush()
-                    done_failed.add(metapath)
+                    done_failed.add(rule_id)
             except Exception as exc:
                 n_failed += 1
                 exc_str = str(exc)
@@ -651,13 +653,13 @@ def main() -> None:
                     reason = "FAILED:OOM"
                 else:
                     reason = f"FAILED:{exc_str[:80]}"
-                log.warning("  [%3d/%d] %s: %s", idx, total, reason, metapath[:70])
+                log.warning("  [%3d/%d] %s: %s", idx, total, reason, label[:70])
                 log.debug("Full traceback:", exc_info=True)
                 if need_kmv:
-                    t4_w.writerow({"dataset": dataset, "metapath": metapath,
+                    t4_w.writerow({"dataset": dataset, "metapath": rule_id,
                                    "method": reason, "f1_or_acc": "", "avg_time_s": "", "rule_count": ""})
                     t4_fh.flush()
-                    done_failed.add(metapath)
+                    done_failed.add(rule_id)
 
     finally:
         for fh in [t3_fh, t4_fh, f4_fh, f5_fh, f6_fh]:
