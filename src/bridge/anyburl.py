@@ -387,9 +387,8 @@ def load_validated_rules(
                 seen.add(sig)
                 rules.append((validated, -1))
         else:
-            # Instance rules: anchored at a fixed node, so they DON'T need
-            # to be symmetric (don't need to end at target type). Just check
-            # that the path starts from target and has valid schema.
+            # Instance rules: anchored at a fixed node.
+            # Must start from target type.
             rels = mirrored.split(",")
             first_src = schema.get(rels[0])
             if first_src is None or first_src[0] != target_node:
@@ -404,8 +403,21 @@ def load_validated_rules(
             if not contiguous:
                 fail_schema += 1
                 continue
-            validated = mirrored
-            if len(rels) > max_hops:
+            # Augment 1-hop instance rules: add reverse edge to make 2-hop.
+            # 1-hop bytecode has empty ETypes when -5 fires → C++ skips it.
+            # Adding reverse edge: `A_to_B[inst=X]` → `A_to_B,B_to_A[inst=X]`
+            # gives ETypes=[A_to_B] when -5 fires → C++ processes it.
+            if len(rels) == 1:
+                rev = _rev_rel(rels[0])
+                rev_normed = normalize_rel(rev, schema, canonical)
+                if schema.get(rev_normed) is not None:
+                    validated = f"{rels[0]},{rev_normed}"
+                else:
+                    fail_schema += 1
+                    continue
+            else:
+                validated = mirrored
+            if len(validated.split(",")) > max_hops:
                 fail_hops += 1
                 continue
             sig = f"inst:{validated}:{iid}"
