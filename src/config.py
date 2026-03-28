@@ -100,9 +100,15 @@ class Config:
                 "paper_to_term,term_to_paper",                  # PTP
             ]),
             'HGB_IMDB': DatasetConfig('HGB', 'IMDB', 'movie', [
-                "movie_to_actor,actor_to_movie",                # MAM
-                "movie_to_director,director_to_movie",          # MDM
-                "movie_to_keyword,keyword_to_movie",            # MKM
+                "movie_to_actor,actor_to_movie",                                        # MAM
+                "movie_to_director,director_to_movie",                                  # MDM
+                "movie_to_keyword,keyword_to_movie",                                    # MKM
+                "movie_to_actor,actor_to_movie,movie_to_director,director_to_movie",    # MAMDM
+                "movie_to_actor,actor_to_movie,movie_to_keyword,keyword_to_movie",      # MAMKM
+                "movie_to_director,director_to_movie,movie_to_actor,actor_to_movie",    # MDMAM
+                "movie_to_director,director_to_movie,movie_to_keyword,keyword_to_movie",# MDMKM
+                "movie_to_keyword,keyword_to_movie,movie_to_actor,actor_to_movie",      # MKMAM
+                "movie_to_keyword,keyword_to_movie,movie_to_director,director_to_movie",# MKMDM
             ]),
 
             # === OGB DATASETS ===
