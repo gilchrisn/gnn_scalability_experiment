@@ -203,7 +203,7 @@ def _run_hg_stats(
                os.path.join(folder, f"cod-rules_{folder}.limit"), adj_path]
         import subprocess, time as _time
         t0 = _time.perf_counter()
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
         mat_time = _time.perf_counter() - t0
     except Exception as e:
         log.warning("  table3 | materialize failed for %s: %s", metapath[:60], e)
