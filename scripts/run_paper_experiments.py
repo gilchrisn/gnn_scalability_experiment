@@ -552,8 +552,11 @@ def main() -> None:
 
                 if need_kmv:
                     if metapath not in done_t3:
-                        _run_hg_stats(dataset, folder, metapath, t3_w, log)
-                        t3_fh.flush()
+                        try:
+                            _run_hg_stats(dataset, folder, metapath, t3_w, log)
+                            t3_fh.flush()
+                        except Exception as e:
+                            log.warning("  hg_stats failed (%s) — continuing with experiments", e)
 
                     _run_main(runner, dataset, folder, metapath, args.topr, t4_w, f4_w, log)
                     t4_fh.flush()
