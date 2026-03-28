@@ -387,17 +387,25 @@ def load_validated_rules(
                 seen.add(sig)
                 rules.append((validated, -1))
         else:
-            # Instance rules: check schema contiguity
-            # Must have >=2 hops — 1-hop instance rules produce empty ETypes
-            # in the C++ parser, causing rules=0.
-            if len(rels) < 2:
-                fail_hops += 1
-                continue
-            validated = validate_and_trim(mirrored, schema, target_node)
-            if validated is None:
+            # Instance rules: anchored at a fixed node, so they DON'T need
+            # to be symmetric (don't need to end at target type). Just check
+            # that the path starts from target and has valid schema.
+            rels = mirrored.split(",")
+            first_src = schema.get(rels[0])
+            if first_src is None or first_src[0] != target_node:
                 fail_trim += 1
                 continue
-            if len(validated.split(",")) > max_hops or len(validated.split(",")) < 2:
+            # Check schema contiguity
+            resolved = [(r, schema[r][0], schema[r][1]) for r in rels if schema.get(r)]
+            if len(resolved) != len(rels):
+                fail_schema += 1
+                continue
+            contiguous = all(resolved[i][2] == resolved[i+1][1] for i in range(len(resolved)-1))
+            if not contiguous:
+                fail_schema += 1
+                continue
+            validated = mirrored
+            if len(rels) > max_hops:
                 fail_hops += 1
                 continue
             sig = f"inst:{validated}:{iid}"
