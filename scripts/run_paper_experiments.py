@@ -551,24 +551,32 @@ def main() -> None:
     n_failed = 0
 
     try:
-        for idx, metapath in enumerate(metapaths, start=1):
+        # When mining: all rules are in one global file. Run C++ ONCE, report
+        # one aggregate result per dataset (matching the paper's Table IV).
+        # When using config paths: run per-metapath (each compiles its own rule).
+        if all_rules is not None:
+            run_items = [("ALL", f"all {len(all_rules)} rules")]
+        else:
+            run_items = [(mp, mp) for mp in metapaths]
+
+        for idx, (metapath, label) in enumerate(run_items, start=1):
+            total = len(run_items)
             need_kmv      = metapath not in done_kmv and metapath not in done_failed
             need_boolap   = boolap_run  and metapath not in done_boolap
             need_boolap_p = boolap_plus and metapath not in done_boolap_p
 
             if not need_kmv and not need_boolap and not need_boolap_p:
-                log.info("  [%3d/%d] skip  %s", idx, total, metapath[:70])
+                log.info("  [%3d/%d] skip  %s", idx, total, label[:70])
                 continue
 
             parts = (["KMV"] if need_kmv else []) + \
                     (["BoolAP"] if need_boolap else []) + \
                     (["BoolAP+"] if need_boolap_p else [])
-            log.info("  [%3d/%d] run %s  %s", idx, total, "+".join(parts), metapath[:70])
-            log.debug("         full metapath: %s", metapath)
+            log.info("  [%3d/%d] run %s  %s", idx, total, "+".join(parts), label[:70])
 
             try:
-                # Only compile per-metapath if using config paths (not mining).
-                # When mining, all rules are already in the global file.
+                # Config paths: compile one rule per metapath
+                # Mining: already compiled all rules into global file
                 if all_rules is None:
                     compile_rule_for_cpp(metapath, g_hetero, data_dir, folder)
 
