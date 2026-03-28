@@ -121,9 +121,7 @@ class Config:
             # === OAG (Open Academic Graph, 768-dim XLNet features, 546K papers) ===
             'OAG_CS': DatasetConfig('OAG', 'cs', 'paper', [
                 "rev_AP_write_first,AP_write_first",             # PAP via first-author
-                "PF_in_L1,rev_PF_in_L1",                        # PFP via L1 fields (1.2M edges)
-                "PF_in_L3,rev_PF_in_L3",                        # PFP via L3 fields (870K edges)
-                "rev_AP_write_first,in,rev_in,AP_write_first",   # PAIAP via first-author + affiliation
+                "PF_in_L3,rev_PF_in_L3",                        # PFP via L3 fields (89x speedup)
             ]),
 
             # === RCDD (Alibaba risk detection, 13.8M nodes, all types featurized) ===
