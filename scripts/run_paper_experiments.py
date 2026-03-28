@@ -187,29 +187,55 @@ def _run_hg_stats(
     metapath: str,
     t3_w:     csv.DictWriter,
     log:      logging.Logger,
+    runner:   "GraphPrepRunner" = None,
+    data_dir: str = None,
 ) -> None:
-    """Run hg_stats for one metapath and write a row to table3 CSV."""
-    stdout = run_cpp(config.CPP_EXECUTABLE, ["hg_stats", folder],
-                     print_output=False, timeout=600)
-    edges_m = re.findall(r"RAW_EDGES_E\*:\s*([0-9.eE+\-]+)", stdout)
-    peer_m  = re.search(r"~\|peer\|:\s*([0-9.eE+\-]+)",       stdout)
-    dens_m  = re.search(r"~dens:\s*([0-9.eE+\-]+)",            stdout)
+    """Compute Table III stats from the materialized adjacency file.
 
-    if not edges_m or not dens_m:
-        log.warning("  table3 | hg_stats: no parseable output for %s", metapath[:60])
+    Materializes the matching graph, counts edges and peers from the
+    output file, then deletes it. No hg_stats C++ call needed.
+    """
+    adj_path = os.path.join(data_dir, "mat_exact.adj") if data_dir else os.path.join(folder, "mat_exact.adj")
+
+    # Materialize to get the adjacency file
+    try:
+        from src.bridge import CppEngine
+        engine = CppEngine(config.CPP_EXECUTABLE, data_dir or folder)
+        cmd = [config.CPP_EXECUTABLE, "materialize", folder,
+               os.path.join(folder, f"cod-rules_{folder}.limit"), adj_path]
+        import subprocess, time as _time
+        t0 = _time.perf_counter()
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        mat_time = _time.perf_counter() - t0
+    except Exception as e:
+        log.warning("  table3 | materialize failed for %s: %s", metapath[:60], e)
         return
 
-    avg_edges = sum(float(m) for m in edges_m) / len(edges_m)
-    peer_size = float(peer_m.group(1)) if peer_m else float("nan")
-    density   = float(dens_m.group(1))
+    # Count edges and peers from adjacency file
+    if not os.path.exists(adj_path):
+        log.warning("  table3 | no adjacency file for %s", metapath[:60])
+        return
+
+    n_edges = 0
+    n_peers = 0
+    with open(adj_path, "r") as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) >= 1:
+                n_peers += 1
+                n_edges += len(parts) - 1  # first is node ID, rest are neighbors
+
+    density = n_edges / (n_peers * n_peers) if n_peers > 0 else 0.0
 
     t3_w.writerow({
         "dataset":   dataset,
         "metapath":  metapath,
-        "avg_edges": round(avg_edges, 2),
-        "peer_size": round(peer_size, 2),
+        "avg_edges": n_edges,
+        "peer_size": n_peers,
         "density":   round(density, 8),
     })
+    log.debug("  table3 | edges=%d  peers=%d  density=%.6f  mat=%.2fs",
+              n_edges, n_peers, density, mat_time)
     log.debug("  table3 | avg_edges=%.1f  peer_size=%.1f  density=%.6f",
               avg_edges, peer_size, density)
 
@@ -582,7 +608,8 @@ def main() -> None:
                 if need_kmv:
                     if metapath not in done_t3:
                         try:
-                            _run_hg_stats(dataset, folder, metapath, t3_w, log)
+                            _run_hg_stats(dataset, folder, metapath, t3_w, log,
+                                         runner=runner, data_dir=data_dir)
                             t3_fh.flush()
                         except Exception as e:
                             log.warning("  hg_stats failed (%s) — continuing with experiments", e)
