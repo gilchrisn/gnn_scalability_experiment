@@ -60,7 +60,7 @@ from scripts.bench_utils import (
 
 DEFAULT_TOPR  = "0.05"
 DEFAULT_MIN_CONF = 0.1          # paper uses 0.1 (not 0.001)
-LAMBDAS       = ["0.02", "0.03", "0.04", "0.05"]
+LAMBDAS       = ["0.01", "0.02", "0.03", "0.04", "0.05"]
 K_VALUES      = [2, 4, 8, 16, 32]
 DEFAULT_K_DEG = 32
 DEFAULT_K_HID = 4
