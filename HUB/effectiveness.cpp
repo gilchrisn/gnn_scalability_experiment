@@ -17,7 +17,7 @@
 namespace effectiveness{
     bool COD_matching_graph_time(Pattern *qp, HeterGraph *g, std::vector<std::vector<bool>*>* visited,
                                  std::vector<std::vector<bool>*>* back_visited, double & avg_time){
-        if(qp->instance >= 0 && qp->NTypes.size() < 2) return false;
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return false;
 
         auto start = std::chrono::steady_clock::now();
 
@@ -51,7 +51,7 @@ namespace effectiveness{
         double preprocess_time = 0.0;
         double running_time = 0.0;
 
-        if(qp->instance >= 0 && qp->NTypes.size() < 2) return false;
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return false;
 
         auto start = std::chrono::steady_clock::now();
 
@@ -294,7 +294,7 @@ namespace effectiveness{
         double preprocess_time = 0.0;
         double running_time = 0.0;
 
-        if(qp->instance >= 0 && qp->NTypes.size() < 2) return -1;
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return -1;
 
         auto start = std::chrono::steady_clock::now();
 
@@ -566,7 +566,7 @@ namespace effectiveness{
     bool COD_prop_global_scale(Pattern *qp, HeterGraph *g, double topr, std::vector<std::vector<bool>*>* visited,
                                     std::vector<std::vector<bool>*>* back_visited, const std::string &centrality,
                                     double & avg_time){
-        if (qp->instance >= 0 && qp->NTypes.size() < 2) return false;
+        if (qp->instance >= 0 && qp->NTypes.size() <= 2) return false;
 
         double running_time = 0.0;
         double preprocess_time = 0.0;
@@ -744,7 +744,7 @@ namespace effectiveness{
                             std::vector<std::vector<unsigned int>*>* hg_dom_peers, std::vector<bool>* isdom,
                             std::vector<std::vector<unsigned int>*>* hg_dom_greater_peers, std::vector<bool>* isdom_greater,
                             unsigned int & count, double & avg_time, unsigned int & out_edges){
-        if (qp->instance >= 0 && qp->NTypes.size() < 2) return -1;
+        if (qp->instance >= 0 && qp->NTypes.size() <= 2) return -1;
 
         double running_time = 0.0;
         double preprocess_time = 0.0;
@@ -984,7 +984,7 @@ namespace effectiveness{
     bool COD_hg_global_greater_f1(Pattern *qp, HeterGraph *g, double topr, std::vector<std::vector<bool>*>* visited,
                     std::vector<std::vector<bool>*>* back_visited, const std::string &centrality, double & avg_time){
         double running_time = 0.0;
-        if(qp->instance >= 0 && qp->NTypes.size() < 2) return false;
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return false;
 
         auto start = std::chrono::steady_clock::now();
 
@@ -1076,7 +1076,7 @@ namespace effectiveness{
     bool COD_hg_global_f1_by_union(Pattern *qp, HeterGraph *g, double topr, std::vector<std::vector<bool>*>* visited,
                     std::vector<std::vector<bool>*>* back_visited, const std::string &centrality, double & avg_time){
         double running_time = 0.0;
-        if(qp->instance >= 0 && qp->NTypes.size() < 2) return false;
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return false;
 
         auto start = std::chrono::steady_clock::now();
 
@@ -1165,7 +1165,7 @@ namespace effectiveness{
     bool COD_hg_global_f1(Pattern *qp, HeterGraph *g, double topr, std::vector<std::vector<bool>*>* visited,
                     std::vector<std::vector<bool>*>* back_visited, const std::string &centrality, double & avg_time){
         double running_time = 0.0;
-        if(qp->instance >= 0 && qp->NTypes.size() < 2) return false;
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return false;
 
         auto start = std::chrono::steady_clock::now();
 
@@ -1255,7 +1255,7 @@ namespace effectiveness{
                            std::vector<std::vector<bool>*>* back_visited){
         auto res = new std::vector<double>();
 
-        if(qp->instance >= 0 && qp->NTypes.size() < 2) return nullptr;
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return nullptr;
         auto frontiers = new std::vector<unsigned int>();
         auto peers = new std::vector<unsigned int>();
         Peers(qp, g, frontiers, peers, visited);

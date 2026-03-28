@@ -48,10 +48,8 @@ from src.bridge import (
     BoolAPConverter,
     BoolAPRunner,
 )
-from src.bridge.anyburl import load_validated_rules
 from scripts.bench_utils import (
     compile_rule_for_cpp,
-    compile_all_rules_for_cpp,
     generate_qnodes,
     setup_global_res_dirs,
     run_cpp,
@@ -451,10 +449,6 @@ def main() -> None:
     log.info("")
     log.info("[2/4] Loading + validating metapaths...")
 
-    # all_rules: List[(metapath_str, instance_id)] — ALL rules for the global file
-    # metapaths: List[str] — unique path patterns for per-metapath iteration
-    all_rules = None  # None means "use per-metapath mode (config paths)"
-
     # Prefer pre-configured metapaths from config (curated, known to work)
     # --force-mine overrides this for HGB datasets that need mining
     if cfg.suggested_paths and not args.force_mine:
@@ -463,7 +457,7 @@ def main() -> None:
         for mp in metapaths:
             log.info("        %s", mp)
     else:
-        # Mine via AnyBURL — returns ALL rules (variable + instance)
+        # Mine via AnyBURL — variable rules only (mirrored, symmetric)
         work_dir   = os.path.join(config.DATA_DIR, f"mining_{dataset}")
         anyburl    = AnyBURLRunner(work_dir, config.ANYBURL_JAR)
         anyburl.export_for_mining(g_hetero)
@@ -475,36 +469,32 @@ def main() -> None:
         else:
             log.info("      Using cached rules (pass --force-remine to re-run).")
 
-        log.info("      Loading ALL rules (variable + instance)...")
-        all_rules, stats = load_validated_rules(
+        log.info("      Running validation pipeline...")
+        metapaths, stats = load_validated_metapaths(
             rules_file=rules_file,
             g_hetero=g_hetero,
             target_node=cfg.target_node,
             min_conf=args.min_conf,
             max_n=args.max_metapaths,
-            max_hops=4,
         )
-
-        # Extract unique metapath patterns for per-metapath reporting
-        seen = set()
-        metapaths = []
-        for mp, _, _ in all_rules:
-            if mp not in seen:
-                seen.add(mp)
-                metapaths.append(mp)
+        # Filter long metapaths
+        max_hops = 4
+        before = len(metapaths)
+        metapaths = [mp for mp in metapaths if len(mp.split(",")) <= max_hops]
+        if len(metapaths) < before:
+            log.info("      Filtered %d metapaths with >%d hops (%d remaining)",
+                     before - len(metapaths), max_hops, len(metapaths))
 
         log.info("")
-        log.info("  Rule validation summary:")
+        log.info("  Metapath validation summary:")
         log.info("    total parsed lines   : %d", stats["total_parsed"])
         log.info("    after conf >= %-5s  : %d", args.min_conf, stats["after_conf_filter"])
-        log.info("    total rules          : %d", stats["total_rules"])
-        log.info("    variable rules       : %d", stats["variable_rules"])
-        log.info("    instance rules       : %d", stats["instance_rules"])
-        log.info("    unique path patterns : %d", len(metapaths))
+        log.info("    unique raw paths     : %d", stats["unique_raw_paths"])
+        log.info("    valid mirrored paths : %d", stats["valid_mirrored"])
         log.info("    failed (schema miss) : %d", stats["fail_schema"])
         log.info("    failed (no target)   : %d", stats["fail_trim"])
         log.info("    failed (asymmetric)  : %d", stats["fail_symmetry"])
-        log.info("    failed (>4 hops)     : %d", stats["fail_hops"])
+        log.info("    returned (capped)    : %d  (cap=%d)", stats["returned"], args.max_metapaths)
     log.info("")
 
     if not metapaths:
@@ -519,11 +509,6 @@ def main() -> None:
     generate_qnodes(data_dir, folder, target_node_type=cfg.target_node, g_hetero=g_hetero)
     setup_global_res_dirs(folder, project_root)
 
-    # If we have all_rules from mining, compile them ALL into the global rules file.
-    # The C++ binary processes all rules on one line for centrality tasks.
-    if all_rules is not None:
-        n_compiled = compile_all_rules_for_cpp(all_rules, g_hetero, data_dir, folder)
-        log.info("      Compiled %d rules into global rules file.", n_compiled)
 
     runner = GraphPrepRunner(
         binary=config.CPP_EXECUTABLE,
@@ -575,73 +560,61 @@ def main() -> None:
     n_failed = 0
 
     try:
-        # Build run list: each entry is (metapath_str, instance_id, label)
-        # Mining: one entry per rule (variable + instance), compile each individually
-        # Config: one entry per metapath (variable only)
-        if all_rules is not None:
-            run_list = [(mp, iid, f"{mp} (inst={iid})" if iid != -1 else mp)
-                        for mp, iid, _ in all_rules]
-        else:
-            run_list = [(mp, -1, mp) for mp in metapaths]
-
-        total = len(run_list)
-        for idx, (metapath, instance_id, label) in enumerate(run_list, start=1):
-            # Unique rule ID for CSV: includes instance_id to avoid duplicates
-            rule_id = metapath if instance_id == -1 else f"{metapath}[inst={instance_id}]"
-            need_kmv      = rule_id not in done_kmv and rule_id not in done_failed
-            need_boolap   = boolap_run  and rule_id not in done_boolap
-            need_boolap_p = boolap_plus and rule_id not in done_boolap_p
+        total = len(metapaths)
+        for idx, metapath in enumerate(metapaths, start=1):
+            need_kmv      = metapath not in done_kmv and metapath not in done_failed
+            need_boolap   = boolap_run  and metapath not in done_boolap
+            need_boolap_p = boolap_plus and metapath not in done_boolap_p
 
             if not need_kmv and not need_boolap and not need_boolap_p:
-                log.info("  [%3d/%d] skip  %s", idx, total, label[:70])
+                log.info("  [%3d/%d] skip  %s", idx, total, metapath[:70])
                 continue
 
             parts = (["KMV"] if need_kmv else []) + \
                     (["BoolAP"] if need_boolap else []) + \
                     (["BoolAP+"] if need_boolap_p else [])
-            log.info("  [%3d/%d] run %s  %s", idx, total, "+".join(parts), label[:70])
+            log.info("  [%3d/%d] run %s  %s", idx, total, "+".join(parts), metapath[:70])
 
             try:
-                # Always compile per-rule (each rule gets its own ground truth)
-                compile_rule_for_cpp(metapath, g_hetero, data_dir, folder, instance_id=instance_id)
+                compile_rule_for_cpp(metapath, g_hetero, data_dir, folder)
 
                 if need_kmv:
-                    if rule_id not in done_t3:
+                    if metapath not in done_t3:
                         try:
-                            _run_hg_stats(dataset, folder, rule_id, t3_w, log,
+                            _run_hg_stats(dataset, folder, metapath, t3_w, log,
                                          runner=runner, data_dir=data_dir)
                             t3_fh.flush()
                         except Exception as e:
                             log.warning("  table3 failed (%s) — continuing", e)
 
-                    _run_main(runner, dataset, folder, rule_id, args.topr, t4_w, f4_w, log)
+                    _run_main(runner, dataset, folder, metapath, args.topr, t4_w, f4_w, log)
                     t4_fh.flush()
                     f4_fh.flush()
 
                     if not args.skip_sweeps:
-                        _run_sweeps(runner, dataset, folder, rule_id, f5_w, f6_w, log)
+                        _run_sweeps(runner, dataset, folder, metapath, f5_w, f6_w, log)
                         f5_fh.flush()
                         f6_fh.flush()
 
                 if need_boolap:
                     _run_boolap_table4(boolap_conv, boolap_run,  g_hetero, dataset,
-                                       folder, rule_id, "BoolAP",  t4_w, log)
+                                       folder, metapath, "BoolAP",  t4_w, log)
                     t4_fh.flush()
                 if need_boolap_p:
                     _run_boolap_table4(boolap_conv, boolap_plus, g_hetero, dataset,
-                                       folder, rule_id, "BoolAP+", t4_w, log)
+                                       folder, metapath, "BoolAP+", t4_w, log)
                     t4_fh.flush()
 
             except SystemExit as exc:
                 n_failed += 1
                 reason = f"FAILED:CRASH(exit={exc.code})"
-                log.warning("  [%3d/%d] %s: %s", idx, total, reason, label[:70])
+                log.warning("  [%3d/%d] %s: %s", idx, total, reason, metapath[:70])
                 log.debug("Full traceback:", exc_info=True)
                 if need_kmv:
-                    t4_w.writerow({"dataset": dataset, "metapath": rule_id,
+                    t4_w.writerow({"dataset": dataset, "metapath": metapath,
                                    "method": reason, "f1_or_acc": "", "avg_time_s": "", "rule_count": ""})
                     t4_fh.flush()
-                    done_failed.add(rule_id)
+                    done_failed.add(metapath)
             except Exception as exc:
                 n_failed += 1
                 exc_str = str(exc)
@@ -651,13 +624,13 @@ def main() -> None:
                     reason = "FAILED:OOM"
                 else:
                     reason = f"FAILED:{exc_str[:80]}"
-                log.warning("  [%3d/%d] %s: %s", idx, total, reason, label[:70])
+                log.warning("  [%3d/%d] %s: %s", idx, total, reason, metapath[:70])
                 log.debug("Full traceback:", exc_info=True)
                 if need_kmv:
-                    t4_w.writerow({"dataset": dataset, "metapath": rule_id,
+                    t4_w.writerow({"dataset": dataset, "metapath": metapath,
                                    "method": reason, "f1_or_acc": "", "avg_time_s": "", "rule_count": ""})
                     t4_fh.flush()
-                    done_failed.add(rule_id)
+                    done_failed.add(metapath)
 
     finally:
         for fh in [t3_fh, t4_fh, f4_fh, f5_fh, f6_fh]:
