@@ -123,46 +123,83 @@ def compile_all_rules_for_cpp(
     folder_name: str,
 ) -> int:
     """
-    Compile ALL rules (variable + instance) into a single global rules file.
+    Compile ALL rules into a single global rules file matching the original
+    paper's format.
 
-    The C++ binary reads one line from cod-rules_<folder>.limit per qnode.
-    For centrality tasks (ExactD, GloD, etc.), it reads from
-    <folder>-cod-global-rules.dat which has ALL rules on ONE line,
-    separated by -4 (pop) opcodes.
+    The original format groups rules by path pattern:
+      <path_setup> -1 <last_edge> -5 <inst1> -5 <inst2> ... -4 -4
+
+    This builds the path (N-1 edges), fires the variable rule (-1 + last edge),
+    then chains instance rules (-5 <id>) that reuse the same accumulated ETypes.
+    All on ONE line.
 
     Returns the number of rules written.
     """
     from src.utils import SchemaMatcher
+    from collections import OrderedDict
 
     sorted_edges = sorted(list(g_hetero.edge_types))
     edge_map = {et: i for i, et in enumerate(sorted_edges)}
 
+    # Group rules by path pattern: {metapath_str: [instance_ids]}
+    # instance_id=-1 means variable rule
+    grouped = OrderedDict()
+    for metapath_str, instance_id in rules:
+        if metapath_str not in grouped:
+            grouped[metapath_str] = {"var": False, "instances": []}
+        if instance_id == -1:
+            grouped[metapath_str]["var"] = True
+        else:
+            grouped[metapath_str]["instances"].append(instance_id)
+
     all_parts = []
     n_rules = 0
 
-    for metapath_str, instance_id in rules:
+    for metapath_str, group in grouped.items():
         path_list = [s.strip() for s in metapath_str.split(',')]
-        parts = []
+        if len(path_list) < 2:
+            continue  # skip 1-hop (can't build path setup)
 
         try:
-            for i, rel_str in enumerate(path_list):
-                direction = "-2"
+            eids = []
+            for rel_str in path_list:
                 matched_edge = SchemaMatcher.match(rel_str, g_hetero)
-                eid = edge_map[matched_edge]
-                parts.append(direction)
-                if i == len(path_list) - 1:
-                    if instance_id == -1:
-                        parts.append("-1")
-                    else:
-                        parts.extend(["-5", str(instance_id)])
-                parts.append(str(eid))
-            for _ in path_list:
-                parts.append("-4")
-            all_parts.extend(parts)
-            n_rules += 1
+                eids.append(edge_map[matched_edge])
         except (KeyError, RuntimeError) as e:
-            print(f"[stage] skipping rule {metapath_str} (instance={instance_id}): {e}")
+            print(f"[stage] skipping path {metapath_str}: {e}")
             continue
+
+        # Original paper format:
+        #   <setup edges> -1 <dir> <last_edge> -5 <inst1> -5 <inst2> ... -4 -4
+        #
+        # The -1 (variable) ALWAYS fires first — it pushes the last edge
+        # into ETypes so that NTypes.size() == len(path). Then -5 instances
+        # chain on the same accumulated ETypes.
+        parts = []
+
+        # Setup: first N-1 edges
+        for eid in eids[:-1]:
+            parts.append("-2")
+            parts.append(str(eid))
+
+        # Variable trigger with last edge (always needed to build full ETypes)
+        parts.append("-1")
+        parts.append("-2")
+        parts.append(str(eids[-1]))
+        if group["var"]:
+            n_rules += 1
+
+        # Instance rules chain on same ETypes
+        for inst_id in group["instances"]:
+            parts.append("-5")
+            parts.append(str(inst_id))
+            n_rules += 1
+
+        # Pop stack (one per hop)
+        for _ in path_list:
+            parts.append("-4")
+
+        all_parts.extend(parts)
 
     rule_content = " ".join(all_parts) + "\n"
 
