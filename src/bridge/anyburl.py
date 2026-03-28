@@ -81,14 +81,14 @@ def _is_instance(token: str) -> bool:
     return bool(token) and token[0].islower() and re.search(r'_\d+$', token) is not None
 
 
-def parse_rules(filepath: str, min_conf: float) -> List[Tuple[float, str, int]]:
+def parse_rules(filepath: str, min_conf: float) -> List[Tuple[float, str, int, str]]:
     """
-    Parse an AnyBURL rule file.  Returns ``(conf, path_string, instance_id)`` tuples.
+    Parse an AnyBURL rule file.  Returns ``(conf, path_string, instance_id,
+    instance_node_type)`` tuples.
 
-    ``path_string`` is a comma-separated chain of relation names.
-    ``instance_id`` is ``-1`` for variable rules, or the grounded integer ID at
-    the tail for instance-anchored rules.  Skips head-anchored rules (first body
-    argument is grounded — no free query variable to start from).
+    ``instance_id`` is ``-1`` for variable rules, or the grounded integer ID.
+    ``instance_node_type`` is the type prefix of the grounded token (e.g.
+    ``'paper'`` from ``paper_10391``), or ``''`` for variable rules.
     """
     results = []
     with open(filepath, encoding="utf-8", errors="replace") as fh:
@@ -114,6 +114,7 @@ def parse_rules(filepath: str, min_conf: float) -> List[Tuple[float, str, int]]:
             relations:   List[str] = []
             current_var: Optional[str] = None
             instance_id: int = -1
+            instance_ntype: str = ""
 
             ok = True
             for i, atom in enumerate(atoms):
@@ -136,12 +137,14 @@ def parse_rules(filepath: str, min_conf: float) -> List[Tuple[float, str, int]]:
                     relations.append(rel)
                     if v2_inst:
                         instance_id = int(v2.rsplit("_", 1)[-1])
+                        instance_ntype = v2.rsplit("_", 1)[0]
                         break
                     current_var = v2
                 elif current_var == v2:
                     relations.append(f"rev_{rel}")
                     if v1_inst:
                         instance_id = int(v1.rsplit("_", 1)[-1])
+                        instance_ntype = v1.rsplit("_", 1)[0]
                         break
                     current_var = v1
                 else:
@@ -149,7 +152,7 @@ def parse_rules(filepath: str, min_conf: float) -> List[Tuple[float, str, int]]:
                     break
 
             if ok and relations:
-                results.append((conf, ",".join(relations), instance_id))
+                results.append((conf, ",".join(relations), instance_id, instance_ntype))
 
     return results
 
@@ -256,8 +259,8 @@ def load_validated_metapaths(
 
     # 2. Confidence filter + normalize relation names
     filtered = [
-        (conf, normalize_path(path, schema, canonical), iid)
-        for conf, path, iid in raw
+        (conf, normalize_path(path, schema, canonical), iid, ntype)
+        for conf, path, iid, ntype in raw
         if conf >= min_conf
     ]
 
@@ -321,13 +324,13 @@ def load_validated_rules(
     min_conf:    float = 0.1,
     max_n:       int   = 500,
     max_hops:    int   = 4,
-) -> Tuple[List[Tuple[str, int]], Dict[str, Any]]:
+) -> Tuple[List[Tuple[str, int, str]], Dict[str, Any]]:
     """
     Load ALL validated rules (variable + instance) for the C++ binary.
 
-    Unlike ``load_validated_metapaths`` which deduplicates to unique path patterns,
-    this function preserves each instance rule as a separate entry — matching
-    the original paper's protocol where each rule is scored independently.
+    Returns ``(rules, stats)`` where each rule is ``(metapath_str, instance_id,
+    instance_node_type)``. ``instance_node_type`` is needed to compute global
+    node ID offsets for the C++ binary.
 
     Returns:
         ``(rules, stats)`` where ``rules`` is a list of ``(metapath_str, instance_id)``
@@ -340,8 +343,8 @@ def load_validated_rules(
 
     # Confidence filter + normalize
     filtered = [
-        (conf, normalize_path(path, schema, canonical), iid)
-        for conf, path, iid in raw
+        (conf, normalize_path(path, schema, canonical), iid, ntype)
+        for conf, path, iid, ntype in raw
         if conf >= min_conf
     ]
 
@@ -353,7 +356,7 @@ def load_validated_rules(
     seen: Set[str] = set()
     fail_schema = fail_trim = fail_symmetry = fail_hops = 0
 
-    for conf, path, iid in filtered:
+    for conf, path, iid, inst_ntype in filtered:
         # Mirror to make symmetric (only for variable rules — instance rules
         # already have the C++ binary handle directionality)
         if iid == -1:
@@ -385,7 +388,7 @@ def load_validated_rules(
             sig = f"var:{validated}"
             if sig not in seen:
                 seen.add(sig)
-                rules.append((validated, -1))
+                rules.append((validated, -1, ""))
         else:
             # Instance rules: anchored at a fixed node.
             # Must start from target type.
@@ -423,7 +426,7 @@ def load_validated_rules(
             sig = f"inst:{validated}:{iid}"
             if sig not in seen:
                 seen.add(sig)
-                rules.append((validated, iid))
+                rules.append((validated, iid, inst_ntype))
 
         if len(rules) >= max_n:
             break
@@ -432,8 +435,8 @@ def load_validated_rules(
         "total_parsed":      len(raw),
         "after_conf_filter": len(filtered),
         "total_rules":       len(rules),
-        "variable_rules":    sum(1 for _, iid in rules if iid == -1),
-        "instance_rules":    sum(1 for _, iid in rules if iid != -1),
+        "variable_rules":    sum(1 for _, iid, _ in rules if iid == -1),
+        "instance_rules":    sum(1 for _, iid, _ in rules if iid != -1),
         "fail_schema":       fail_schema,
         "fail_trim":         fail_trim,
         "fail_symmetry":     fail_symmetry,

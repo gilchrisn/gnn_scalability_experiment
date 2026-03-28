@@ -117,7 +117,7 @@ def compile_rule_for_cpp(
 
 
 def compile_all_rules_for_cpp(
-    rules: list,  # List[Tuple[str, int]]  — (metapath_str, instance_id)
+    rules: list,  # List[Tuple[str, int, str]]  — (metapath_str, instance_id, instance_node_type)
     g_hetero,
     data_dir: str,
     folder_name: str,
@@ -141,16 +141,25 @@ def compile_all_rules_for_cpp(
     sorted_edges = sorted(list(g_hetero.edge_types))
     edge_map = {et: i for i, et in enumerate(sorted_edges)}
 
-    # Group rules by path pattern: {metapath_str: [instance_ids]}
-    # instance_id=-1 means variable rule
+    # Compute global node ID offsets per type (alphabetical order)
+    sorted_ntypes = sorted(g_hetero.node_types)
+    ntype_offset = {}
+    offset = 0
+    for nt in sorted_ntypes:
+        ntype_offset[nt] = offset
+        offset += g_hetero[nt].num_nodes
+
+    # Group rules by path pattern: {metapath_str: {"var": bool, "instances": [(global_id)]}}
     grouped = OrderedDict()
-    for metapath_str, instance_id in rules:
+    for metapath_str, instance_id, inst_ntype in rules:
         if metapath_str not in grouped:
             grouped[metapath_str] = {"var": False, "instances": []}
         if instance_id == -1:
             grouped[metapath_str]["var"] = True
         else:
-            grouped[metapath_str]["instances"].append(instance_id)
+            # Convert type-local instance ID to global ID
+            global_id = instance_id + ntype_offset.get(inst_ntype, 0)
+            grouped[metapath_str]["instances"].append(global_id)
 
     all_parts = []
     n_rules = 0

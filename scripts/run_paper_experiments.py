@@ -488,7 +488,7 @@ def main() -> None:
         # Extract unique metapath patterns for per-metapath reporting
         seen = set()
         metapaths = []
-        for mp, _ in all_rules:
+        for mp, _, _ in all_rules:
             if mp not in seen:
                 seen.add(mp)
                 metapaths.append(mp)
@@ -580,7 +580,7 @@ def main() -> None:
         # Config: one entry per metapath (variable only)
         if all_rules is not None:
             run_list = [(mp, iid, f"{mp} (inst={iid})" if iid != -1 else mp)
-                        for mp, iid in all_rules]
+                        for mp, iid, _ in all_rules]
         else:
             run_list = [(mp, -1, mp) for mp in metapaths]
 
