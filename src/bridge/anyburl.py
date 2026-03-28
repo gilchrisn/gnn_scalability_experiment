@@ -387,13 +387,17 @@ def load_validated_rules(
                 seen.add(sig)
                 rules.append((validated, -1))
         else:
-            # Instance rules: just check schema contiguity
+            # Instance rules: check schema contiguity
+            # Must have >=2 hops — 1-hop instance rules produce empty ETypes
+            # in the C++ parser, causing rules=0.
+            if len(rels) < 2:
+                fail_hops += 1
+                continue
             validated = validate_and_trim(mirrored, schema, target_node)
             if validated is None:
-                # Try without trim for instance rules
                 fail_trim += 1
                 continue
-            if len(validated.split(",")) > max_hops:
+            if len(validated.split(",")) > max_hops or len(validated.split(",")) < 2:
                 fail_hops += 1
                 continue
             sig = f"inst:{validated}:{iid}"
