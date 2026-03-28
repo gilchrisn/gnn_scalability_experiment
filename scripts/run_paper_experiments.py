@@ -382,6 +382,8 @@ def main() -> None:
                         help="Skip Figure 5 & 6 sweeps. Much faster; produces Table IV + Fig 4 only.")
     parser.add_argument("--force-remine",  action="store_true",
                         help="Re-run AnyBURL even if cached rules exist.")
+    parser.add_argument("--force-mine",    action="store_true",
+                        help="Use AnyBURL mining even if config has suggested_paths.")
     parser.add_argument("--mining-timeout", type=int, default=10,
                         help="AnyBURL snapshot timeout in seconds (default 10 — matches paper).")
     parser.add_argument("--timeout",           type=int,   default=600,
@@ -424,7 +426,8 @@ def main() -> None:
     log.info("[2/4] Loading + validating metapaths...")
 
     # Prefer pre-configured metapaths from config (curated, known to work)
-    if cfg.suggested_paths:
+    # --force-mine overrides this for HGB datasets that need mining
+    if cfg.suggested_paths and not args.force_mine:
         metapaths = list(cfg.suggested_paths)
         log.info("      Using %d pre-configured metapaths from config.", len(metapaths))
         for mp in metapaths:
