@@ -236,8 +236,6 @@ def _run_hg_stats(
     })
     log.debug("  table3 | edges=%d  peers=%d  density=%.6f  mat=%.2fs",
               n_edges, n_peers, density, mat_time)
-    log.debug("  table3 | avg_edges=%.1f  peer_size=%.1f  density=%.6f",
-              avg_edges, peer_size, density)
 
 
 def _run_main(
