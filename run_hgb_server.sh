@@ -14,7 +14,6 @@ if [ -d "$HOME/jdk-25" ]; then
 fi
 
 TIMEOUT=1800
-MAX_METAPATHS=500
 EPOCHS=50
 K=8
 MAX_ADJ_MB=5000
@@ -37,18 +36,22 @@ mkdir -p results
 
 echo "==================================================" | tee -a "$LOG"
 echo "  HGB Server Run — $TIMESTAMP"                      | tee -a "$LOG"
-echo "  max_metapaths=${MAX_METAPATHS}  timeout=${TIMEOUT}s" | tee -a "$LOG"
+echo "  timeout=${TIMEOUT}s"                                 | tee -a "$LOG"
 echo "  epochs=${EPOCHS}  k=${K}"                          | tee -a "$LOG"
 echo "==================================================" | tee -a "$LOG"
 
+# Per-dataset metapath counts (matching original paper)
+declare -A MP_COUNTS=( [HGB_ACM]=20 [HGB_DBLP]=48 [HGB_IMDB]=679 )
+
 for DS in HGB_ACM HGB_DBLP HGB_IMDB; do
+    MP=${MP_COUNTS[$DS]}
     echo "" | tee -a "$LOG"
-    echo "=== $DS ===" | tee -a "$LOG"
+    echo "=== $DS (max $MP metapaths) ===" | tee -a "$LOG"
 
     # Part 1: Base paper with MINING (--force-mine overrides config paths)
     echo "--- Part 1: Base Paper (mining) ---" | tee -a "$LOG"
     python scripts/run_paper_experiments.py "$DS" \
-        --max-metapaths "$MAX_METAPATHS" \
+        --max-metapaths "$MP" \
         --mining-timeout 10 \
         --timeout "$TIMEOUT" \
         --force-mine \
