@@ -48,8 +48,10 @@ from src.bridge import (
     BoolAPConverter,
     BoolAPRunner,
 )
+from src.bridge.anyburl import load_validated_rules
 from scripts.bench_utils import (
     compile_rule_for_cpp,
+    compile_all_rules_for_cpp,
     generate_qnodes,
     setup_global_res_dirs,
     run_cpp,
@@ -421,9 +423,13 @@ def main() -> None:
     log.info("      edge types  : %s", [et[1] for et in g_hetero.edge_types])
     log.info("      target node : %s", cfg.target_node)
 
-    # ---- Load metapaths (config first, then mine if needed) -----------------
+    # ---- Load metapaths / rules ---------------------------------------------
     log.info("")
     log.info("[2/4] Loading + validating metapaths...")
+
+    # all_rules: List[(metapath_str, instance_id)] — ALL rules for the global file
+    # metapaths: List[str] — unique path patterns for per-metapath iteration
+    all_rules = None  # None means "use per-metapath mode (config paths)"
 
     # Prefer pre-configured metapaths from config (curated, known to work)
     # --force-mine overrides this for HGB datasets that need mining
@@ -433,7 +439,7 @@ def main() -> None:
         for mp in metapaths:
             log.info("        %s", mp)
     else:
-        # Fallback: mine via AnyBURL
+        # Mine via AnyBURL — returns ALL rules (variable + instance)
         work_dir   = os.path.join(config.DATA_DIR, f"mining_{dataset}")
         anyburl    = AnyBURLRunner(work_dir, config.ANYBURL_JAR)
         anyburl.export_for_mining(g_hetero)
@@ -445,32 +451,36 @@ def main() -> None:
         else:
             log.info("      Using cached rules (pass --force-remine to re-run).")
 
-        log.info("      Running validation pipeline (parse → normalize → mirror → validate)...")
-        metapaths, stats = load_validated_metapaths(
+        log.info("      Loading ALL rules (variable + instance)...")
+        all_rules, stats = load_validated_rules(
             rules_file=rules_file,
             g_hetero=g_hetero,
             target_node=cfg.target_node,
             min_conf=args.min_conf,
             max_n=args.max_metapaths,
+            max_hops=4,
         )
-        # Filter out long metapaths (>4 hops)
-        max_hops = 4
-        before = len(metapaths)
-        metapaths = [mp for mp in metapaths if len(mp.split(",")) <= max_hops]
-        if len(metapaths) < before:
-            log.info("      Filtered %d metapaths with >%d hops (%d remaining)",
-                     before - len(metapaths), max_hops, len(metapaths))
+
+        # Extract unique metapath patterns for per-metapath reporting
+        seen = set()
+        metapaths = []
+        for mp, _ in all_rules:
+            if mp not in seen:
+                seen.add(mp)
+                metapaths.append(mp)
 
         log.info("")
-        log.info("  Metapath validation summary:")
+        log.info("  Rule validation summary:")
         log.info("    total parsed lines   : %d", stats["total_parsed"])
         log.info("    after conf >= %-5s  : %d", args.min_conf, stats["after_conf_filter"])
-        log.info("    unique raw paths     : %d", stats["unique_raw_paths"])
-        log.info("    valid mirrored paths : %d", stats["valid_mirrored"])
+        log.info("    total rules          : %d", stats["total_rules"])
+        log.info("    variable rules       : %d", stats["variable_rules"])
+        log.info("    instance rules       : %d", stats["instance_rules"])
+        log.info("    unique path patterns : %d", len(metapaths))
         log.info("    failed (schema miss) : %d", stats["fail_schema"])
         log.info("    failed (no target)   : %d", stats["fail_trim"])
         log.info("    failed (asymmetric)  : %d", stats["fail_symmetry"])
-        log.info("    returned (capped)    : %d  (cap=%d)", stats["returned"], args.max_metapaths)
+        log.info("    failed (>4 hops)     : %d", stats["fail_hops"])
     log.info("")
 
     if not metapaths:
@@ -484,6 +494,12 @@ def main() -> None:
     PyGToCppAdapter(data_dir).convert(g_hetero)
     generate_qnodes(data_dir, folder, target_node_type=cfg.target_node, g_hetero=g_hetero)
     setup_global_res_dirs(folder, project_root)
+
+    # If we have all_rules from mining, compile them ALL into the global rules file.
+    # The C++ binary processes all rules on one line for centrality tasks.
+    if all_rules is not None:
+        n_compiled = compile_all_rules_for_cpp(all_rules, g_hetero, data_dir, folder)
+        log.info("      Compiled %d rules into global rules file.", n_compiled)
 
     runner = GraphPrepRunner(
         binary=config.CPP_EXECUTABLE,
@@ -551,7 +567,10 @@ def main() -> None:
             log.debug("         full metapath: %s", metapath)
 
             try:
-                compile_rule_for_cpp(metapath, g_hetero, data_dir, folder)
+                # Only compile per-metapath if using config paths (not mining).
+                # When mining, all rules are already in the global file.
+                if all_rules is None:
+                    compile_rule_for_cpp(metapath, g_hetero, data_dir, folder)
 
                 if need_kmv:
                     if metapath not in done_t3:

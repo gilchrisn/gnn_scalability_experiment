@@ -116,6 +116,68 @@ def compile_rule_for_cpp(
     print(f"[stage] rule: {rule_content.strip()}  (instance_id={instance_id})")
 
 
+def compile_all_rules_for_cpp(
+    rules: list,  # List[Tuple[str, int]]  — (metapath_str, instance_id)
+    g_hetero,
+    data_dir: str,
+    folder_name: str,
+) -> int:
+    """
+    Compile ALL rules (variable + instance) into a single global rules file.
+
+    The C++ binary reads one line from cod-rules_<folder>.limit per qnode.
+    For centrality tasks (ExactD, GloD, etc.), it reads from
+    <folder>-cod-global-rules.dat which has ALL rules on ONE line,
+    separated by -4 (pop) opcodes.
+
+    Returns the number of rules written.
+    """
+    from src.utils import SchemaMatcher
+
+    sorted_edges = sorted(list(g_hetero.edge_types))
+    edge_map = {et: i for i, et in enumerate(sorted_edges)}
+
+    all_parts = []
+    n_rules = 0
+
+    for metapath_str, instance_id in rules:
+        path_list = [s.strip() for s in metapath_str.split(',')]
+        parts = []
+
+        try:
+            for i, rel_str in enumerate(path_list):
+                direction = "-2"
+                matched_edge = SchemaMatcher.match(rel_str, g_hetero)
+                eid = edge_map[matched_edge]
+                parts.append(direction)
+                if i == len(path_list) - 1:
+                    if instance_id == -1:
+                        parts.append("-1")
+                    else:
+                        parts.extend(["-5", str(instance_id)])
+                parts.append(str(eid))
+            for _ in path_list:
+                parts.append("-4")
+            all_parts.extend(parts)
+            n_rules += 1
+        except (KeyError, RuntimeError) as e:
+            print(f"[stage] skipping rule {metapath_str} (instance={instance_id}): {e}")
+            continue
+
+    rule_content = " ".join(all_parts) + "\n"
+
+    file_limit = os.path.join(data_dir, f"cod-rules_{folder_name}.limit")
+    file_dat   = os.path.join(data_dir, f"{folder_name}-cod-global-rules.dat")
+
+    with open(file_limit, "w") as f:
+        f.write(rule_content)
+    with open(file_dat, "w") as f:
+        f.write(rule_content)
+
+    print(f"[stage] compiled {n_rules} rules into {file_dat}")
+    return n_rules
+
+
 def setup_global_res_dirs(folder_name: str, project_root: str):
     """
     Creates the rigid directory structure required by C++ exact-baseline tracking.

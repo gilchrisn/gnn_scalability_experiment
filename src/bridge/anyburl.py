@@ -314,6 +314,110 @@ def load_validated_metapaths(
     return metapaths, stats
 
 
+def load_validated_rules(
+    rules_file:  str,
+    g_hetero:    HeteroData,
+    target_node: str,
+    min_conf:    float = 0.1,
+    max_n:       int   = 500,
+    max_hops:    int   = 4,
+) -> Tuple[List[Tuple[str, int]], Dict[str, Any]]:
+    """
+    Load ALL validated rules (variable + instance) for the C++ binary.
+
+    Unlike ``load_validated_metapaths`` which deduplicates to unique path patterns,
+    this function preserves each instance rule as a separate entry — matching
+    the original paper's protocol where each rule is scored independently.
+
+    Returns:
+        ``(rules, stats)`` where ``rules`` is a list of ``(metapath_str, instance_id)``
+        tuples (instance_id=-1 for variable rules).
+    """
+    schema    = build_schema(g_hetero)
+    canonical = build_canonical(g_hetero)
+
+    raw = parse_rules(rules_file, min_conf=0.0)
+
+    # Confidence filter + normalize
+    filtered = [
+        (conf, normalize_path(path, schema, canonical), iid)
+        for conf, path, iid in raw
+        if conf >= min_conf
+    ]
+
+    # Sort by confidence (highest first)
+    filtered.sort(key=lambda x: -x[0])
+
+    # Validate each rule (mirror variable rules, keep instance anchors)
+    rules: List[Tuple[str, int]] = []
+    seen: Set[str] = set()
+    fail_schema = fail_trim = fail_symmetry = fail_hops = 0
+
+    for conf, path, iid in filtered:
+        # Mirror to make symmetric (only for variable rules — instance rules
+        # already have the C++ binary handle directionality)
+        if iid == -1:
+            mirrored = normalize_path(mirror(path), schema, canonical)
+        else:
+            mirrored = path  # instance rules use the raw (un-mirrored) path
+
+        rels = mirrored.split(",")
+
+        if any(schema.get(r) is None for r in rels):
+            fail_schema += 1
+            continue
+
+        # Variable rules: validate symmetry + trim to target
+        if iid == -1:
+            validated = validate_and_trim(mirrored, schema, target_node)
+            if validated is None:
+                rels_resolved = [(r, schema[r][0], schema[r][1]) for r in rels if schema.get(r)]
+                idx = next((i for i, (_, s, _) in enumerate(rels_resolved) if s == target_node), None)
+                if idx is None:
+                    fail_trim += 1
+                else:
+                    fail_symmetry += 1
+                continue
+            # Hop filter
+            if len(validated.split(",")) > max_hops:
+                fail_hops += 1
+                continue
+            sig = f"var:{validated}"
+            if sig not in seen:
+                seen.add(sig)
+                rules.append((validated, -1))
+        else:
+            # Instance rules: just check schema contiguity
+            validated = validate_and_trim(mirrored, schema, target_node)
+            if validated is None:
+                # Try without trim for instance rules
+                fail_trim += 1
+                continue
+            if len(validated.split(",")) > max_hops:
+                fail_hops += 1
+                continue
+            sig = f"inst:{validated}:{iid}"
+            if sig not in seen:
+                seen.add(sig)
+                rules.append((validated, iid))
+
+        if len(rules) >= max_n:
+            break
+
+    stats = {
+        "total_parsed":      len(raw),
+        "after_conf_filter": len(filtered),
+        "total_rules":       len(rules),
+        "variable_rules":    sum(1 for _, iid in rules if iid == -1),
+        "instance_rules":    sum(1 for _, iid in rules if iid != -1),
+        "fail_schema":       fail_schema,
+        "fail_trim":         fail_trim,
+        "fail_symmetry":     fail_symmetry,
+        "fail_hops":         fail_hops,
+    }
+    return rules, stats
+
+
 class AnyBURLRunner(RuleMiner):
     """
     Interoperability layer for AnyBURL.
