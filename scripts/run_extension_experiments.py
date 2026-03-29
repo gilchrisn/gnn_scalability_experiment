@@ -436,6 +436,7 @@ def _run_one_metapath(
     epochs:      int,
     topr:        str,
     max_adj_mb:  Optional[float],
+    max_dirichlet_edges: int,
     timeout:     int,
     ext_w:       csv.DictWriter,
     log:         logging.Logger,
@@ -615,11 +616,12 @@ def _run_one_metapath(
                 log.info("      [mem] after exact infer: [RSS=%s]", _mem_mb())
                 f1_exact  = _f1(z_exact, snap_labels_d, snap_test)
                 # Compute dirichlet + layerwise BEFORE deleting g_exact
-                # Skip if edge count is large — dirichlet allocates O(E) tensors
-                # which can trigger Linux OOM-killer (SIGKILL, uncatchable)
+                # Dirichlet allocates O(E) tensors — can trigger Linux OOM-killer
+                # (SIGKILL, uncatchable). Use --max-dirichlet-edges to control.
                 n_exact_edges = g_exact.edge_index.size(1) if g_exact.edge_index is not None else 0
-                if n_exact_edges > 50_000_000:
-                    log.info("      Skipping dirichlet/layerwise (exact has %dM edges)", n_exact_edges // 1_000_000)
+                if max_dirichlet_edges and n_exact_edges > max_dirichlet_edges:
+                    log.info("      Skipping dirichlet/layerwise (exact has %dM edges, limit %dM)",
+                             n_exact_edges // 1_000_000, max_dirichlet_edges // 1_000_000)
                 else:
                     try:
                         dirichlet_exact = _dirichlet_energy(z_exact, g_exact.edge_index.to(infer_device), snap_n_target)
@@ -729,6 +731,7 @@ def _run_one_metapath(
             "depthwise_cka":    str(depthwise_vals) if depthwise_vals is not None else "",
             "speedup_kmv":      _fmt(speedup, 4),
         })
+        ext_fh.flush()  # flush after every snapshot so SIGKILL doesn't lose data
         # Free per-snapshot tensors
         del g_snap, g_kmv, z_kmv
         if z_exact is not None:
@@ -762,6 +765,10 @@ def main() -> None:
     parser.add_argument("--max-adj-mb",      type=float, default=50.0,
                         help="Skip metapaths whose EXACT adjacency file exceeds this size in MB. "
                              "Default: 50 (laptop-safe). Set 0 to disable (no limit, for servers).")
+    parser.add_argument("--max-dirichlet-edges", type=int, default=0,
+                        help="Skip dirichlet/layerwise on exact graphs with more edges than this. "
+                             "Prevents Linux OOM-killer (SIGKILL). 0 = no limit. "
+                             "Recommended: 50000000 for 16GB servers.")
     parser.add_argument("--timeout",         type=int,   default=1800,
                         help="Per-C++-call subprocess timeout in seconds (default 1800 = 30 min). "
                              "Metapaths that exceed this are marked FAILED and skipped on resume.")
@@ -893,6 +900,7 @@ def main() -> None:
                     runner=runner, engine=engine, cka=cka,
                     fractions=args.fractions, k=args.k, epochs=args.epochs,
                     topr=args.topr, max_adj_mb=args.max_adj_mb,
+                    max_dirichlet_edges=args.max_dirichlet_edges,
                     timeout=args.timeout, ext_w=ext_w, log=log,
                 )
                 ext_fh.flush()

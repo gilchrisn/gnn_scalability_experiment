@@ -79,13 +79,6 @@ python scripts/run_paper_experiments.py OGB_MAG \
     $BOOLAP_ARGS \
     2>&1 | tee -a "$LOG" || echo "  [WARN] OGB_MAG Part 1 failed" | tee -a "$LOG"
 
-# OAG_CS: config (2 metapaths)
-echo "--- OAG_CS (config, 2 metapaths) ---" | tee -a "$LOG"
-python scripts/run_paper_experiments.py OAG_CS \
-    --timeout "$TIMEOUT" \
-    $BOOLAP_ARGS \
-    2>&1 | tee -a "$LOG" || echo "  [WARN] OAG_CS Part 1 failed" | tee -a "$LOG"
-
 # ==========================================================
 # Part 2: Extension Experiments
 # ==========================================================
@@ -104,22 +97,15 @@ for DS in HGB_ACM HGB_DBLP HGB_IMDB; do
 done
 
 # OGB_MAG: 40% as full, 5 snapshots
+# --max-dirichlet-edges: skip dirichlet on large exact graphs to prevent SIGKILL
 echo "--- OGB_MAG (extension, 40% as full) ---" | tee -a "$LOG"
 python scripts/run_extension_experiments.py OGB_MAG \
     --fractions 0.08 0.16 0.24 0.32 0.40 \
     --epochs "$EPOCHS" --k "$K" --timeout "$TIMEOUT" \
-    --max-adj-mb "$MAX_ADJ_MB" --num-cpu-threads 2 \
+    --max-adj-mb "$MAX_ADJ_MB" --max-dirichlet-edges 50000000 \
+    --num-cpu-threads 2 \
     --cpu \
     2>&1 | tee -a "$LOG" || echo "  [WARN] OGB_MAG extension failed" | tee -a "$LOG"
-
-# OAG_CS: 20% as full, 5 snapshots
-echo "--- OAG_CS (extension, 20% as full) ---" | tee -a "$LOG"
-python scripts/run_extension_experiments.py OAG_CS \
-    --fractions 0.04 0.08 0.12 0.16 0.20 \
-    --epochs "$EPOCHS" --k "$K" --timeout "$TIMEOUT" \
-    --max-adj-mb "$MAX_ADJ_MB" --num-cpu-threads 2 \
-    --cpu \
-    2>&1 | tee -a "$LOG" || echo "  [WARN] OAG_CS extension failed" | tee -a "$LOG"
 
 echo "" | tee -a "$LOG"
 echo "==================================================" | tee -a "$LOG"
