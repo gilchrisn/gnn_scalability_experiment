@@ -438,6 +438,7 @@ def _run_one_metapath(
     max_adj_mb:  Optional[float],
     max_dirichlet_edges: int,
     timeout:     int,
+    ext_fh,
     ext_w:       csv.DictWriter,
     log:         logging.Logger,
 ) -> None:
@@ -731,7 +732,8 @@ def _run_one_metapath(
             "depthwise_cka":    str(depthwise_vals) if depthwise_vals is not None else "",
             "speedup_kmv":      _fmt(speedup, 4),
         })
-        ext_fh.flush()  # flush after every snapshot so SIGKILL doesn't lose data
+        # Flush after every snapshot so SIGKILL doesn't lose data
+        ext_fh.flush()
         # Free per-snapshot tensors
         del g_snap, g_kmv, z_kmv
         if z_exact is not None:
@@ -901,7 +903,7 @@ def main() -> None:
                     fractions=args.fractions, k=args.k, epochs=args.epochs,
                     topr=args.topr, max_adj_mb=args.max_adj_mb,
                     max_dirichlet_edges=args.max_dirichlet_edges,
-                    timeout=args.timeout, ext_w=ext_w, log=log,
+                    timeout=args.timeout, ext_fh=ext_fh, ext_w=ext_w, log=log,
                 )
                 ext_fh.flush()
             except SystemExit as exc:
