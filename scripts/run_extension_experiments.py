@@ -615,11 +615,17 @@ def _run_one_metapath(
                 log.info("      [mem] after exact infer: [RSS=%s]", _mem_mb())
                 f1_exact  = _f1(z_exact, snap_labels_d, snap_test)
                 # Compute dirichlet + layerwise BEFORE deleting g_exact
-                try:
-                    dirichlet_exact = _dirichlet_energy(z_exact, g_exact.edge_index.to(infer_device), snap_n_target)
-                    layers_exact = _infer_layerwise(sage_model, g_exact, in_dim, infer_device)
-                except (MemoryError, RuntimeError):
-                    log.warning("      Dirichlet/layerwise OOM on exact — skipping")
+                # Skip if edge count is large — dirichlet allocates O(E) tensors
+                # which can trigger Linux OOM-killer (SIGKILL, uncatchable)
+                n_exact_edges = g_exact.edge_index.size(1) if g_exact.edge_index is not None else 0
+                if n_exact_edges > 50_000_000:
+                    log.info("      Skipping dirichlet/layerwise (exact has %dM edges)", n_exact_edges // 1_000_000)
+                else:
+                    try:
+                        dirichlet_exact = _dirichlet_energy(z_exact, g_exact.edge_index.to(infer_device), snap_n_target)
+                        layers_exact = _infer_layerwise(sage_model, g_exact, in_dim, infer_device)
+                    except (MemoryError, RuntimeError):
+                        log.warning("      Dirichlet/layerwise OOM on exact — skipping")
                 del g_exact; gc.collect()
                 log.info("      [mem] after exact cleanup: [RSS=%s]", _mem_mb())
             except MemoryError as e:

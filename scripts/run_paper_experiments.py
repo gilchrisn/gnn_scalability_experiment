@@ -284,7 +284,20 @@ def _run_main(
         if "H" in task and gt.hf1_inclusive is None:
             log.debug("  table4 | %-6s  SKIPPED (no h-index ground truth)", task)
             continue
-        r = _call(runner, kind, task, folder, topr, k, beta)
+        try:
+            r = _call(runner, kind, task, folder, topr, k, beta)
+        except RuntimeError as e:
+            reason = "TIMEOUT" if "timed out" in str(e) else str(e)[:60]
+            log.warning("  table4 | %-6s  FAILED:%s", task, reason)
+            t4_w.writerow({
+                "dataset":    dataset,
+                "metapath":   metapath,
+                "method":     f"{task}:FAILED:{reason}",
+                "f1_or_acc":  "",
+                "avg_time_s": "",
+                "rule_count": "",
+            })
+            continue
         score = _score(r)
 
         t4_w.writerow({
