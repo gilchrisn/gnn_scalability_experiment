@@ -552,20 +552,41 @@ def _run_one_metapath(
     del g_train; import gc; gc.collect()
 
     in_dim = g_h0.x.size(1)
-    t0_train = time.perf_counter()
-    try:
-        sage_model = _train_sage(g_h0, in_dim, num_classes, epochs, train_device, log)
-    except RuntimeError as e:
-        if "CUDA" in str(e) and train_device.type == "cuda":
-            log.warning("    [Phase 1] GPU OOM — retrying training on CPU")
-            torch.cuda.empty_cache()
-            train_device = torch.device("cpu")
+
+    # Cache trained model to avoid retraining on reruns
+    cache_dir = os.path.join(data_dir, "model_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    mp_safe = metapath.replace(",", "_").replace("/", "_")
+    cache_path = os.path.join(cache_dir, f"sage_{mp_safe}_k{k}_e{epochs}.pt")
+
+    if os.path.exists(cache_path):
+        from src.models import get_model
+        sage_model = get_model("SAGE", in_dim, num_classes, config.HIDDEN_DIM)
+        sage_model.load_state_dict(torch.load(cache_path, weights_only=True))
+        sage_model.eval()
+        for p in sage_model.parameters():
+            p.requires_grad = False
+        t_train = 0.0
+        log.info("    [Phase 1] Loaded cached model from %s", cache_path)
+        del g_h0; gc.collect()
+    else:
+        t0_train = time.perf_counter()
+        try:
             sage_model = _train_sage(g_h0, in_dim, num_classes, epochs, train_device, log)
-        else:
-            raise
-    t_train = time.perf_counter() - t0_train
-    del g_h0; gc.collect()
-    sage_model = sage_model.to(infer_device)  # move to CPU for fair Phase 2 timing
+        except RuntimeError as e:
+            if "CUDA" in str(e) and train_device.type == "cuda":
+                log.warning("    [Phase 1] GPU OOM — retrying training on CPU")
+                torch.cuda.empty_cache()
+                train_device = torch.device("cpu")
+                sage_model = _train_sage(g_h0, in_dim, num_classes, epochs, train_device, log)
+            else:
+                raise
+        t_train = time.perf_counter() - t0_train
+        del g_h0; gc.collect()
+        torch.save(sage_model.state_dict(), cache_path)
+        log.info("    [Phase 1] Saved model to %s", cache_path)
+
+    sage_model = sage_model.to(infer_device)
     log.info("    [Phase 1] Done. Model frozen. (train=%.2fs, trained on %s)  [RSS=%s]",
              t_train, train_device, _mem_mb())
 
