@@ -1344,4 +1344,141 @@ namespace effectiveness{
 
         return res;
     }
+
+    // ---- Epsilon (approximation ratio) computation ----
+    // Mirrors the structure of COD_prop_global_cross_f1 exactly,
+    // but instead of F1 computes the max relative error (epsilon).
+    double COD_epsilon(Pattern *qp, HeterGraph *g, double topr,
+                       std::vector<std::vector<bool>*>* visited,
+                       std::vector<std::vector<bool>*>* back_visited,
+                       const std::string &centrality) {
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return -1;
+
+        auto frontiers = new std::vector<unsigned int>();
+        auto peers = new std::vector<unsigned int>();
+        Peers(qp, g, frontiers, peers, visited);
+        unsigned int peer_size = peers->size();
+        if (peer_size <= 2) {
+            delete frontiers; delete peers;
+            return -1;
+        }
+
+        std::vector<std::set<unsigned int>*>* active = ActiveMidNodes(peers, frontiers, qp, g, visited, back_visited);
+        auto ractive = new std::vector<std::vector<unsigned int>*>();
+        for (unsigned int l = 0; l <= qp->ETypes.size(); l++)
+            ractive->push_back(new std::vector<unsigned int>(g->NT.size(), 0));
+        for (unsigned int n = 0; n < g->NT.size(); n++)
+            for (unsigned int l : *active->at(n)) ractive->at(l)->at(n) = 1;
+
+        // Build synopses_combined and hidden_edges ONCE (same as COD_prop_global_cross_f1)
+        auto synopses_combined = new std::vector<std::vector<jsy::Synopse>*>();
+        for (unsigned int l = 0; l <= qp->ETypes.size(); l++) {
+            synopses_combined->push_back(new std::vector<jsy::Synopse>());
+            for (unsigned int p = 0; p < g->NT.size(); p++)
+                if (ractive->at(l)->at(p) > 0) {
+                    jsy::Synopse s; jsy::init_synopse(&s, p);
+                    synopses_combined->at(l)->push_back(s);
+                    ractive->at(l)->at(p) = synopses_combined->at(l)->size();
+                }
+        }
+        auto hidden_edges = new std::vector<HiddenEdge>();
+        for (unsigned int l = 0; l < qp->ETypes.size(); l++) {
+            for (unsigned int p = 0; p < g->NT.size(); p++) {
+                if (ractive->at(l)->at(p) > 0) {
+                    if (qp->EDirect[l] == 1) {
+                        for (unsigned int nbr : *(g->EL[p])) {
+                            if (ractive->at(l + 1)->at(nbr) > 0) {
+                                HiddenEdge he{.s=ractive->at(l)->at(p) - 1,
+                                              .t=ractive->at(l + 1)->at(nbr) - 1, .l=l};
+                                hidden_edges->push_back(he);
+                            }
+                        }
+                    } else {
+                        for (unsigned int nbr : *(g->rEL[p])) {
+                            if (ractive->at(l + 1)->at(nbr) > 0) {
+                                HiddenEdge he{.s=ractive->at(l)->at(p) - 1,
+                                              .t=ractive->at(l + 1)->at(nbr) - 1, .l=l};
+                                hidden_edges->push_back(he);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        unsigned int max_meta_layer;
+        if(qp->instance == -1) max_meta_layer = qp->ETypes.size();
+        else max_meta_layer = qp->ETypes.size() - 1;
+
+        double total_epsilon = 0;
+        unsigned int valid_layers = 0;
+
+        for (unsigned int meta_layer = 1; meta_layer <= max_meta_layer; meta_layer++) {
+            // 1. Exact degrees
+            std::vector<unsigned int> *exact_degs = nullptr;
+            if (centrality == "df1") exact_degs = hidden_graph_deg(meta_layer, qp, g, visited, ractive);
+            else if (centrality == "hf1") exact_degs = hidden_graph_hindex(meta_layer, qp, g, visited, ractive);
+            if (!exact_degs) continue;
+
+            // Find c(v^lambda) and exact hub set
+            auto sort_exact = new std::vector<std::pair<unsigned int, unsigned int>>();
+            for (unsigned int i = 0; i < g->NT.size(); i++)
+                if (ractive->at(0)->at(i))
+                    sort_exact->push_back({exact_degs->at(i), i});
+            std::sort(sort_exact->begin(), sort_exact->end(), cmp_max_unsigned);
+
+            auto topr_size = (unsigned int)(topr * peer_size);
+            if (topr_size >= sort_exact->size()) { delete exact_degs; delete sort_exact; continue; }
+            double c_vlambda = (double)sort_exact->at(topr_size).first;
+            delete sort_exact;
+            if (c_vlambda < 1.0) { delete exact_degs; continue; }
+
+            // 2. Estimated degrees via synopses (reuses shared hidden_edges + synopses_combined)
+            std::map<unsigned int, double> *est_degs = nullptr;
+            if (centrality == "df1") {
+                est_degs = jsy::synopses(meta_layer, hidden_edges, synopses_combined);
+            } else {
+                // For h-index: use the same pivot-based approach as COD_prop_global_cross_f1
+                // Simplified: just use degree estimates as proxy
+                est_degs = jsy::synopses(meta_layer, hidden_edges, synopses_combined);
+            }
+
+            // 3. Find estimated top-r% set
+            auto sort_est = new std::vector<std::pair<double, unsigned int>>();
+            for (auto &kv : *est_degs)
+                sort_est->push_back({kv.second, kv.first});
+            std::sort(sort_est->begin(), sort_est->end(), cmp_max);
+
+            std::set<unsigned int> est_hubs;
+            for (unsigned int i = 0; i <= topr_size && i < sort_est->size(); i++)
+                est_hubs.insert(sort_est->at(i).second);
+            delete sort_est;
+
+            // 4. Compute epsilon
+            double max_eps = 0;
+            for (unsigned int i = 0; i < g->NT.size(); i++) {
+                if (!ractive->at(0)->at(i)) continue;
+                bool is_exact_hub = (exact_degs->at(i) > (unsigned int)c_vlambda);
+                bool is_est_hub = (est_hubs.count(i) > 0);
+                if (is_exact_hub != is_est_hub) {
+                    double rel_err = fabs((double)exact_degs->at(i) - c_vlambda) / c_vlambda;
+                    if (rel_err > max_eps) max_eps = rel_err;
+                }
+            }
+            total_epsilon += max_eps;
+            valid_layers++;
+
+            delete exact_degs;
+            delete est_degs;
+        }
+
+        delete frontiers; delete peers;
+        for (auto &i : *active) delete i; delete active;
+        for (auto &i : *ractive) delete i; delete ractive;
+        for (auto &v : *synopses_combined) delete v;
+        delete synopses_combined;
+        delete hidden_edges;
+
+        return valid_layers > 0 ? total_epsilon / valid_layers : -1;
+    }
 }

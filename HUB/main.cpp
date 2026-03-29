@@ -14,6 +14,7 @@ using namespace std;
 // Forward declarations for existing preprocessing functions
 void run_materialization(const string& dataset, const string& rule_file, const string& output_file);
 void run_sketch_sampling(const string& dataset, const string& rule_file, const string& output_file);
+void Effective_epsilon(const string& dataset, const string& topr);
 
 // // Helper to create directories (Linux/Mac compatible)
 // void ensure_directory(const string& path) {
@@ -167,6 +168,15 @@ int main(int argc, char* argv[]) {
                 if (argc > 5) K = std::stoul(argv[5]);
                 Effective_prop_opt_personalized_cross(dataset, topr, stod(beta), "hp");
             }
+            // --- D2. Epsilon (approximation ratio) ---
+            else if (task == "Epsilon") {
+                // Computes epsilon for degree and h-index centrality
+                // Usage: Epsilon <dataset> <topr> <K> [SEED]
+                if (argc > 5) K = std::stoul(argv[5]);
+                if (argc > 6) SEED = std::stoul(argv[6]);
+                Effective_epsilon(dataset, topr);
+            }
+
             // --- D. Utility & Stats ---
             else if (task == "mpcount") { 
                 // Counts meta-paths in the rule file (1 = limit file, 0 = regular dat)

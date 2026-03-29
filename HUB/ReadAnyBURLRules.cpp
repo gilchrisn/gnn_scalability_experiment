@@ -1165,6 +1165,95 @@ void Effective_hg_global_f1(const std::string &choice, double topr, const std::s
     std::cout<<"rule_count:"<<rule_count<<std::endl;
 }
 
+void Effective_epsilon(const std::string &choice, const std::string &topr){
+    HeterGraph g(choice);
+
+    std::string rules_path = (choice + "/cod-rules_"+choice+".limit");
+    std::ifstream rules_in;
+    rules_in.open(rules_path);
+    std::string rules_line;
+    getline(rules_in, rules_line);
+    rules_in.close();
+
+    auto visited = new std::vector<std::vector<bool>*>();
+    auto back_visited = new std::vector<std::vector<bool>*>();
+    auto qp = new Pattern();
+
+    int state = -1;
+    std::string::size_type temp_pos;
+    int size = rules_line.size();
+
+    unsigned int rule_count = 0;
+
+    // For each centrality: degree and h-index
+    for (const auto &centrality : {"df1", "hf1"}) {
+        double total_eps = 0;
+        unsigned int n_rules = 0;
+
+        // Parse rule line (same parser as other functions)
+        qp->clear();
+        for (auto &it : *visited) delete it;
+        for (auto &it : *back_visited) delete it;
+        visited->clear();
+        back_visited->clear();
+        state = -1;
+
+        for(unsigned int i = 0; i < (unsigned int)size; i++) {
+            temp_pos = rules_line.find(' ', i);
+            if (temp_pos < (unsigned int)size) {
+                int sub = stoi(rules_line.substr(i, temp_pos - i));
+
+                if (sub == -1) state = 0;
+                else if (sub == -2) qp->EDirect.push_back(1);
+                else if (sub == -3) qp->EDirect.push_back(-1);
+                else if (sub == -4) {
+                    qp->EDirect.pop_back();
+                    qp->ETypes.pop_back();
+                    qp->NTypes.pop_back();
+                } else if (sub == -5) state = 1;
+                else {
+                    if (state == 1) {
+                        qp->instance = sub;
+                        while(visited->size() < qp->ETypes.size()+1){
+                            visited->push_back(new std::vector<bool>(g.NT.size(), false));
+                            back_visited->push_back(new std::vector<bool>(g.NT.size(), false));
+                        }
+                        double eps = effectiveness::COD_epsilon(qp, &g, std::stod(topr), visited, back_visited, centrality);
+                        if (eps >= 0) { total_eps += eps; n_rules++; }
+                        qp->instance = -1;
+                        state = -1;
+                    } else if (state == 0) {
+                        qp->ETypes.push_back(sub);
+                        qp->NTypes.push_back(-1);
+                        while(visited->size() < qp->ETypes.size()+1){
+                            visited->push_back(new std::vector<bool>(g.NT.size(), false));
+                            back_visited->push_back(new std::vector<bool>(g.NT.size(), false));
+                        }
+                        double eps = effectiveness::COD_epsilon(qp, &g, std::stod(topr), visited, back_visited, centrality);
+                        if (eps >= 0) { total_eps += eps; n_rules++; }
+                        state = -1;
+                    } else {
+                        qp->ETypes.push_back(sub);
+                        qp->NTypes.push_back(-1);
+                    }
+                }
+                i = temp_pos;
+            }
+        }
+        qp->clear();
+
+        double avg_eps = n_rules > 0 ? total_eps / n_rules : -1;
+        std::cout << "EPSILON_" << centrality << ":" << avg_eps << std::endl;
+        std::cout << "EPSILON_" << centrality << "_rules:" << n_rules << std::endl;
+    }
+
+    for (auto &it : *visited) delete it;
+    for (auto &it : *back_visited) delete it;
+    delete visited;
+    delete back_visited;
+    delete qp;
+}
+
 void Effective_hg_stats(const std::string &choice){
     HeterGraph g(choice);
     std::string qnodes_path = (choice + "/qnodes_"+choice+".dat");
