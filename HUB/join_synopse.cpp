@@ -21,6 +21,10 @@
 #include "hidden_edge.cpp"
 
 namespace jsy {  //join-synopses
+    // Full 32-bit hash range. RAND_MAX is only 32767 on 32-bit MinGW,
+    // which makes KMV estimates K-independent (hash space too coarse).
+    static constexpr unsigned int HASH_MAX = std::numeric_limits<unsigned int>::max();
+
     struct Synopse {
         std::vector<unsigned int> minks;
         std::vector<unsigned int> sizes;
@@ -281,9 +285,9 @@ namespace jsy {  //join-synopses
 
 
         std::mt19937 generator(SEED);
-        // Use full 32-bit range (not RAND_MAX which is only 32767 on 32-bit MinGW)
-        static constexpr unsigned int GNN_HASH_MAX = std::numeric_limits<unsigned int>::max();
-        std::uniform_int_distribution<std::mt19937::result_type> distribute(1, GNN_HASH_MAX);
+        // gnn_synopses needs full 32-bit range to avoid collision storm
+        // when number of nodes > RAND_MAX (32767 on 32-bit MinGW)
+        std::uniform_int_distribution<std::mt19937::result_type> distribute(1, HASH_MAX);
 
         auto rand2ps = new std::vector<std::unordered_map<unsigned int, unsigned int>*>();
         for(unsigned int l=0;l<L;l++) rand2ps->push_back(new std::unordered_map<unsigned int, unsigned int>());
