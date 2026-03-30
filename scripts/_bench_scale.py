@@ -97,6 +97,17 @@ bin_path = config.CPP_EXECUTABLE.replace('\\', '/')
 
 TIMEOUT = 600  # 10 min per command
 
+import csv
+csv_path = os.path.join('results', 'OGB_MAG', 'bench_scale.csv')
+os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+csv_fh = open(csv_path, 'w', newline='')
+csv_w = csv.DictWriter(csv_fh, fieldnames=[
+    'fraction', 'papers', 'total_nodes', 'edges',
+    'exactd_s', 'exactd_plus_s', 'glod_k8_s', 'glod_k32_s',
+    'materialize_s', 'materialize_mb', 'sketch_k8_s', 'sketch_k8_mb',
+])
+csv_w.writeheader()
+
 for frac in [0.2, 0.4, 0.6, 1.0]:
     p(f"\n{'='*60}")
     p(f"  Fraction: {int(frac*100)}%")
@@ -170,6 +181,25 @@ for frac in [0.2, 0.4, 0.6, 1.0]:
     except RuntimeError:
         p(f"  sketch k=8:  TIMEOUT")
 
+    # Write CSV row
+    row = {
+        'fraction': frac,
+        'papers': g_sub['paper'].num_nodes if frac < 1.0 else g['paper'].num_nodes,
+        'total_nodes': sum(g_sub[nt].num_nodes for nt in g_sub.node_types) if frac < 1.0 else sum(g[nt].num_nodes for nt in g.node_types),
+        'edges': sum(g_sub[et].edge_index.size(1) for et in g_sub.edge_types) if frac < 1.0 else sum(g[et].edge_index.size(1) for et in g.edge_types),
+        'exactd_s': t_exactd if t_exactd and t_exactd > 0 else '',
+        'exactd_plus_s': t_exactd_plus if t_exactd_plus and t_exactd_plus > 0 else '',
+        'glod_k8_s': t_glo8 if t_glo8 and t_glo8 > 0 else '',
+        'glod_k32_s': t_glo32 if t_glo32 and t_glo32 > 0 else '',
+        'materialize_s': t_mat if t_mat and t_mat > 0 else '',
+        'materialize_mb': mb if t_mat and t_mat > 0 else '',
+        'sketch_k8_s': t_sk8 if 't_sk8' in dir() and t_sk8 and t_sk8 > 0 else '',
+        'sketch_k8_mb': sk_mb if 't_sk8' in dir() and t_sk8 and t_sk8 > 0 else '',
+    }
+    csv_w.writerow(row)
+    csv_fh.flush()
     p("")
 
+csv_fh.close()
+p(f"CSV saved: {csv_path}")
 p("Done.")
