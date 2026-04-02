@@ -189,8 +189,9 @@ def plot_figure6():
 # FIGURE 4: Scatter |E*| vs time
 # ═══════════════════════════════════════════════════════════════════════════
 def plot_figure4():
-    print("Generating Figure 4: Scatter (edges vs time) ...")
-    fig, axes = plt.subplots(1, 3, figsize=(12, 3.8))
+    from scipy import stats as sp_stats
+    print("Generating Figure 4: Scatter (edges vs time) with R² ...")
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
 
     for col, ds in enumerate(HGB_DATASETS):
         df = safe_read(RESULTS / ds / "figure4.csv")
@@ -199,33 +200,51 @@ def plot_figure4():
         df["edges"] = to_numeric_safe(df["edges"])
         df["time_s"] = to_numeric_safe(df["time_s"])
         df = df.dropna(subset=["edges", "time_s"])
+        df = df[df["edges"] > 0]
 
-        ax = axes[col]
-        all_methods = df["method"].unique()
-        for m in all_methods:
-            sub = df[df["method"] == m]
-            st = METHOD_STYLE.get(m, {"color": "gray", "marker": "x", "ls": "-"})
-            ax.scatter(sub["edges"], sub["time_s"],
-                       c=st["color"], marker=st["marker"], s=28,
-                       alpha=0.75, label=m, edgecolors="none")
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.set_xlabel("$|E^*|$ (edges)")
-        if col == 0:
-            ax.set_ylabel("Time (s)")
-        ax.set_title(DATASET_LABELS[ds])
+        # Top row: degree methods, bottom row: h-index methods
+        for row, method_group in enumerate([
+            ["GloD", "PerD", "PerD+"],
+            ["GloH", "PerH", "PerH+"],
+        ]):
+            ax = axes[row, col]
+            r2_texts = []
+            for m in method_group:
+                sub = df[df["method"] == m]
+                if len(sub) < 2:
+                    continue
+                st = METHOD_STYLE.get(m, {"color": "gray", "marker": "x"})
+                ax.scatter(sub["edges"], sub["time_s"],
+                           c=st["color"], marker=st["marker"], s=20,
+                           alpha=0.5, edgecolors="none", label=m)
+                # R² regression on log-log
+                log_e = np.log10(sub["edges"].values.astype(float))
+                log_t = np.log10(sub["time_s"].values.clip(1e-6).astype(float))
+                slope, intercept, r, p, se = sp_stats.linregress(log_e, log_t)
+                x_fit = np.linspace(log_e.min(), log_e.max(), 50)
+                y_fit = slope * x_fit + intercept
+                ax.plot(10**x_fit, 10**y_fit, color=st["color"],
+                        linewidth=1.5, alpha=0.7)
+                r2_texts.append(f"{m} R²={r**2:.2f}")
 
-    # Shared legend
-    handles, labels = [], []
-    for m in ["GloD", "PerD", "PerD+", "GloH", "PerH", "PerH+"]:
-        st = METHOD_STYLE[m]
-        handles.append(Line2D([0], [0], marker=st["marker"], color="w",
-                              markerfacecolor=st["color"], markersize=6))
-        labels.append(m)
-    fig.legend(handles, labels, loc="upper center", ncol=6,
-               bbox_to_anchor=(0.5, 1.05), frameon=False)
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
-    fig.savefig(PLOTS / "figure4_scatter.png")
+            ax.set_xscale("log")
+            ax.set_yscale("log")
+            ax.set_xlabel("$|E^*|$")
+            if col == 0:
+                ax.set_ylabel("Time (s)")
+            group_label = "Degree" if row == 0 else "H-index"
+            ax.set_title(f"{DATASET_LABELS[ds]} ({group_label})")
+            ax.legend(fontsize=7, loc="upper left")
+            # R² annotation
+            for i, txt in enumerate(r2_texts):
+                color = METHOD_STYLE.get(method_group[i], {}).get("color", "gray")
+                ax.text(0.98, 0.04 + i * 0.10, txt, transform=ax.transAxes,
+                        fontsize=7, ha="right", color=color)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+
+    fig.tight_layout()
+    fig.savefig(PLOTS / "figure4_scatter.png", dpi=300)
     plt.close(fig)
     print(f"  Saved {PLOTS / 'figure4_scatter.png'}")
 
