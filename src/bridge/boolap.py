@@ -91,6 +91,7 @@ class BoolAPConverter:
         g_hetero: HeteroData,
         metapath_str: str,
         prefix: str,
+        instance_id: int = -1,
     ) -> BoolAPFiles:
         """
         Write HIN, metapath, and vertices files for a BoolAP run.
@@ -100,6 +101,9 @@ class BoolAPConverter:
             metapath_str: Comma-separated relation names
                           (e.g. ``'author_to_paper,paper_to_author'``).
             prefix:       File-name prefix (typically the dataset folder name).
+            instance_id:  -1 for full graph, or a global node ID to constrain
+                          the HIN to edges reachable from that node along the
+                          metapath (matching C++ instance rule behavior).
 
         Returns:
             BoolAPFiles with absolute paths to the three written files.
@@ -121,10 +125,18 @@ class BoolAPConverter:
         metapath_path = self._out_dir / f"metapath_{prefix}.txt"
         vertices_path = self._out_dir / f"vertices_{prefix}.txt"
 
-        self._write_hin(
-            g_hetero, sorted_edge_types, offsets, edge_type_map,
-            total_nodes, hin_path,
-        )
+        if instance_id >= 0:
+            # Instance rule: only write edges reachable from the anchor node
+            # along the metapath. BoolAP materializes this subgraph.
+            self._write_hin_instance(
+                g_hetero, sorted_edge_types, offsets, edge_type_map,
+                total_nodes, metapath_str, instance_id, hin_path,
+            )
+        else:
+            self._write_hin(
+                g_hetero, sorted_edge_types, offsets, edge_type_map,
+                total_nodes, hin_path,
+            )
         self._write_metapath(g_hetero, metapath_str, edge_type_map, metapath_path)
         self._write_vertices(g_hetero, sorted_node_types, vertices_path)
 
@@ -178,6 +190,79 @@ class BoolAPConverter:
                     src = int(eidx[0, i]) + s_off
                     dst = int(eidx[1, i]) + d_off
                     fh.write(f"{src} {dst} {et_int}\n")
+
+    @staticmethod
+    def _write_hin_instance(
+        g_hetero: HeteroData,
+        sorted_edge_types: List[Tuple[str, str, str]],
+        offsets: Dict[str, int],
+        edge_type_map: Dict[Tuple[str, str, str], int],
+        total_nodes: int,
+        metapath_str: str,
+        instance_id: int,
+        path: Path,
+    ) -> None:
+        """Write HIN with only edges reachable from instance_id along metapath.
+
+        BFS backward from instance_id through the metapath edges to find all
+        reachable nodes at each layer, then write only those edges. This gives
+        BoolAP the same subgraph that the C++ instance rule processes.
+        """
+        import torch
+        from src.utils import SchemaMatcher
+
+        relations = [r.strip() for r in metapath_str.split(",")]
+        # Resolve edge types
+        matched_edges = []
+        for rel_str in relations:
+            matched_edges.append(SchemaMatcher.match(rel_str, g_hetero))
+
+        # BFS backward from instance_id through the metapath
+        # The metapath is: layer0 --edge0--> layer1 --edge1--> layer2
+        # Instance is at layer N (the endpoint). BFS backward: layer N -> N-1 -> ... -> 0
+        n_layers = len(relations)
+
+        # Nodes at each layer (sets of global IDs)
+        layer_nodes: List[set] = [set() for _ in range(n_layers + 1)]
+        layer_nodes[n_layers].add(instance_id)
+
+        # Traverse backward
+        for layer in range(n_layers - 1, -1, -1):
+            src_type, rel, dst_type = matched_edges[layer]
+            eidx = g_hetero[(src_type, rel, dst_type)].edge_index
+            s_off = offsets[src_type]
+            d_off = offsets[dst_type]
+
+            # Edges go src -> dst. We're at the dst layer going backward.
+            dst_nodes = layer_nodes[layer + 1]
+            for i in range(eidx.shape[1]):
+                dst_global = int(eidx[1, i]) + d_off
+                if dst_global in dst_nodes:
+                    src_global = int(eidx[0, i]) + s_off
+                    layer_nodes[layer].add(src_global)
+
+        # Collect all relevant edges (only those between adjacent layer nodes)
+        all_edges = []
+        for layer in range(n_layers):
+            src_type, rel, dst_type = matched_edges[layer]
+            et = (src_type, rel, dst_type)
+            et_int = edge_type_map[et]
+            eidx = g_hetero[et].edge_index
+            s_off = offsets[src_type]
+            d_off = offsets[dst_type]
+            src_nodes = layer_nodes[layer]
+            dst_nodes = layer_nodes[layer + 1]
+            for i in range(eidx.shape[1]):
+                src_global = int(eidx[0, i]) + s_off
+                dst_global = int(eidx[1, i]) + d_off
+                if src_global in src_nodes and dst_global in dst_nodes:
+                    all_edges.append((src_global, dst_global, et_int))
+
+        num_types = len(sorted_edge_types)
+        with open(path, "w") as fh:
+            fh.write(f"{total_nodes} {len(all_edges)} {num_types}\n")
+            for src, dst, et_int in all_edges:
+                fh.write(f"{src} {dst} {et_int}\n")
 
     @staticmethod
     def _write_metapath(

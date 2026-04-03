@@ -387,21 +387,55 @@ def _run_boolap_table4(
     method_label: str,
     t4_w:         csv.DictWriter,
     log:          logging.Logger,
+    instance_rules: list = None,
 ) -> None:
-    """Run one BoolAP binary for Table IV; silently skips on any error."""
+    """Run BoolAP for Table IV.
+
+    With instance_rules=None: single variable metapath (original behavior).
+    With instance_rules=[(path, iid), ...]: run BoolAP per instance rule on
+    the constrained subgraph, sum times, report average.
+    """
     try:
-        prefix = f"{folder}_{method_label}"
-        files  = converter.convert(g_hetero, metapath, prefix)
-        result = boolap_run.run(files, timeout=600)
-        t4_w.writerow({
-            "dataset":    dataset,
-            "metapath":   metapath,
-            "method":     method_label,
-            "f1_or_acc":  1.0,          # exact baseline — always correct
-            "avg_time_s": round(result.total_time_s, 6),
-            "rule_count": 1,
-        })
-        log.debug("  table4 | %-8s  time=%.4fs  (BoolAP exact)", method_label, result.total_time_s)
+        if instance_rules is not None:
+            # Run BoolAP per instance rule, accumulate total time
+            total_time = 0.0
+            n_run = 0
+            for path, iid in instance_rules:
+                try:
+                    prefix = f"{folder}_{method_label}_inst{iid}"
+                    files = converter.convert(g_hetero, path, prefix, instance_id=iid)
+                    result = boolap_run.run(files, timeout=600)
+                    total_time += result.total_time_s
+                    n_run += 1
+                except Exception:
+                    continue  # skip individual failures
+            if n_run == 0:
+                log.warning("  table4 | %s — all instance rules failed", method_label)
+                return
+            avg_time = total_time / n_run
+            t4_w.writerow({
+                "dataset":    dataset,
+                "metapath":   metapath,
+                "method":     method_label,
+                "f1_or_acc":  1.0,
+                "avg_time_s": round(avg_time, 6),
+                "rule_count": n_run,
+            })
+            log.debug("  table4 | %-8s  avg_time=%.4fs  (%d/%d rules)  (BoolAP instance)",
+                      method_label, avg_time, n_run, len(instance_rules))
+        else:
+            prefix = f"{folder}_{method_label}"
+            files  = converter.convert(g_hetero, metapath, prefix)
+            result = boolap_run.run(files, timeout=600)
+            t4_w.writerow({
+                "dataset":    dataset,
+                "metapath":   metapath,
+                "method":     method_label,
+                "f1_or_acc":  1.0,
+                "avg_time_s": round(result.total_time_s, 6),
+                "rule_count": 1,
+            })
+            log.debug("  table4 | %-8s  time=%.4fs  (BoolAP exact)", method_label, result.total_time_s)
     except Exception as exc:
         log.warning("  table4 | %s skipped — %s", method_label, exc)
 
@@ -657,21 +691,16 @@ def main() -> None:
                         f5_fh.flush()
                         f6_fh.flush()
 
-                if need_boolap or need_boolap_p:
-                    # For instance rules, run BoolAP on each unique variable metapath
-                    if _instance_rules_batch is not None:
-                        unique_mps = sorted(set(p for p, _ in _instance_rules_batch))
-                    else:
-                        unique_mps = [metapath]
-                    for boolap_mp in unique_mps:
-                        if need_boolap:
-                            _run_boolap_table4(boolap_conv, boolap_run,  g_hetero, dataset,
-                                               folder, boolap_mp, "BoolAP",  t4_w, log)
-                            t4_fh.flush()
-                        if need_boolap_p:
-                            _run_boolap_table4(boolap_conv, boolap_plus, g_hetero, dataset,
-                                               folder, boolap_mp, "BoolAP+", t4_w, log)
-                            t4_fh.flush()
+                if need_boolap:
+                    _run_boolap_table4(boolap_conv, boolap_run, g_hetero, dataset,
+                                       folder, metapath, "BoolAP", t4_w, log,
+                                       instance_rules=_instance_rules_batch)
+                    t4_fh.flush()
+                if need_boolap_p:
+                    _run_boolap_table4(boolap_conv, boolap_plus, g_hetero, dataset,
+                                       folder, metapath, "BoolAP+", t4_w, log,
+                                       instance_rules=_instance_rules_batch)
+                    t4_fh.flush()
 
             except SystemExit as exc:
                 n_failed += 1
