@@ -50,6 +50,7 @@ rm -f results/OGB_MAG/table4.csv results/OGB_MAG/figure4.csv results/OGB_MAG/fig
 echo "--- Part 1: Base Paper (AnyBURL instance rules) ---" | tee -a "$LOG"
 python scripts/run_paper_experiments.py OGB_MAG \
     --instance-rules \
+    --max-metapaths 50 \
     --timeout "$TIMEOUT" \
     $BOOLAP_ARGS \
     2>&1 | tee -a "$LOG" || echo "  [WARN] OGB_MAG Part 1 failed" | tee -a "$LOG"
@@ -73,6 +74,7 @@ rm -f results/OAG_CS/table4.csv results/OAG_CS/figure4.csv results/OAG_CS/figure
 echo "--- Part 1: Base Paper (AnyBURL instance rules) ---" | tee -a "$LOG"
 python scripts/run_paper_experiments.py OAG_CS \
     --instance-rules \
+    --max-metapaths 50 \
     --timeout "$TIMEOUT" \
     $BOOLAP_ARGS \
     2>&1 | tee -a "$LOG" || echo "  [WARN] OAG_CS Part 1 failed" | tee -a "$LOG"
