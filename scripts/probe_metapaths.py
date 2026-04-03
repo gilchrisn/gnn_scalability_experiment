@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if 'torch_sparse' not in sys.modules:
     try:
         import torch_sparse
-    except ImportError:
+    except Exception:
         sys.modules['torch_sparse'] = types.ModuleType('torch_sparse')
         sys.modules['torch_sparse'].spspmm = None
 
