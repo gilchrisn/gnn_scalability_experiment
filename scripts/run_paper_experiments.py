@@ -50,6 +50,7 @@ from src.bridge import (
 )
 from scripts.bench_utils import (
     compile_rule_for_cpp,
+    compile_all_rules_for_cpp,
     generate_qnodes,
     setup_global_res_dirs,
     run_cpp,
@@ -421,6 +422,9 @@ def main() -> None:
                         help="Re-run AnyBURL even if cached rules exist.")
     parser.add_argument("--force-mine",    action="store_true",
                         help="Use AnyBURL mining even if config has suggested_paths.")
+    parser.add_argument("--instance-rules", action="store_true",
+                        help="Mine AnyBURL instance rules and batch them. Required for "
+                             "large datasets (OGB_MAG, OAG_CS) where variable rules timeout.")
     parser.add_argument("--mining-timeout", type=int, default=10,
                         help="AnyBURL snapshot timeout in seconds (default 10 — matches paper).")
     parser.add_argument("--timeout",           type=int,   default=600,
@@ -462,15 +466,53 @@ def main() -> None:
     log.info("")
     log.info("[2/4] Loading + validating metapaths...")
 
-    # Prefer pre-configured metapaths from config (curated, known to work)
-    # --force-mine overrides this for HGB datasets that need mining
-    if cfg.suggested_paths and not args.force_mine:
+    # --instance-rules: mine AnyBURL, batch ALL rules (variable + instance) into
+    # one bytecode file. The C++ binary processes them all in one invocation.
+    # This is required for large datasets (OGB_MAG, OAG_CS) where single variable
+    # metapaths timeout.
+    use_instance_rules = getattr(args, 'instance_rules', False)
+
+    if use_instance_rules:
+        work_dir = os.path.join(config.DATA_DIR, dataset)
+        os.makedirs(work_dir, exist_ok=True)
+        anyburl = AnyBURLRunner(work_dir, config.ANYBURL_JAR)
+        anyburl.export_for_mining(g_hetero)
+
+        rules_file = os.path.join(work_dir, "anyburl_rules.txt")
+        if args.force_remine or not os.path.exists(rules_file):
+            log.info("      Mining via AnyBURL (snapshot at %ds)...", args.mining_timeout)
+            anyburl.run_mining(timeout=args.mining_timeout, max_length=4, num_threads=4)
+        else:
+            log.info("      Using cached AnyBURL rules.")
+
+        from src.bridge.anyburl import load_validated_rules
+        all_rules, stats = load_validated_rules(
+            rules_file, g_hetero, cfg.target_node,
+            min_conf=args.min_conf, max_n=args.max_metapaths)
+        n_var = sum(1 for _, iid in all_rules if iid == -1)
+        n_inst = sum(1 for _, iid in all_rules if iid != -1)
+        log.info("      %d rules (%d variable + %d instance)", len(all_rules), n_var, n_inst)
+        log.info("      Stats: %s", stats)
+
+        from collections import Counter
+        path_counts = Counter(p for p, _ in all_rules)
+        for mp, cnt in path_counts.most_common(10):
+            log.info("        %s: %d", mp, cnt)
+
+        # Use a single synthetic "metapath" label for the batch
+        metapaths = ["; ".join(f"{mp}({c})" for mp, c in path_counts.most_common(5))]
+        # Store rules for compilation in the loop below
+        _instance_rules_batch = all_rules
+    elif cfg.suggested_paths and not args.force_mine:
+        # Prefer pre-configured metapaths from config (curated, known to work)
         metapaths = list(cfg.suggested_paths)
+        _instance_rules_batch = None
         log.info("      Using %d pre-configured metapaths from config.", len(metapaths))
         for mp in metapaths:
             log.info("        %s", mp)
     else:
         # Mine via AnyBURL — variable rules only (mirrored, symmetric)
+        _instance_rules_batch = None
         work_dir   = os.path.join(config.DATA_DIR, f"mining_{dataset}")
         anyburl    = AnyBURLRunner(work_dir, config.ANYBURL_JAR)
         anyburl.export_for_mining(g_hetero)
@@ -589,7 +631,10 @@ def main() -> None:
             log.info("  [%3d/%d] run %s  %s", idx, total, "+".join(parts), metapath[:70])
 
             try:
-                compile_rule_for_cpp(metapath, g_hetero, data_dir, folder)
+                if _instance_rules_batch is not None:
+                    compile_all_rules_for_cpp(_instance_rules_batch, g_hetero, data_dir, folder)
+                else:
+                    compile_rule_for_cpp(metapath, g_hetero, data_dir, folder)
 
                 if need_kmv:
                     if metapath not in done_t3:

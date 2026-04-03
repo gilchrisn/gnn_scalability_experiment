@@ -41,10 +41,10 @@ echo "=== OGB_MAG ===" | tee -a "$LOG"
 
 # Part 1: AnyBURL instance rules (variable rules timeout on large datasets)
 echo "--- Part 1: Base Paper (AnyBURL instance rules) ---" | tee -a "$LOG"
-python scripts/run_large_basepaper.py \
-    --datasets OGB_MAG \
-    --mining-time 10 --min-conf 0.1 \
+python scripts/run_paper_experiments.py OGB_MAG \
+    --instance-rules \
     --timeout "$TIMEOUT" \
+    $BOOLAP_ARGS \
     2>&1 | tee -a "$LOG" || echo "  [WARN] OGB_MAG Part 1 failed" | tee -a "$LOG"
 
 # Part 2: 40% as full, 5 snapshots
@@ -64,10 +64,10 @@ echo "=== OAG_CS ===" | tee -a "$LOG"
 
 # Part 1: AnyBURL instance rules (variable rules timeout on large datasets)
 echo "--- Part 1: Base Paper (AnyBURL instance rules) ---" | tee -a "$LOG"
-python scripts/run_large_basepaper.py \
-    --datasets OAG_CS \
-    --mining-time 10 --min-conf 0.1 \
+python scripts/run_paper_experiments.py OAG_CS \
+    --instance-rules \
     --timeout "$TIMEOUT" \
+    $BOOLAP_ARGS \
     2>&1 | tee -a "$LOG" || echo "  [WARN] OAG_CS Part 1 failed" | tee -a "$LOG"
 
 # Part 2: 20% as full, 5 snapshots
