@@ -169,7 +169,8 @@ def probe_instance_rules(dataset, folder, g, cfg, bin_path, timeout, csv_w, csv_
 
     data_dir = os.path.join('datasets', dataset)
     os.makedirs(data_dir, exist_ok=True)
-    runner = AnyBURLRunner(data_dir)
+    jar_path = os.path.join('tools', 'AnyBURL-23-1x.jar')
+    runner = AnyBURLRunner(data_dir, jar_path)
 
     # Export triples + mine
     runner.export_for_mining(g)
