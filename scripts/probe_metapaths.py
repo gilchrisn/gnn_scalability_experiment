@@ -217,23 +217,25 @@ def probe_instance_rules(dataset, folder, g, cfg, bin_path, timeout, csv_w, csv_
 
     # ExactD + ExactD+ (ground truth — writes .res files)
     t_ep = -3
-    rc_ep = ''
     try:
         p(f"    Running ground truth (ExactD + ExactD+)...")
+        t0 = time.perf_counter()
         gt = runner_cpp.run_ground_truth(folder, topr='0.05')
-        t_ep = 1  # success
-        p(f"    Ground truth OK: {gt.df1_inclusive}")
+        t_ep = time.perf_counter() - t0
+        p(f"    Ground truth OK: {t_ep:.1f}s total")
     except Exception as e:
         p(f"    Ground truth FAILED: {e}")
 
-    # GloD
+    # GloD — use wall clock time, not per-rule time from stdout
     glod_f1 = ''
     t_glo = -3
     rc_glo = ''
     if t_ep > 0:
         p(f"    GloD k=32...")
-        t_glo, out_glo = run_cmd([bin_path, 'GloD', folder, '0.05', '0', '32'], timeout=timeout)
-        glod_f1 = extract_field(out_glo, 'goodness')
+        t0 = time.perf_counter()
+        _, out_glo = run_cmd([bin_path, 'GloD', folder, '0.05', '0', '32'], timeout=timeout)
+        t_glo = time.perf_counter() - t0
+        glod_f1 = extract_field(out_glo, '~goodness')
         rc_glo = extract_field(out_glo, 'rule_count')
         p(f"    GloD: {t_glo:.1f}s, F1={glod_f1}, rule_count={rc_glo}" if t_glo > 0 else f"    GloD: FAIL")
 
