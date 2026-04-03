@@ -38,6 +38,14 @@ current_dir  = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 sys.path.append(project_root)
 
+import types as _types
+if 'torch_sparse' not in sys.modules:
+    try:
+        import torch_sparse
+    except Exception:
+        sys.modules['torch_sparse'] = _types.ModuleType('torch_sparse')
+        sys.modules['torch_sparse'].spspmm = None
+
 from src.config import config
 from src.data import DatasetFactory
 from src.bridge import (
