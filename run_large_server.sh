@@ -13,6 +13,11 @@ if [ -d "$HOME/jdk-25" ]; then
     export PATH="$HOME/jdk-25/bin:$PATH"
 fi
 
+# Recompile C++ binary (picks up PerD/PerH instance rule fix)
+echo "Recompiling C++ binary..." | tee -a "$LOG" 2>/dev/null || true
+cd HUB && g++ -O2 -o ../bin/graph_prep main.cpp param.cpp -std=c++17 && cd ..
+echo "Compile OK" | tee -a "$LOG" 2>/dev/null || true
+
 TIMEOUT=1800
 EPOCHS=50
 K=8
@@ -40,6 +45,8 @@ echo "" | tee -a "$LOG"
 echo "=== OGB_MAG ===" | tee -a "$LOG"
 
 # Part 1: AnyBURL instance rules (variable rules timeout on large datasets)
+# Clear old results so resume-safe doesn't skip broken data
+rm -f results/OGB_MAG/table4.csv results/OGB_MAG/figure4.csv results/OGB_MAG/figure5.csv results/OGB_MAG/figure6.csv
 echo "--- Part 1: Base Paper (AnyBURL instance rules) ---" | tee -a "$LOG"
 python scripts/run_paper_experiments.py OGB_MAG \
     --instance-rules \
@@ -62,6 +69,7 @@ echo "" | tee -a "$LOG"
 echo "=== OAG_CS ===" | tee -a "$LOG"
 
 # Part 1: AnyBURL instance rules (variable rules timeout on large datasets)
+rm -f results/OAG_CS/table4.csv results/OAG_CS/figure4.csv results/OAG_CS/figure5.csv results/OAG_CS/figure6.csv
 echo "--- Part 1: Base Paper (AnyBURL instance rules) ---" | tee -a "$LOG"
 python scripts/run_paper_experiments.py OAG_CS \
     --instance-rules \
