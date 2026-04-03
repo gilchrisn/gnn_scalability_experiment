@@ -1,0 +1,12 @@
+vertices:
+user               type=0
+age                type=1
+occupation         type=2
+genre              type=3
+movie              type=4
+
+edges:
+user->movie         type=1
+user->age           type=2
+user->occupation    type=3
+movie->genre        type=4
