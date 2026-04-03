@@ -14,9 +14,9 @@ if [ -d "$HOME/jdk-25" ]; then
 fi
 
 # Recompile C++ binary (picks up PerD/PerH instance rule fix)
-echo "Recompiling C++ binary..." | tee -a "$LOG" 2>/dev/null || true
+echo "Recompiling C++ binary..."
 cd HUB && g++ -O2 -o ../bin/graph_prep main.cpp param.cpp -std=c++17 && cd ..
-echo "Compile OK" | tee -a "$LOG" 2>/dev/null || true
+echo "Compile OK"
 
 TIMEOUT=1800
 EPOCHS=50
