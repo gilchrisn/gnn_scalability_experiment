@@ -47,14 +47,13 @@ python scripts/run_paper_experiments.py OGB_MAG \
     $BOOLAP_ARGS \
     2>&1 | tee -a "$LOG" || echo "  [WARN] OGB_MAG Part 1 failed" | tee -a "$LOG"
 
-# Part 2: 40% as full, 5 snapshots
-echo "--- Part 2: Extension (40% as full) ---" | tee -a "$LOG"
-python scripts/run_extension_experiments.py OGB_MAG \
-    --fractions 0.08 0.16 0.24 0.32 0.40 \
-    --epochs "$EPOCHS" --k "$K" --timeout "$TIMEOUT" \
-    --max-adj-mb "$MAX_ADJ_MB" --num-cpu-threads 2 \
-    --cpu \
-    2>&1 | tee -a "$LOG" || echo "  [WARN] OGB_MAG Part 2 failed" | tee -a "$LOG"
+# Part 2: skipped for now (rerun with extension later)
+# python scripts/run_extension_experiments.py OGB_MAG \
+#     --fractions 0.08 0.16 0.24 0.32 0.40 \
+#     --epochs "$EPOCHS" --k "$K" --timeout "$TIMEOUT" \
+#     --max-adj-mb "$MAX_ADJ_MB" --num-cpu-threads 2 \
+#     --cpu \
+#     2>&1 | tee -a "$LOG" || echo "  [WARN] OGB_MAG Part 2 failed" | tee -a "$LOG"
 
 # =====================================================
 # OAG_CS
@@ -70,14 +69,13 @@ python scripts/run_paper_experiments.py OAG_CS \
     $BOOLAP_ARGS \
     2>&1 | tee -a "$LOG" || echo "  [WARN] OAG_CS Part 1 failed" | tee -a "$LOG"
 
-# Part 2: 20% as full, 5 snapshots
-echo "--- Part 2: Extension (20% as full) ---" | tee -a "$LOG"
-python scripts/run_extension_experiments.py OAG_CS \
-    --fractions 0.04 0.08 0.12 0.16 0.20 \
-    --epochs "$EPOCHS" --k "$K" --timeout "$TIMEOUT" \
-    --max-adj-mb "$MAX_ADJ_MB" --num-cpu-threads 2 \
-    --cpu \
-    2>&1 | tee -a "$LOG" || echo "  [WARN] OAG_CS Part 2 failed" | tee -a "$LOG"
+# Part 2: skipped for now (rerun with extension later)
+# python scripts/run_extension_experiments.py OAG_CS \
+#     --fractions 0.04 0.08 0.12 0.16 0.20 \
+#     --epochs "$EPOCHS" --k "$K" --timeout "$TIMEOUT" \
+#     --max-adj-mb "$MAX_ADJ_MB" --num-cpu-threads 2 \
+#     --cpu \
+#     2>&1 | tee -a "$LOG" || echo "  [WARN] OAG_CS Part 2 failed" | tee -a "$LOG"
 
 echo "" | tee -a "$LOG"
 echo "==================================================" | tee -a "$LOG"
