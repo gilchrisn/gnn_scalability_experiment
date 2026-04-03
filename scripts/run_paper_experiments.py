@@ -315,16 +315,19 @@ def _run_main(
             task, score, r.avg_time_s, r.rule_count,
         )
 
-        m = _SCATTER_RE.search(r.stdout)
-        if m:
-            f4_w.writerow({
-                "dataset":  dataset,
-                "metapath": metapath,
-                "method":   task,
-                "edges":    m.group(1),
-                "time_s":   m.group(2),
-            })
-            log.debug("  figure4 | %-6s  edges=%s  time_s=%s", task, m.group(1), m.group(2))
+        matches = _SCATTER_RE.findall(r.stdout)
+        if matches:
+            for edges_str, time_str in matches:
+                if int(float(edges_str)) > 0:  # skip rules with 0 edges (peer_size<=2)
+                    f4_w.writerow({
+                        "dataset":  dataset,
+                        "metapath": metapath,
+                        "method":   task,
+                        "edges":    edges_str,
+                        "time_s":   time_str,
+                    })
+            log.debug("  figure4 | %-6s  %d scatter points (%d non-zero)",
+                      task, len(matches), sum(1 for e, _ in matches if int(float(e)) > 0))
         else:
             log.debug("  figure4 | %-6s  NO SCATTER_DATA in stdout", task)
 

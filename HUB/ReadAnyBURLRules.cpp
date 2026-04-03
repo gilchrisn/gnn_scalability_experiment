@@ -548,7 +548,12 @@ void Effective_prop_opt_global_cross(const std::string &choice, const std::strin
 
                     unsigned int active_edges = 0;
                     double pre_time = avg_time;
-                    double relative_error = effectiveness::COD_prop_global_cross_f1(qp, &g, std::stod(topr), visited, back_visited, method, hg_doms, hg_isdoms, hg_doms_greater, hg_isdoms_greater, dom_count, avg_time, active_edges);
+                    // Map personalized method strings for instance rules:
+                    // COD_prop_global_cross_f1 handles "df1"/"hf1", not "d"/"dp"/"h"/"hp"
+                    std::string inst_method = method;
+                    if(method == "d" || method == "dp") inst_method = "df1";
+                    else if(method == "h" || method == "hp") inst_method = "hf1";
+                    double relative_error = effectiveness::COD_prop_global_cross_f1(qp, &g, std::stod(topr), visited, back_visited, inst_method, hg_doms, hg_isdoms, hg_doms_greater, hg_isdoms_greater, dom_count, avg_time, active_edges);
                     double rule_time = avg_time - pre_time;
                     std::cout << "SCATTER_DATA: " << absolute_rule_idx++ << "," << active_edges << "," << (rule_time/1000000000.0) << std::endl;
                     if(relative_error >= -0.1){
@@ -568,7 +573,12 @@ void Effective_prop_opt_global_cross(const std::string &choice, const std::strin
 
                     unsigned int active_edges = 0;
                     double pre_time = avg_time;
-                    double relative_error = effectiveness::COD_prop_global_cross_f1(qp, &g, std::stod(topr), visited, back_visited, method, hg_doms, hg_isdoms, hg_doms_greater, hg_isdoms_greater, dom_count, avg_time, active_edges);
+                    // Map personalized method strings for instance rules:
+                    // COD_prop_global_cross_f1 handles "df1"/"hf1", not "d"/"dp"/"h"/"hp"
+                    std::string inst_method = method;
+                    if(method == "d" || method == "dp") inst_method = "df1";
+                    else if(method == "h" || method == "hp") inst_method = "hf1";
+                    double relative_error = effectiveness::COD_prop_global_cross_f1(qp, &g, std::stod(topr), visited, back_visited, inst_method, hg_doms, hg_isdoms, hg_doms_greater, hg_isdoms_greater, dom_count, avg_time, active_edges);
                     double rule_time = avg_time - pre_time;
                     std::cout << "SCATTER_DATA: " << rule_count << "," << active_edges << "," << (rule_time/1000000000.0) << std::endl;
                     if(relative_error > -0.1){
@@ -780,7 +790,12 @@ void Effective_prop_opt_personalized_cross(const std::string &choice, const std:
 
                     unsigned int active_edges = 0;
                     double pre_time = avg_time;
-                    double relative_error = effectiveness::COD_prop_global_cross_f1(qp, &g, std::stod(topr), visited, back_visited, method, hg_doms, hg_isdoms, hg_doms_greater, hg_isdoms_greater, dom_count, avg_time, active_edges);
+                    // Map personalized method strings for instance rules:
+                    // COD_prop_global_cross_f1 handles "df1"/"hf1", not "d"/"dp"/"h"/"hp"
+                    std::string inst_method = method;
+                    if(method == "d" || method == "dp") inst_method = "df1";
+                    else if(method == "h" || method == "hp") inst_method = "hf1";
+                    double relative_error = effectiveness::COD_prop_global_cross_f1(qp, &g, std::stod(topr), visited, back_visited, inst_method, hg_doms, hg_isdoms, hg_doms_greater, hg_isdoms_greater, dom_count, avg_time, active_edges);
                     double rule_time = avg_time - pre_time;
                     std::cout << "SCATTER_DATA: " << absolute_rule_idx++ << "," << active_edges << "," << (rule_time/1000000000.0) << std::endl;
                     if(relative_error >= -0.1){
