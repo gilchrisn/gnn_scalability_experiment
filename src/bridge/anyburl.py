@@ -495,8 +495,8 @@ class AnyBURLRunner(RuleMiner):
         
         # Execute
         print(f"[AnyBURL] Learning rules (timeout={timeout}s)...")
-        print(f"[AnyBURL] cmd: {' '.join(cmd)}")
         cmd = ["java", "-Xmx12G", "-cp", self.jar_path, "de.unima.ki.anyburl.Learn", self.config_file]
+        print(f"[AnyBURL] cmd: {' '.join(cmd)}")
         try:
             result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout + 300)
             if result.stdout.strip():
