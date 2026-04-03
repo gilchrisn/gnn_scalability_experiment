@@ -88,17 +88,16 @@ def compile_rule_for_cpp(
 
         parts.append(direction)
 
-        # The termination opcode MUST come immediately before the final edge integer.
-        # Opcode -1 sets state=VARIABLE; the very next integer both pushes the edge
-        # AND fires the rule. Placing -1 after all edges (the old behaviour) meant
-        # the C++ parser never saw a valid rule trigger → rule_count:0 everywhere.
-        if i == len(path_list) - 1:
-            if instance_id == -1:
-                parts.append("-1")                      # Variable mode
-            else:
-                parts.extend(["-5", str(instance_id)]) # Instance mode
+        # Variable rules: -1 before last edge triggers the rule when the edge is pushed.
+        # Instance rules: push all edges plainly, then chain -5 <id> after.
+        # This matches the base paper's format (see misc/*.dat).
+        if i == len(path_list) - 1 and instance_id == -1:
+            parts.append("-1")
 
         parts.append(str(eid))
+
+    if instance_id != -1:
+        parts.extend(["-5", str(instance_id)])
 
     for _ in path_list:
         parts.append("-4")                              # Pop stack
@@ -150,12 +149,11 @@ def compile_all_rules_for_cpp(
                 matched_edge = SchemaMatcher.match(rel_str, g_hetero)
                 eid = edge_map[matched_edge]
                 parts.append(direction)
-                if i == len(path_list) - 1:
-                    if instance_id == -1:
-                        parts.append("-1")
-                    else:
-                        parts.extend(["-5", str(instance_id)])
+                if i == len(path_list) - 1 and instance_id == -1:
+                    parts.append("-1")
                 parts.append(str(eid))
+            if instance_id != -1:
+                parts.extend(["-5", str(instance_id)])
             for _ in path_list:
                 parts.append("-4")
             all_parts.extend(parts)
