@@ -114,6 +114,7 @@ def parse_rules(filepath: str, min_conf: float) -> List[Tuple[float, str, int]]:
             relations:   List[str] = []
             current_var: Optional[str] = None
             instance_id: int = -1
+            instance_node_type: Optional[str] = None
 
             ok = True
             for i, atom in enumerate(atoms):
@@ -136,12 +137,14 @@ def parse_rules(filepath: str, min_conf: float) -> List[Tuple[float, str, int]]:
                     relations.append(rel)
                     if v2_inst:
                         instance_id = int(v2.rsplit("_", 1)[-1])
+                        instance_node_type = v2.rsplit("_", 1)[0]
                         break
                     current_var = v2
                 elif current_var == v2:
                     relations.append(f"rev_{rel}")
                     if v1_inst:
                         instance_id = int(v1.rsplit("_", 1)[-1])
+                        instance_node_type = v1.rsplit("_", 1)[0]
                         break
                     current_var = v1
                 else:
@@ -149,7 +152,7 @@ def parse_rules(filepath: str, min_conf: float) -> List[Tuple[float, str, int]]:
                     break
 
             if ok and relations:
-                results.append((conf, ",".join(relations), instance_id))
+                results.append((conf, ",".join(relations), instance_id, instance_node_type))
 
     return results
 
@@ -338,28 +341,38 @@ def load_validated_rules(
 
     raw = parse_rules(rules_file, min_conf=0.0)
 
-    # Confidence filter + normalize
-    filtered = [
-        (conf, normalize_path(path, schema, canonical), iid)
-        for conf, path, iid in raw
-        if conf >= min_conf
-    ]
+    # Compute global ID offsets per node type (sorted alphabetically, matching C++ staging)
+    node_types_sorted = sorted(g_hetero.node_types)
+    global_offset = {}
+    off = 0
+    for nt in node_types_sorted:
+        global_offset[nt] = off
+        off += g_hetero[nt].num_nodes
+
+    # Confidence filter + normalize + convert instance IDs to global
+    filtered = []
+    for conf, path, iid, inst_type in raw:
+        if conf < min_conf:
+            continue
+        norm_path = normalize_path(path, schema, canonical)
+        if iid != -1 and inst_type is not None and inst_type in global_offset:
+            iid = iid + global_offset[inst_type]
+        filtered.append((conf, norm_path, iid))
 
     # Sort by confidence (highest first)
     filtered.sort(key=lambda x: -x[0])
 
-    # Validate each rule (mirror variable rules, keep instance anchors)
+    # Validate each rule (mirror all rules to make symmetric paths)
     rules: List[Tuple[str, int]] = []
     seen: Set[str] = set()
     fail_schema = fail_trim = fail_symmetry = fail_hops = 0
 
     for conf, path, iid in filtered:
-        # Mirror to make symmetric (only for variable rules — instance rules
-        # already have the C++ binary handle directionality)
-        if iid == -1:
-            mirrored = normalize_path(mirror(path), schema, canonical)
-        else:
-            mirrored = path  # instance rules use the raw (un-mirrored) path
+        # Mirror ALL rules to make symmetric paths (paper→X→paper).
+        # For instance rules, mirroring turns 1-hop "writes" into 2-hop
+        # "writes,rev_writes", matching the base paper's bytecode format
+        # where instance IDs chain after a complete edge path.
+        mirrored = normalize_path(mirror(path), schema, canonical)
 
         rels = mirrored.split(",")
 
@@ -387,12 +400,7 @@ def load_validated_rules(
                 seen.add(sig)
                 rules.append((validated, -1))
         else:
-            # Instance rules: check schema contiguity
-            # Must have >=2 hops — 1-hop instance rules produce empty ETypes
-            # in the C++ parser, causing rules=0.
-            if len(rels) < 2:
-                fail_hops += 1
-                continue
+            # Instance rules: validate after mirroring (now 2-hop+)
             validated = validate_and_trim(mirrored, schema, target_node)
             if validated is None:
                 fail_trim += 1
