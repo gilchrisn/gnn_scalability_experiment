@@ -1459,7 +1459,7 @@ void run_materialization(const std::string& dataset, const std::string& rule_fil
 
     // 4. *** RUN THE EXTRACTED LOGIC ***
     unsigned int meta_layer = qp->ETypes.size();
-    if(qp->instance != -1) meta_layer = std::max(1u, (unsigned int)(qp->ETypes.size() - 1));
+    if(qp->instance != -1) meta_layer = qp->ETypes.size() - 1;
 
     auto hidden_graph = hidden_graph_construction(meta_layer, qp, &g, visited, ractive);
 
@@ -1600,7 +1600,7 @@ void run_sketch_sampling(const std::string& dataset, const std::string& rule_fil
 
     // 5. *** RUN THE EXTRACTED LOGIC ***
     unsigned int meta_layer = qp->ETypes.size();
-    if(qp->instance != -1) meta_layer = std::max(1u, (unsigned int)(qp->ETypes.size() - 1));
+    if(qp->instance != -1) meta_layer = qp->ETypes.size() - 1;
 
     std::cout << "[sketch-timing] K=" << K << " L=" << L << " meta_layer=" << meta_layer << std::endl;
 

@@ -17,6 +17,7 @@
 namespace effectiveness{
     bool COD_matching_graph_time(Pattern *qp, HeterGraph *g, std::vector<std::vector<bool>*>* visited,
                                  std::vector<std::vector<bool>*>* back_visited, double & avg_time){
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return false;
 
         auto start = std::chrono::steady_clock::now();
 
@@ -50,6 +51,8 @@ namespace effectiveness{
         double preprocess_time = 0.0;
         double running_time = 0.0;
 
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return false;
+
         auto start = std::chrono::steady_clock::now();
 
         auto frontiers = new std::vector<unsigned int>();
@@ -69,7 +72,7 @@ namespace effectiveness{
         preprocess_time += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
 
         std::vector<unsigned int> qnodes;
-
+        
         std::mt19937 generator(SEED);
         std::uniform_int_distribution<std::mt19937::result_type> distribute(0, peer_size - 1);
         for(unsigned int i=0;i<QNUM;i++) qnodes.push_back(peers->at(distribute(generator)));
@@ -112,7 +115,7 @@ namespace effectiveness{
 
         unsigned int max_meta_layer;
         if (qp->instance == -1) max_meta_layer = qp->ETypes.size();
-        else max_meta_layer = std::max(1u, (unsigned int)(qp->ETypes.size() - 1));
+        else max_meta_layer = qp->ETypes.size() - 1;
 
         end = std::chrono::steady_clock::now();
         preprocess_time += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
@@ -291,7 +294,7 @@ namespace effectiveness{
         double preprocess_time = 0.0;
         double running_time = 0.0;
 
-
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return -1;
 
         auto start = std::chrono::steady_clock::now();
 
@@ -356,7 +359,7 @@ namespace effectiveness{
         out_edges = hidden_edges->size();
         unsigned int max_meta_layer;
         if (qp->instance == -1) max_meta_layer = qp->ETypes.size();
-        else max_meta_layer = std::max(1u, (unsigned int)(qp->ETypes.size() - 1));
+        else max_meta_layer = qp->ETypes.size() - 1;
 
         end = std::chrono::steady_clock::now();
         preprocess_time += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
@@ -563,7 +566,7 @@ namespace effectiveness{
     bool COD_prop_global_scale(Pattern *qp, HeterGraph *g, double topr, std::vector<std::vector<bool>*>* visited,
                                     std::vector<std::vector<bool>*>* back_visited, const std::string &centrality,
                                     double & avg_time){
-
+        if (qp->instance >= 0 && qp->NTypes.size() <= 2) return false;
 
         double running_time = 0.0;
         double preprocess_time = 0.0;
@@ -623,7 +626,7 @@ namespace effectiveness{
                             }}}}}}
         unsigned int max_meta_layer;
         if (qp->instance == -1) max_meta_layer = qp->ETypes.size();
-        else max_meta_layer = std::max(1u, (unsigned int)(qp->ETypes.size() - 1));
+        else max_meta_layer = qp->ETypes.size() - 1;
 
         end = std::chrono::steady_clock::now();
         preprocess_time += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
@@ -741,7 +744,7 @@ namespace effectiveness{
                             std::vector<std::vector<unsigned int>*>* hg_dom_peers, std::vector<bool>* isdom,
                             std::vector<std::vector<unsigned int>*>* hg_dom_greater_peers, std::vector<bool>* isdom_greater,
                             unsigned int & count, double & avg_time, unsigned int & out_edges){
-
+        if (qp->instance >= 0 && qp->NTypes.size() <= 2) return -1;
 
         double running_time = 0.0;
         double preprocess_time = 0.0;
@@ -802,7 +805,7 @@ namespace effectiveness{
         out_edges = hidden_edges->size();                    
         unsigned int max_meta_layer;
         if (qp->instance == -1) max_meta_layer = qp->ETypes.size();
-        else max_meta_layer = std::max(1u, (unsigned int)(qp->ETypes.size() - 1));
+        else max_meta_layer = qp->ETypes.size() - 1;
 
         end = std::chrono::steady_clock::now();
         preprocess_time += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
@@ -981,7 +984,7 @@ namespace effectiveness{
     bool COD_hg_global_greater_f1(Pattern *qp, HeterGraph *g, double topr, std::vector<std::vector<bool>*>* visited,
                     std::vector<std::vector<bool>*>* back_visited, const std::string &centrality, double & avg_time){
         double running_time = 0.0;
-
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return false;
 
         auto start = std::chrono::steady_clock::now();
 
@@ -1010,7 +1013,7 @@ namespace effectiveness{
 
         unsigned int max_meta_layer;
         if(qp->instance == -1) max_meta_layer = qp->ETypes.size();
-        else max_meta_layer = std::max(1u, (unsigned int)(qp->ETypes.size() - 1));
+        else max_meta_layer = qp->ETypes.size() - 1;
 
         end = std::chrono::steady_clock::now();
         running_time += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
@@ -1073,7 +1076,7 @@ namespace effectiveness{
     bool COD_hg_global_f1_by_union(Pattern *qp, HeterGraph *g, double topr, std::vector<std::vector<bool>*>* visited,
                     std::vector<std::vector<bool>*>* back_visited, const std::string &centrality, double & avg_time){
         double running_time = 0.0;
-
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return false;
 
         auto start = std::chrono::steady_clock::now();
 
@@ -1102,7 +1105,7 @@ namespace effectiveness{
 
         unsigned int max_meta_layer;
         if(qp->instance == -1) max_meta_layer = qp->ETypes.size();
-        else max_meta_layer = std::max(1u, (unsigned int)(qp->ETypes.size() - 1));
+        else max_meta_layer = qp->ETypes.size() - 1;
 
         end = std::chrono::steady_clock::now();
         running_time += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
@@ -1162,7 +1165,7 @@ namespace effectiveness{
     bool COD_hg_global_f1(Pattern *qp, HeterGraph *g, double topr, std::vector<std::vector<bool>*>* visited,
                     std::vector<std::vector<bool>*>* back_visited, const std::string &centrality, double & avg_time){
         double running_time = 0.0;
-
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return false;
 
         auto start = std::chrono::steady_clock::now();
 
@@ -1191,7 +1194,7 @@ namespace effectiveness{
 
         unsigned int max_meta_layer;
         if(qp->instance == -1) max_meta_layer = qp->ETypes.size();
-        else max_meta_layer = std::max(1u, (unsigned int)(qp->ETypes.size() - 1));
+        else max_meta_layer = qp->ETypes.size() - 1;
 
         end = std::chrono::steady_clock::now();
         running_time += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
@@ -1252,7 +1255,7 @@ namespace effectiveness{
                            std::vector<std::vector<bool>*>* back_visited){
         auto res = new std::vector<double>();
 
-        // NTypes guard removed: 2-hop instance rules now allowed
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return nullptr;
         auto frontiers = new std::vector<unsigned int>();
         auto peers = new std::vector<unsigned int>();
         Peers(qp, g, frontiers, peers, visited);
@@ -1272,7 +1275,7 @@ namespace effectiveness{
 
         unsigned int max_meta_layer;
         if(qp->instance == -1) max_meta_layer = qp->ETypes.size();
-        else max_meta_layer = std::max(1u, (unsigned int)(qp->ETypes.size() - 1));
+        else max_meta_layer = qp->ETypes.size() - 1;
 
         double temp_density = 0.0, degree_same = 0.0, hindex_same = 0.0;
         unsigned int raw_edges_total = 0; 
@@ -1349,7 +1352,7 @@ namespace effectiveness{
                        std::vector<std::vector<bool>*>* visited,
                        std::vector<std::vector<bool>*>* back_visited,
                        const std::string &centrality) {
-
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return -1;
 
         auto frontiers = new std::vector<unsigned int>();
         auto peers = new std::vector<unsigned int>();
@@ -1405,7 +1408,7 @@ namespace effectiveness{
 
         unsigned int max_meta_layer;
         if(qp->instance == -1) max_meta_layer = qp->ETypes.size();
-        else max_meta_layer = std::max(1u, (unsigned int)(qp->ETypes.size() - 1));
+        else max_meta_layer = qp->ETypes.size() - 1;
 
         double total_epsilon = 0;
         unsigned int valid_layers = 0;

@@ -19,7 +19,7 @@ namespace hg{
             std::vector<std::vector<bool>*>* back_visited, const std::string &centrality, double & avg_time){
         double topr = 0.1;
 
-        // NTypes guard removed: 2-hop instance rules now allowed
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return false;
 
         auto start = std::chrono::steady_clock::now();
         auto frontiers = new std::vector<unsigned int>();
@@ -45,7 +45,7 @@ namespace hg{
 
         unsigned int max_meta_layer;
         if(qp->instance == -1) max_meta_layer = qp->ETypes.size();
-        else max_meta_layer = std::max(1u, (unsigned int)(qp->ETypes.size() - 1));
+        else max_meta_layer = qp->ETypes.size() - 1;
 
         for(unsigned int meta_layer = 1;meta_layer <= max_meta_layer;meta_layer++){
             std::cout<<"# l="<<meta_layer<<std::endl;
@@ -83,7 +83,7 @@ namespace hg{
 //    bool COD(Pattern *qp, HeterGraph *g, unsigned int qn, double topr, std::vector<std::vector<bool>*>* visited,
 //             std::vector<std::vector<bool>*>* back_visited, const std::string &centrality,
 //             std::vector<double>* time_statistic){
-//        // NTypes guard removed: 2-hop instance rules now allowed
+//        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return false;
 //
 //        auto start = std::chrono::steady_clock::now();
 //        auto frontiers = new std::vector<unsigned int>();
@@ -110,7 +110,7 @@ namespace hg{
 //
 //        unsigned int max_meta_layer;
 //        if(qp->instance == -1) max_meta_layer = qp->ETypes.size();
-//        else max_meta_layer = std::max(1u, (unsigned int)(qp->ETypes.size() - 1));
+//        else max_meta_layer = qp->ETypes.size() - 1;
 //
 //        for (unsigned int meta_layer = 1; meta_layer <= max_meta_layer; meta_layer++) {
 //            std::cout << "# l=" << meta_layer << std::endl;
@@ -152,7 +152,7 @@ namespace hg{
 namespace prop {
     void density(Pattern *qp, HeterGraph *g, std::vector<std::vector<bool>*>* visited,
                  std::vector<std::vector<bool>*>* back_visited, double dens_thresh){
-        // NTypes guard removed: 2-hop instance rules now allowed
+        if (qp->instance >= 0 && qp->NTypes.size() <= 2) return;
         auto frontiers = new std::vector<unsigned int>();
         auto peers = new std::vector<unsigned int>();
         Peers(qp, g, frontiers, peers, visited);
@@ -198,7 +198,7 @@ namespace prop {
 
         unsigned int max_meta_layer;
         if(qp->instance == -1) max_meta_layer = qp->ETypes.size();
-        else max_meta_layer = std::max(1u, (unsigned int)(qp->ETypes.size() - 1));
+        else max_meta_layer = qp->ETypes.size() - 1;
 
         for(unsigned int meta_layer = 1;meta_layer<= max_meta_layer;meta_layer++){
             auto degs= jsy::synopses(meta_layer, hidden_edges, synopses_cache_opt);
@@ -219,7 +219,7 @@ namespace prop {
     bool COD_global(Pattern *qp, HeterGraph *g, double topr, std::vector<std::vector<bool>*>* visited,
             std::vector<std::vector<bool>*>* back_visited, const std::string &method,
             std::vector<double>* time_statistics){
-        // NTypes guard removed: 2-hop instance rules now allowed
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return false;
 
         auto start = std::chrono::steady_clock::now();
         auto frontiers = new std::vector<unsigned int>();
@@ -272,7 +272,7 @@ namespace prop {
 
         unsigned int max_meta_layer;
         if(qp->instance == -1) max_meta_layer = qp->ETypes.size();
-        else max_meta_layer = std::max(1u, (unsigned int)(qp->ETypes.size() - 1));
+        else max_meta_layer = qp->ETypes.size() - 1;
 
         for(unsigned int meta_layer = 1;meta_layer<= max_meta_layer;meta_layer++){
             std::cout<<"# l="<<meta_layer<<std::endl;
@@ -376,7 +376,7 @@ namespace prop {
                 std::vector<std::vector<bool>*>* visited,
                 std::vector<std::vector<bool>*>* back_visited, const std::string &method,
                 std::vector<double>* time_statistics){
-        // NTypes guard removed: 2-hop instance rules now allowed
+        if(qp->instance >= 0 && qp->NTypes.size() <= 2) return false;
 
         auto start = std::chrono::steady_clock::now();
         auto frontiers = new std::vector<unsigned int>();
@@ -429,7 +429,7 @@ namespace prop {
 
         unsigned int max_meta_layer;
         if(qp->instance == -1) max_meta_layer = qp->ETypes.size();
-        else max_meta_layer = std::max(1u, (unsigned int)(qp->ETypes.size() - 1));
+        else max_meta_layer = qp->ETypes.size() - 1;
 
         for(unsigned int meta_layer = 1;meta_layer<= max_meta_layer;meta_layer++){
             std::cout<<"# l="<<meta_layer<<std::endl;
