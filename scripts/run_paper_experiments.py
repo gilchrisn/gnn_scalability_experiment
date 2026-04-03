@@ -657,14 +657,21 @@ def main() -> None:
                         f5_fh.flush()
                         f6_fh.flush()
 
-                if need_boolap:
-                    _run_boolap_table4(boolap_conv, boolap_run,  g_hetero, dataset,
-                                       folder, metapath, "BoolAP",  t4_w, log)
-                    t4_fh.flush()
-                if need_boolap_p:
-                    _run_boolap_table4(boolap_conv, boolap_plus, g_hetero, dataset,
-                                       folder, metapath, "BoolAP+", t4_w, log)
-                    t4_fh.flush()
+                if need_boolap or need_boolap_p:
+                    # For instance rules, run BoolAP on each unique variable metapath
+                    if _instance_rules_batch is not None:
+                        unique_mps = sorted(set(p for p, _ in _instance_rules_batch))
+                    else:
+                        unique_mps = [metapath]
+                    for boolap_mp in unique_mps:
+                        if need_boolap:
+                            _run_boolap_table4(boolap_conv, boolap_run,  g_hetero, dataset,
+                                               folder, boolap_mp, "BoolAP",  t4_w, log)
+                            t4_fh.flush()
+                        if need_boolap_p:
+                            _run_boolap_table4(boolap_conv, boolap_plus, g_hetero, dataset,
+                                               folder, boolap_mp, "BoolAP+", t4_w, log)
+                            t4_fh.flush()
 
             except SystemExit as exc:
                 n_failed += 1
