@@ -13,10 +13,15 @@ if [ -d "$HOME/jdk-25" ]; then
     export PATH="$HOME/jdk-25/bin:$PATH"
 fi
 
-# Recompile C++ binary (picks up PerD/PerH instance rule fix)
-echo "Recompiling C++ binary..."
+# Recompile C++ binaries
+echo "Recompiling graph_prep..."
 cd HUB && g++ -O2 -o ../bin/graph_prep main.cpp param.cpp -std=c++17 && cd ..
-echo "Compile OK"
+echo "graph_prep OK"
+
+echo "Recompiling BoolAP..."
+make -C parallel-k-P-core-decomposition-code BoolAPCoreD BoolAPCoreG 2>/dev/null \
+    && echo "BoolAP OK" \
+    || echo "BoolAP compile skipped (make not available or source missing)"
 
 TIMEOUT=1800
 EPOCHS=50

@@ -28,7 +28,7 @@ springer
 bench*
 *.ps1
 RUNBOOK.md
-parallel-k-P-core-decomposition-code
+# parallel-k-P-core-decomposition-code  # now tracked (BoolAP baseline)
 CLAUDE.md
 cs470
 documents
