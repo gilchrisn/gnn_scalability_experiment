@@ -20,6 +20,7 @@ from src.config import config
 from src.data.factory import DatasetFactory
 from src.bridge.converter import PyGToCppAdapter
 from src.bridge.anyburl import AnyBURLRunner, load_validated_rules
+from src.bridge.runner import GraphPrepRunner
 from scripts.bench_utils import (
     compile_rule_for_cpp, compile_all_rules_for_cpp, generate_qnodes,
 )
@@ -210,11 +211,20 @@ def probe_instance_rules(dataset, folder, g, cfg, bin_path, timeout, csv_w, csv_
     n = compile_all_rules_for_cpp(rules, g, folder, folder)
     p(f"    Compiled {n} rules")
 
-    # ExactD+ (ground truth)
-    p(f"    ExactD+...")
-    t_ep, out_ep = run_cmd([bin_path, 'ExactD+', folder, '0.05', '0'], timeout=timeout)
-    rc_ep = extract_field(out_ep, 'rule_count')
-    p(f"    ExactD+: {t_ep:.1f}s, rule_count={rc_ep}" if t_ep > 0 else f"    ExactD+: FAIL")
+    # Use GraphPrepRunner — it redirects ExactD+ stdout to .res files
+    # so GloD can read ground truth
+    runner_cpp = GraphPrepRunner(bin_path, '.', timeout=timeout)
+
+    # ExactD + ExactD+ (ground truth — writes .res files)
+    t_ep = -3
+    rc_ep = ''
+    try:
+        p(f"    Running ground truth (ExactD + ExactD+)...")
+        gt = runner_cpp.run_ground_truth(folder, topr='0.05')
+        t_ep = 1  # success
+        p(f"    Ground truth OK: {gt.df1_inclusive}")
+    except Exception as e:
+        p(f"    Ground truth FAILED: {e}")
 
     # GloD
     glod_f1 = ''
