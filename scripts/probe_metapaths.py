@@ -174,7 +174,7 @@ def probe_instance_rules(dataset, folder, g, cfg, bin_path, timeout, csv_w, csv_
 
     # Export triples + mine
     runner.export_for_mining(g)
-    runner.run_mining(timeout=30, max_length=4)  # 30s mining
+    runner.run_mining(timeout=300, max_length=4)  # 5 min mining
 
     rules_file = runner.rules_file
     if not os.path.exists(rules_file) or os.path.getsize(rules_file) == 0:

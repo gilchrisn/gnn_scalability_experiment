@@ -495,19 +495,37 @@ class AnyBURLRunner(RuleMiner):
         
         # Execute
         print(f"[AnyBURL] Learning rules (timeout={timeout}s)...")
+        print(f"[AnyBURL] cmd: {' '.join(cmd)}")
         cmd = ["java", "-Xmx12G", "-cp", self.jar_path, "de.unima.ki.anyburl.Learn", self.config_file]
         try:
-            subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout + 300)
+            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout + 300)
+            if result.stdout.strip():
+                print(f"[AnyBURL] stdout: {result.stdout[:500]}")
+            if result.stderr.strip():
+                print(f"[AnyBURL] stderr: {result.stderr[:500]}")
+            if result.returncode != 0:
+                print(f"[AnyBURL] exit code: {result.returncode}")
         except subprocess.TimeoutExpired:
-            print("[AnyBURL] Subprocess reached secondary timeout (Expected behavior for snapshots).")
+            print("[AnyBURL] Subprocess reached secondary timeout.")
 
         # Rename snapshot to canonical output path
         expected_output = f"{self.rules_file}-{timeout}"
+        # Also check for nearby snapshots in case timing is off
+        import glob
+        snapshots = sorted(glob.glob(f"{self.rules_file}-*"))
+        if snapshots:
+            print(f"[AnyBURL] Found snapshots: {snapshots}")
+
         if os.path.exists(expected_output):
             if os.path.exists(self.rules_file): os.remove(self.rules_file)
             os.rename(expected_output, self.rules_file)
+        elif snapshots:
+            # Use the latest snapshot even if name doesn't match exactly
+            print(f"[AnyBURL] Using latest snapshot: {snapshots[-1]}")
+            if os.path.exists(self.rules_file): os.remove(self.rules_file)
+            os.rename(snapshots[-1], self.rules_file)
         else:
-            print(f"[AnyBURL] Warning: Expected snapshot {expected_output} not found.")
+            print(f"[AnyBURL] Warning: No snapshots found at {expected_output}")
 
     def get_top_k_paths(self, k: int = 5, min_conf: float = 0.1) -> List[Tuple[float, str, int]]:
         """Parses output file to identify top-K generic OR instance paths."""
