@@ -113,15 +113,21 @@ class Config:
 
             # === OGB DATASETS ===
             'OGB_MAG': DatasetConfig('OGB', 'ogbn-mag', 'paper', [
-                "rev_writes,writes",                                    # PAP (sketch fix makes this feasible)
-                "has_topic,rev_has_topic",                               # PFP
-                "rev_writes,affiliated_with,rev_affiliated_with,writes", # PAIAP
+                "rev_writes,writes",                                    # PAP — 7.1M edges, dense
+                "has_topic,rev_has_topic",                               # PFP — 7.5M edges, very dense
+                "cites,rev_cites",                                       # Bib coupling — 5.4M edges
+                "rev_cites,cites",                                       # Co-citation — 5.4M edges
+                "rev_writes,affiliated_with,rev_affiliated_with,writes", # PAIAP — 4-hop
             ]),
 
             # === OAG (Open Academic Graph, 768-dim XLNet features, 546K papers) ===
             'OAG_CS': DatasetConfig('OAG', 'cs', 'paper', [
-                "rev_AP_write_first,AP_write_first",             # PAP via first-author
-                "PF_in_L3,rev_PF_in_L3",                        # PFP via L3 fields (89x speedup)
+                "rev_AP_write_first,AP_write_first",             # PAP first-author — 457K edges, sparse
+                "rev_AP_write_other,AP_write_other",             # PAP co-authors — 664K edges, denser
+                "PP_cite,rev_PP_cite",                           # Bib coupling — 5.9M edges, very dense
+                "rev_PP_cite,PP_cite",                           # Co-citation — 5.9M edges, very dense
+                "PF_in_L2,rev_PF_in_L2",                        # PFP L2 fields — 2.3M edges, dense
+                "PF_in_L3,rev_PF_in_L3",                        # PFP L3 fields — 870K edges
             ]),
 
             # === RCDD (Alibaba risk detection, 13.8M nodes, all types featurized) ===

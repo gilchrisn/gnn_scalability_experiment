@@ -15,10 +15,9 @@
 #            KMV completes at all fractions (O(|V|*k) bounded).
 #
 # Config metapaths:
-#   OGB_MAG: rev_writes,writes (PAP), has_topic,rev_has_topic (PFP),
-#            rev_writes,affiliated_with,rev_affiliated_with,writes (PAIAP)
-#   OAG_CS:  rev_AP_write_first,AP_write_first (PAP),
-#            PF_in_L3,rev_PF_in_L3 (PFP)
+#   OGB_MAG (5): PAP, PFP, bib-coupling, co-citation, PAIAP (4-hop)
+#   OAG_CS  (6): PAP first-author, PAP co-authors, bib-coupling,
+#                co-citation, PFP-L2, PFP-L3
 #
 # Resume-safe. Run in tmux.
 
@@ -39,7 +38,8 @@ echo "graph_prep OK"
 TIMEOUT=1800            # 30 min per C++ call
 EPOCHS=50               # SAGE training epochs
 K=8                     # KMV sketch size (same as HGB runs)
-MAX_ADJ_MB=0            # No limit — let exact fail naturally on server
+MAX_ADJ_MB=5000         # 5GB — skip Python load on huge adj files (prevents SIGKILL)
+                        # C++ still runs for timing; file size recorded as evidence
 MAX_DIRICHLET=50000000  # Skip dirichlet on exact graphs >50M edges (prevents SIGKILL)
 NUM_THREADS=2           # PyTorch CPU threads
 

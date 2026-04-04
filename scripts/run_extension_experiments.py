@@ -656,7 +656,18 @@ def _run_one_metapath(
                 _exact_status = f"LOAD_OOM({adj_mb_exact:.0f}MB)" if adj_mb_exact else "LOAD_OOM"
                 log.warning("      Exact load/infer OOM: %s", e)
             except RuntimeError as e:
-                _exact_status = f"INFER_OOM" if "allocate" in str(e) else f"INFER_ERR:{str(e)[:60]}"
+                estr = str(e)
+                if "allocate" in estr:
+                    # Extract requested bytes from PyTorch error message
+                    import re as _re
+                    m = _re.search(r"allocate (\d+) bytes", estr)
+                    if m:
+                        gb = int(m.group(1)) / 1e9
+                        _exact_status = f"INFER_OOM({gb:.0f}GB)"
+                    else:
+                        _exact_status = "INFER_OOM"
+                else:
+                    _exact_status = f"INFER_ERR:{estr[:60]}"
                 log.warning("      Exact load/infer error: %s", e)
         except MemoryError as e:
             _exact_status = "MAT_OOM"
