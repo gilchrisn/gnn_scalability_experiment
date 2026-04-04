@@ -31,7 +31,15 @@ RUNBOOK.md
 # parallel-k-P-core-decomposition-code  # now tracked (BoolAP baseline)
 CLAUDE.md
 cs470
+data/
+datasets/
 documents
+OGB_MAG/
+OAG_CS/
+MINI_OGB_MAG/
+MINI_OAG_CS/
+MINI_RCDD/
+misc/
 .claude
 .pytest_cache
 markdown
