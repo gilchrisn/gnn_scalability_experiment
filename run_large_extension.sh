@@ -38,8 +38,10 @@ echo "graph_prep OK"
 TIMEOUT=1800            # 30 min per C++ call
 EPOCHS=50               # SAGE training epochs
 K=8                     # KMV sketch size (same as HGB runs)
-MAX_ADJ_MB=5000         # 5GB — skip Python load on huge adj files (prevents SIGKILL)
-                        # C++ still runs for timing; file size recorded as evidence
+MAX_ADJ_MB=10000        # 10GB — skip Python load on huge adj files (prevents SIGKILL)
+                        # C++ still runs for timing; file size + edge count recorded as evidence
+                        # 40% OGB_MAG (263M edges, ~4GB) loads fine for CKA comparison
+                        # 60%+ (772M+ edges, ~12GB+) → LOAD_OOM, KMV still runs
 MAX_DIRICHLET=50000000  # Skip dirichlet on exact graphs >50M edges (prevents SIGKILL)
 NUM_THREADS=2           # PyTorch CPU threads
 
