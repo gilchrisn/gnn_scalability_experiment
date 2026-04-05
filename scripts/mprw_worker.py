@@ -4,32 +4,29 @@ mprw_worker.py — MPRW materialization subprocess.
 Runs as a child process so /usr/bin/time -v can measure peak RSS,
 consistent with how Exact/KMV are measured via the C++ binary.
 
-Inputs
-------
-Reads a JSON metadata file written by exp3_inference.py before the MPRW
-sweep.  The metadata points to pre-serialized edge-index .pt files — one
-per metapath step.  These are written from the already-loaded HeteroData,
-so the subprocess never has to load the full dataset.
+Memory measurement
+------------------
+/usr/bin/time -v captures the entire subprocess peak RSS, which includes
+~300 MB of Python/PyTorch runtime overhead unrelated to the algorithm.
+To isolate only the materialization memory, we also self-report a net RSS
+delta: rss_after_materialize - rss_before_materialize (measured via psutil
+after all setup is complete).  exp3_inference.py prefers this net figure
+and falls back to /usr/bin/time -v only if psutil is unavailable.
 
-Output
-------
-Writes edge_index as a .pt file (torch.long tensor [2, E]) to the path
-given as the second argument.
-
-Stdout
-------
-Prints "time: X.XXXXXX" (wall-clock seconds for MPRWKernel.materialize)
-so exp3_inference.py can parse it the same way it parses C++ timing output.
+Stdout lines (all parsed by exp3_inference.py)
+-----------------------------------------------
+    time: X.XXXXXX          — wall-clock seconds for materialize() only
+    net_ram_mb: X.X         — net RSS increase during materialize() in MB
 
 Usage (internal — called by exp3_inference.py)
-------
+-----------------------------------------------
     python scripts/mprw_worker.py <meta_json> <output_pt> <k> <seed>
 """
 from __future__ import annotations
 
 import json
-import sys
 import os
+import sys
 import time
 
 # Project root on path
@@ -39,6 +36,23 @@ import torch
 from torch_geometric.data import HeteroData
 
 from src.kernels.mprw import MPRWKernel
+
+
+def _rss_mb() -> float:
+    """Current process RSS in MB. Prefers psutil; falls back to /proc."""
+    try:
+        import psutil
+        return psutil.Process(os.getpid()).memory_info().rss / 1e6
+    except ImportError:
+        pass
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0
+    except FileNotFoundError:
+        pass
+    return 0.0
 
 
 def main() -> None:
@@ -55,12 +69,10 @@ def main() -> None:
     with open(meta_path) as f:
         meta = json.load(f)
 
-    n_target    = meta["n_target"]
     target_type = meta["target_type"]
 
-    # Reconstruct a minimal HeteroData from the pre-serialized edge files.
-    # Only the edge_index tensors and num_nodes are needed — no features,
-    # no labels, no other attributes.
+    # Reconstruct minimal HeteroData from pre-serialized edge files.
+    # No features, no labels — only edge_index and num_nodes.
     g = HeteroData()
     triples = []
 
@@ -73,20 +85,28 @@ def main() -> None:
         g[src_t].num_nodes = step["n_src"]
         g[dst_t].num_nodes = step["n_dst"]
         g[src_t, edge_name, dst_t].edge_index = ei
-
         triples.append((src_t, edge_name, dst_t))
 
     kernel = MPRWKernel(k=k, seed=seed, device=torch.device("cpu"))
 
-    # Only the materialize() call is in the measured window.
+    # Measure RSS baseline AFTER all setup (torch loaded, edge files read).
+    # This excludes Python/PyTorch runtime overhead (~300 MB) that has nothing
+    # to do with the materialization algorithm — the same overhead is absent
+    # from the C++ Exact/KMV subprocesses, so including it would be unfair.
+    rss_before_mb = _rss_mb()
+
     data, elapsed = kernel.materialize(g, triples, target_type)
 
-    # Write output
+    rss_after_mb  = _rss_mb()
+    net_ram_mb    = max(rss_after_mb - rss_before_mb, 0.0)
+
+    # Write output edge_index
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     torch.save(data.edge_index, output_path)
 
-    # Print timing in the same format as the C++ binary so exp3 can parse it.
+    # Emit parsed fields for exp3_inference.py
     print(f"time: {elapsed:.6f}")
+    print(f"net_ram_mb: {net_ram_mb:.2f}")
 
 
 if __name__ == "__main__":

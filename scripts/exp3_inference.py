@@ -828,11 +828,22 @@ def main():
         # Total materialization time = calibration + subprocess execution.
         t_mprw_mat = time.perf_counter() - t_mat_start
 
-        # Parse peak RSS (Linux /usr/bin/time -v) from the subprocess.
+        # Parse net RSS from worker stdout (preferred: excludes Python/PyTorch
+        # runtime overhead that inflates /usr/bin/time -v by ~300 MB and has no
+        # equivalent in the C++ Exact/KMV subprocesses).
+        # Falls back to /usr/bin/time -v peak if net_ram_mb line is absent.
         mprw_peak_mb: Optional[float] = None
-        m = re.search(r"Maximum resident set size \(kbytes\):\s+(\d+)", res.stderr)
-        if m:
-            mprw_peak_mb = int(m.group(1)) / 1024.0
+        for line in res.stdout.split("\n"):
+            if line.strip().lower().startswith("net_ram_mb:"):
+                try:
+                    mprw_peak_mb = float(line.split(":")[1].strip())
+                except ValueError:
+                    pass
+                break
+        if mprw_peak_mb is None:
+            m = re.search(r"Maximum resident set size \(kbytes\):\s+(\d+)", res.stderr)
+            if m:
+                mprw_peak_mb = int(m.group(1)) / 1024.0
 
         if not mprw_out.exists():
             log.warning("  [MPRW k=%d] output file missing", k)

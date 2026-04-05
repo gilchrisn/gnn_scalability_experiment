@@ -191,7 +191,7 @@ def main():
     with open(part_path, "w") as f:
         json.dump(record, f)          # no indent — can be large for OGB_MAG
 
-    print(f"\nSaved → {part_path}  ({part_path.stat().st_size / 1024:.1f} KB)")
+    print(f"\nSaved -> {part_path}  ({part_path.stat().st_size / 1024:.1f} KB)")
 
 
 if __name__ == "__main__":

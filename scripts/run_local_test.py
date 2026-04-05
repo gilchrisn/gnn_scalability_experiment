@@ -97,7 +97,7 @@ def _fmt(val: str, col: str) -> str:
         return "—"
     try:
         f = float(val)
-        if col in ("k_value", "L", "Edge_Count"):
+        if col in ("k_value", "L", "Edge_Count", "Density_Matched_w"):
             return str(int(f)) if val.strip() != "" else "—"
         if col in ("Materialization_Time", "Inference_Time"):
             return f"{f:.2f}"
