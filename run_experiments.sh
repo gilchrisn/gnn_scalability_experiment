@@ -21,7 +21,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Defaults — override via positional env or CLI style args
 # ---------------------------------------------------------------------------
-DATASETS=("HGB_ACM" "HGB_DBLP" "HGB_IMDB" "OAG CS" "OGB_M")
+DATASETS=("HGB_ACM" "HGB_DBLP" "HGB_IMDB" "OAG_CS" "OGB_MAG")
 TRAIN_FRAC=0.1
 DEPTHS="2 3 4"
 K_VALUES="8 16 32 64 128"

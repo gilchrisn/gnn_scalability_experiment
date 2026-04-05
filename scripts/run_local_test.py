@@ -61,14 +61,15 @@ def run(cmd: list[str], step: str) -> None:
 
 # ── Table printer ─────────────────────────────────────────────────────────
 
-_COL_ORDER = ["Method", "k_value", "L", "Edge_Count",
+_COL_ORDER = ["Method", "k_value", "Density_Matched_w", "L", "Edge_Count",
               "Materialization_Time", "Inference_Time", "Peak_RAM_MB",
-              "Macro_F1", "Pred_Similarity",
+              "Macro_F1", "Pred_Similarity", "Dirichlet_Energy",
               "CKA_L1", "CKA_L2", "CKA_L3", "CKA_L4"]
 
 _HEADERS = {
     "Method":               "Method",
     "k_value":              "k",
+    "Density_Matched_w":    "w",
     "L":                    "L",
     "Edge_Count":           "Edges",
     "Materialization_Time": "Mat(s)",
@@ -76,6 +77,7 @@ _HEADERS = {
     "Peak_RAM_MB":          "RAM(MB)",
     "Macro_F1":             "MacroF1",
     "Pred_Similarity":      "PredSim",
+    "Dirichlet_Energy":     "DirE",
     "CKA_L1":               "CKA_L1",
     "CKA_L2":               "CKA_L2",
     "CKA_L3":               "CKA_L3",
@@ -83,9 +85,9 @@ _HEADERS = {
 }
 
 _WIDTHS = {
-    "Method": 7, "k_value": 5, "L": 3, "Edge_Count": 12,
+    "Method": 7, "k_value": 5, "Density_Matched_w": 6, "L": 3, "Edge_Count": 12,
     "Materialization_Time": 7, "Inference_Time": 7, "Peak_RAM_MB": 8,
-    "Macro_F1": 8, "Pred_Similarity": 8,
+    "Macro_F1": 8, "Pred_Similarity": 8, "Dirichlet_Energy": 8,
     "CKA_L1": 8, "CKA_L2": 8, "CKA_L3": 8, "CKA_L4": 8,
 }
 
@@ -196,9 +198,10 @@ def main():
             "EXP2: Train SAGE")
 
     # ── Exp 3: inference (Exact + KMV + MPRW) ────────────────────────────
-    # Delete existing rows for this metapath so we get a fresh run
+    # Delete the whole CSV so the fresh run writes a header with current schema.
     if csv_path.exists():
-        _purge_metapath_rows(csv_path, args.metapath)
+        csv_path.unlink()
+        print(f"[reset] Deleted {csv_path} (schema may have changed)")
 
     exp3_cmd = [py, "scripts/exp3_inference.py", args.dataset,
                 "--metapath",      args.metapath,

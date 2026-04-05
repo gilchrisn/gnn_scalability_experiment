@@ -48,6 +48,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -67,6 +68,7 @@ from src.data import DatasetFactory
 from src.bridge import PyGToCppAdapter
 from src.bridge.engine import CppEngine
 from src.analysis.cka import LinearCKA
+from src.analysis.metrics import DirichletEnergyMetric
 from src.models import get_model
 from src.kernels.mprw import MPRWKernel, parse_metapath_triples
 from scripts.bench_utils import compile_rule_for_cpp, generate_qnodes, setup_global_res_dirs
@@ -199,6 +201,107 @@ def _pred_agreement(z_exact: torch.Tensor, z_kmv: torch.Tensor,
     return (z_exact[mask].argmax(1) == z_kmv[mask].argmax(1)).float().mean().item()
 
 
+_de_metric = DirichletEnergyMetric()
+
+
+def _dirichlet_energy(z: torch.Tensor, edge_index: torch.Tensor,
+                      num_nodes: int, device: torch.device) -> Optional[float]:
+    """Dirichlet energy of embeddings z on the materialized graph."""
+    try:
+        return _de_metric.calculate(z.to(device), edge_index.to(device))
+    except Exception:
+        return None
+
+
+_MPRW_CALIB_MAX_ITERS = 15
+_MPRW_CALIB_TOL       = 0.05   # 5% edge-count tolerance
+
+
+def _calibrate_mprw_w(
+    g_full: "HeteroData",
+    mprw_triples: list,
+    target_ntype: str,
+    target_edges: int,
+    seed: int,
+    device: torch.device,
+    log: logging.Logger,
+    tol: float = _MPRW_CALIB_TOL,
+    w_max: int = 2000,
+) -> Tuple[int, int, bool]:
+    """
+    Binary search for walk count w such that MPRW edge count ≈ target_edges ± tol.
+
+    Termination guarantees (Gemini protocol):
+      - Halts after MAX_ITERS=15 iterations regardless of convergence.
+      - Halts early if |E_mprw - E_target| / E_target ≤ tol (5%).
+      - Halts if w_hi ceiling is hit and MPRW still can't reach target density
+        (topology exhausted — more walks only revisit the same hub nodes).
+      - Always returns the best (w, count) seen, never oscillates indefinitely.
+
+    Stochasticity note: E_mprw(w) is not perfectly monotone — random walk
+    coverage has variance. Tracking best-so-far guards against bouncing.
+
+    Returns:
+        (calibrated_w, actual_edge_count, converged)
+        converged=False means best-effort fallback was used.
+    """
+    w_lo, w_hi   = 1, w_max
+    best_w       = w_lo
+    best_count   = 0
+    best_dist    = float("inf")
+    ceiling_hit  = False
+
+    for i in range(_MPRW_CALIB_MAX_ITERS):
+        w_mid = (w_lo + w_hi) // 2
+        kern  = MPRWKernel(k=w_mid, seed=seed, device=device)
+        data, _ = kern.materialize(g_full, mprw_triples, target_ntype)
+        count = data.edge_index.size(1)
+        dist  = abs(count - target_edges)
+
+        if dist < best_dist:
+            best_w, best_count, best_dist = w_mid, count, dist
+
+        log.debug("  [calib iter %d] w=%d  edges=%d  target=%d  dist=%d",
+                  i + 1, w_mid, count, target_edges, dist)
+
+        # Early exit: within tolerance
+        if dist / max(target_edges, 1) <= tol:
+            log.info("  [calib] converged at iter %d: w=%d  edges=%d  (%.1f%% of target)",
+                     i + 1, w_mid, count, 100 * count / max(target_edges, 1))
+            return w_mid, count, True
+
+        if count > target_edges:
+            w_hi = w_mid - 1
+        else:
+            # Check ceiling: if w_mid is already at w_max and still under target,
+            # the graph topology is exhausted — more walks won't help.
+            if w_mid >= w_max:
+                ceiling_hit = True
+                log.warning(
+                    "  [calib] ceiling hit (w=%d): MPRW can only reach %d edges "
+                    "(target=%d, gap=%.1f%%). Graph topology likely exhausted.",
+                    w_mid, count, target_edges,
+                    100 * dist / max(target_edges, 1),
+                )
+                break
+            w_lo = w_mid + 1
+
+        if w_lo > w_hi:
+            break
+
+    converged = best_dist / max(target_edges, 1) <= tol
+    if not converged:
+        log.warning(
+            "  [calib] did not converge after %d iters%s. "
+            "Using best-so-far: w=%d  edges=%d  (%.1f%% of target).",
+            _MPRW_CALIB_MAX_ITERS,
+            " (ceiling hit)" if ceiling_hit else "",
+            best_w, best_count,
+            100 * best_count / max(target_edges, 1),
+        )
+    return best_w, best_count, converged
+
+
 # ---------------------------------------------------------------------------
 # CSV
 # ---------------------------------------------------------------------------
@@ -207,14 +310,29 @@ _FIELDS = [
     "Dataset", "MetaPath", "L", "Method", "k_value", "Density_Matched_w",
     "Materialization_Time", "Inference_Time", "Peak_RAM_MB", "Edge_Count",
     "CKA_L1", "CKA_L2", "CKA_L3", "CKA_L4",
-    "Pred_Similarity", "Macro_F1", "exact_status",
+    "Pred_Similarity", "Macro_F1", "Dirichlet_Energy", "exact_status",
 ]
 
 
 def _open_csv(path: Path) -> Tuple:
-    is_new = not path.exists() or path.stat().st_size == 0
-    fh     = open(path, "a", newline="", encoding="utf-8")
-    w      = csv.DictWriter(fh, fieldnames=_FIELDS)
+    # If the file exists but was written with an old schema, back it up and
+    # start fresh — new rows will be written with current _FIELDS.
+    if path.exists() and path.stat().st_size > 0:
+        with open(path, newline="", encoding="utf-8") as _f:
+            existing_fields = csv.DictReader(_f).fieldnames or []
+        if set(existing_fields) != set(_FIELDS):
+            backup = path.with_suffix(".csv.bak")
+            path.rename(backup)
+            logging.getLogger("exp3").warning(
+                "CSV schema changed — old file backed up to %s", backup)
+            is_new = True
+        else:
+            is_new = False
+    else:
+        is_new = not path.exists() or path.stat().st_size == 0
+
+    fh = open(path, "a", newline="", encoding="utf-8")
+    w  = csv.DictWriter(fh, fieldnames=_FIELDS)
     if is_new:
         w.writeheader()
     return fh, w
@@ -405,6 +523,8 @@ def main():
             z_exact_by_L[L]      = z_exact.cpu()
             layers_exact_by_L[L] = [t.cpu() for t in layers_exact] if layers_exact else None
 
+            de_exact = _dirichlet_energy(z_exact, g_exact.edge_index, n_target, device)
+
             # Write Exact row
             cka_cols = {f"CKA_L{i+1}": "" for i in range(4)}
             csv_w.writerow({
@@ -421,6 +541,7 @@ def main():
                 **cka_cols,
                 "Pred_Similarity":      "",
                 "Macro_F1":             _fmt(f1_exact),
+                "Dirichlet_Energy":     _fmt(de_exact) if de_exact is not None else "",
                 "exact_status":         "OK",
             })
             csv_fh.flush()
@@ -446,6 +567,7 @@ def main():
     # ------------------------------------------------------------------
     # KMV sweep over k values
     # ------------------------------------------------------------------
+    kmv_edges_by_k: dict = {}   # k → edge count; used later for MPRW calibration
     for k in args.k_values:
         log.info("\n--- KMV k=%d ---", k)
 
@@ -467,6 +589,7 @@ def main():
             t_kmv_mat, kmv_file = _run_sketch(engine, folder, k, kmv_seed, args.timeout)
             kmv_peak_mb = engine.last_peak_mb   # C++ child-process peak (Linux only)
             kmv_edge_count = _count_edges(kmv_file)
+            kmv_edges_by_k[k] = kmv_edge_count
             log.info("  KMV done: edges=%d  mat_time=%.2fs  peak_ram=%s",
                      kmv_edge_count, t_kmv_mat,
                      f"{kmv_peak_mb:.0f}MB" if kmv_peak_mb else "n/a")
@@ -542,8 +665,10 @@ def main():
                     except (MemoryError, RuntimeError) as e:
                         log.warning("  [k=%d L=%d] layerwise CKA OOM: %s", k, L, e)
 
-            log.info("  [k=%d L=%d] KMV  F1=%.4f  inf=%.2fs  peak_ram=%s  pred_sim=%s",
-                     k, L, f1_kmv, t_inf,
+            de_kmv = _dirichlet_energy(z_kmv, g_kmv.edge_index, n_target, device)
+
+            log.info("  [k=%d L=%d] KMV  F1=%.4f  DE=%.4f  inf=%.2fs  peak_ram=%s  pred_sim=%s",
+                     k, L, f1_kmv, de_kmv or 0, t_inf,
                      f"{kmv_peak_mb:.0f}MB" if kmv_peak_mb else "n/a",
                      pred_sim if pred_sim != "" else "n/a")
 
@@ -561,6 +686,7 @@ def main():
                 **cka_cols,
                 "Pred_Similarity":      pred_sim,
                 "Macro_F1":             _fmt(f1_kmv),
+                "Dirichlet_Energy":     _fmt(de_kmv) if de_kmv is not None else "",
                 "exact_status":         exact_status_flag,
             })
             csv_fh.flush()
@@ -572,17 +698,47 @@ def main():
         gc.collect()
 
     # ------------------------------------------------------------------
-    # MPRW sweep — same k values as KMV
+    # MPRW sweep — subprocess-based so /usr/bin/time -v measures peak RSS
+    # consistently with Exact/KMV C++ measurement.
     # ------------------------------------------------------------------
+
+    # Parse metapath into triples once.
     try:
         mprw_triples = parse_metapath_triples(args.metapath, g_full)
-        log.info("\n--- MPRW sweep ---")
     except (ValueError, RuntimeError) as e:
-        log.warning("  MPRW: could not parse metapath into triples — %s", e)
+        log.warning("  MPRW: could not parse metapath — %s", e)
         mprw_triples = None
 
+    # Serialize edge indices for each metapath step to .pt files (done once,
+    # reused across all k values).  These are tiny — just int64 COO arrays —
+    # so the subprocess never has to load the full HeteroData.
+    mprw_work_dir = Path(data_dir) / "mprw_work"
+    mprw_meta_file = mprw_work_dir / "meta.json"
+
+    if mprw_triples is not None:
+        mprw_work_dir.mkdir(parents=True, exist_ok=True)
+        mprw_meta = {"n_target": n_target, "target_type": target_ntype, "steps": []}
+        for i, (src_t, edge_name, dst_t) in enumerate(mprw_triples):
+            edge_file = mprw_work_dir / f"edge_{i}.pt"
+            torch.save(g_full[src_t, edge_name, dst_t].edge_index.cpu(), edge_file)
+            mprw_meta["steps"].append({
+                "src_type":  src_t,
+                "edge_name": edge_name,
+                "dst_type":  dst_t,
+                "n_src":     g_full[src_t].num_nodes,
+                "n_dst":     g_full[dst_t].num_nodes,
+                "edge_file": str(edge_file),
+            })
+        with open(mprw_meta_file, "w") as f:
+            json.dump(mprw_meta, f)
+        log.info("\n--- MPRW sweep (subprocess) ---")
+
+    # Reuse CppEngine's /usr/bin/time -v detection.
+    time_bin = engine._time_binary()
+    worker   = str(Path(project_root) / "scripts" / "mprw_worker.py")
+
     for k in args.k_values:
-        log.info("\n--- MPRW k=%d ---", k)
+        log.info("\n--- MPRW k=%d (density-matched to KMV) ---", k)
 
         if mprw_triples is None:
             for L in args.depth:
@@ -608,40 +764,90 @@ def main():
                 csv_fh.flush()
                 continue
 
-        try:
-            import psutil as _psutil
-            _proc = _psutil.Process(os.getpid())
-            rss_before_mb = _proc.memory_info().rss / 1e6
-        except ImportError:
-            rss_before_mb = _rss_mb()
+        # ------------------------------------------------------------------
+        # Timer starts HERE — calibration time is part of materialization cost.
+        # In a real system, an engineer using MPRW would have to run this same
+        # search to hit a memory/density budget. KMV avoids this entirely.
+        # ------------------------------------------------------------------
+        t_mat_start = time.perf_counter()
+
+        # Density calibration: binary-search for walk count w such that
+        # MPRW global edge count ≈ KMV(k) global edge count (±5%).
+        target_edges = kmv_edges_by_k.get(k)
+        if target_edges is None:
+            calibrated_w        = k
+            calibrated_edge_count = None
+            calib_converged     = False
+            log.warning("  [MPRW k=%d] KMV edge count unavailable — using w=k", k)
+        else:
+            log.info("  [MPRW k=%d] calibrating w to match KMV edge count %d ...",
+                     k, target_edges)
+            calibrated_w, calibrated_edge_count, calib_converged = _calibrate_mprw_w(
+                g_full, mprw_triples, target_ntype,
+                target_edges=target_edges,
+                seed=kmv_seed, device=device, log=log,
+            )
+
+        # ------------------------------------------------------------------
+        # Subprocess call with calibrated_w — for fair peak-RSS measurement.
+        # Time elapsed so far (calibration) is preserved in t_mat_start.
+        # ------------------------------------------------------------------
+        mprw_out  = mprw_work_dir / f"mat_mprw_{k}.pt"
+        inner_cmd = [sys.executable, worker,
+                     str(mprw_meta_file), str(mprw_out),
+                     str(calibrated_w), str(kmv_seed)]
+        cmd = ([time_bin, "-v"] + inner_cmd) if time_bin else inner_cmd
+
+        log.info("  [MPRW] Subprocess (w=%d): %s", calibrated_w, " ".join(inner_cmd))
 
         try:
-            mprw_kernel = MPRWKernel(k=k, seed=kmv_seed, device=device)
-            g_mprw, t_mprw_mat = mprw_kernel.materialize(
-                g_full, mprw_triples, target_ntype
-            )
-            g_mprw.x = x_full
-        except (MemoryError, RuntimeError) as e:
-            log.warning("  [MPRW k=%d] materialization error: %s", k, e)
+            res = subprocess.run(cmd, check=True, capture_output=True, text=True,
+                                 timeout=args.timeout)
+        except subprocess.TimeoutExpired:
+            log.warning("  [MPRW k=%d] subprocess timed out", k)
             for L in args.depth:
                 csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
                     "Dataset": args.dataset, "MetaPath": args.metapath,
                     "L": L, "Method": "MPRW", "k_value": k,
-                    "exact_status": f"MPRW_ERR:{str(e)[:60]}",
+                    "exact_status": "MPRW_TIMEOUT",
+                }))
+            csv_fh.flush()
+            continue
+        except subprocess.CalledProcessError as e:
+            log.warning("  [MPRW k=%d] subprocess failed (exit %d):\n%s",
+                        k, e.returncode, e.stderr[-400:])
+            for L in args.depth:
+                csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
+                    "Dataset": args.dataset, "MetaPath": args.metapath,
+                    "L": L, "Method": "MPRW", "k_value": k,
+                    "exact_status": f"MPRW_ERR:{e.returncode}",
                 }))
             csv_fh.flush()
             continue
 
-        try:
-            mprw_peak_mb = _psutil.Process(os.getpid()).memory_info().rss / 1e6 - rss_before_mb
-            mprw_peak_mb = max(mprw_peak_mb, 0.0)
-        except Exception:
-            mprw_peak_mb = None
+        # Total materialization time = calibration + subprocess execution.
+        t_mprw_mat = time.perf_counter() - t_mat_start
 
-        mprw_edge_count = g_mprw.edge_index.size(1)
-        log.info("  MPRW done: edges=%d  mat_time=%.2fs  delta_ram=%s",
-                 mprw_edge_count, t_mprw_mat,
-                 f"{mprw_peak_mb:.0f}MB" if mprw_peak_mb is not None else "n/a")
+        # Parse peak RSS (Linux /usr/bin/time -v) from the subprocess.
+        mprw_peak_mb: Optional[float] = None
+        m = re.search(r"Maximum resident set size \(kbytes\):\s+(\d+)", res.stderr)
+        if m:
+            mprw_peak_mb = int(m.group(1)) / 1024.0
+
+        if not mprw_out.exists():
+            log.warning("  [MPRW k=%d] output file missing", k)
+            continue
+
+        mprw_ei         = torch.load(mprw_out, weights_only=True)
+        mprw_edge_count = mprw_ei.size(1)
+
+        log.info("  MPRW done: edges=%d (calibrated_w=%d)  mat_time=%.2fs  peak_ram=%s",
+                 mprw_edge_count, calibrated_w, t_mprw_mat,
+                 f"{mprw_peak_mb:.0f}MB" if mprw_peak_mb else "n/a")
+
+        from torch_geometric.data import Data as _Data
+        g_mprw_data = _Data(edge_index=mprw_ei, num_nodes=n_target)
+        g_mprw_data.x = x_full
 
         for L in args.depth:
             if (args.metapath, str(L), "MPRW", str(k)) in done_runs:
@@ -662,12 +868,13 @@ def main():
                 p.requires_grad_(False)
 
             t0_inf  = time.perf_counter()
-            z_mprw  = _infer(model, g_mprw, in_dim, device)
+            z_mprw  = _infer(model, g_mprw_data, in_dim, device)
             t_inf   = time.perf_counter() - t0_inf
             f1_mprw = _f1_macro(z_mprw, labels_full.to(device), test_mask.to(device))
 
-            cka_cols    = {f"CKA_L{i+1}": "" for i in range(4)}
-            pred_sim    = ""
+            de_mprw  = _dirichlet_energy(z_mprw, mprw_ei, n_target, device)
+            cka_cols = {f"CKA_L{i+1}": "" for i in range(4)}
+            pred_sim = ""
             z_exact_cpu = z_exact_by_L.get(L)
 
             if z_exact_cpu is not None:
@@ -678,7 +885,7 @@ def main():
                 layers_exact = layers_exact_by_L.get(L)
                 if layers_exact is not None:
                     try:
-                        layers_mprw = _infer_layerwise(model, g_mprw, in_dim, device)
+                        layers_mprw = _infer_layerwise(model, g_mprw_data, in_dim, device)
                         for i, (le, lm) in enumerate(zip(layers_exact, layers_mprw)):
                             if i >= 4:
                                 break
@@ -688,8 +895,8 @@ def main():
                     except (MemoryError, RuntimeError) as e:
                         log.warning("  [MPRW k=%d L=%d] layerwise CKA OOM: %s", k, L, e)
 
-            log.info("  [MPRW k=%d L=%d] F1=%.4f  inf=%.2fs  pred_sim=%s",
-                     k, L, f1_mprw, t_inf,
+            log.info("  [MPRW k=%d L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  pred_sim=%s",
+                     k, L, f1_mprw, de_mprw or 0, t_inf,
                      pred_sim if pred_sim != "" else "n/a")
 
             csv_w.writerow({
@@ -698,22 +905,24 @@ def main():
                 "L":                    L,
                 "Method":               "MPRW",
                 "k_value":              k,
-                "Density_Matched_w":    mprw_kernel.min_visits,
+                "Density_Matched_w":    calibrated_w,
                 "Materialization_Time": _fmt(t_mprw_mat),
                 "Inference_Time":       _fmt(t_inf),
-                "Peak_RAM_MB":          _fmt(mprw_peak_mb, 1) if mprw_peak_mb is not None else "",
+                "Peak_RAM_MB":          _fmt(mprw_peak_mb, 1) if mprw_peak_mb else "",
                 "Edge_Count":           mprw_edge_count,
                 **cka_cols,
                 "Pred_Similarity":      pred_sim,
                 "Macro_F1":             _fmt(f1_mprw),
-                "exact_status":         exact_status_flag,
+                "Dirichlet_Energy":     _fmt(de_mprw) if de_mprw is not None else "",
+                "exact_status":         (exact_status_flag if calib_converged
+                                         else f"MPRW_CALIB_APPROX|{exact_status_flag}"),
             })
             csv_fh.flush()
 
             del model
             gc.collect()
 
-        del g_mprw
+        del g_mprw_data, mprw_ei
         gc.collect()
 
     csv_fh.close()

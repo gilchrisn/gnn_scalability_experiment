@@ -73,6 +73,35 @@ class MPRWKernel:
     # Public interface
     # ------------------------------------------------------------------
 
+    def peak_mb_estimate(self, n_target: int) -> float:
+        """
+        Analytical upper bound on peak tensor memory (MB) for one materialize() call.
+
+        Dominant allocations (all [N_target × k] tensors):
+          source_ids, current          — int64, 8 bytes each
+          alive                        — bool,  1 byte
+          Per walk step (reused):
+            walker_counts, rand, safe_counts,
+            choice, walker_offsets, next_nodes  — int64, 8 bytes each  (×6)
+          _build_edge_index worst case:
+            src, dst arrays            — int64, 8 bytes each            (×2)
+
+        Total = (2 + 0.125 + 6 + 2) × N × k × 8 bytes
+              ≈ 10 × N × k × 8 bytes  (conservative; walk-step tensors are reused)
+
+        CSR tensors (sorted_dst, offsets, counts) scale with nnz, not N×k,
+        and are built once and reused across k values in exp3 — excluded here.
+        """
+        bytes_per_walker = (
+            8   # source_ids int64
+            + 8   # current int64
+            + 1   # alive bool
+            + 8 * 6  # _walk_step intermediates (walker_counts, rand, safe_counts,
+                     #                            choice, walker_offsets, next_nodes)
+            + 8 * 2  # _build_edge_index src/dst worst case
+        )
+        return (n_target * self.k * bytes_per_walker) / (1024 ** 2)
+
     def materialize(
         self,
         g_hetero: HeteroData,
