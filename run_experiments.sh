@@ -27,6 +27,7 @@ DEPTHS="2 3 4"
 K_VALUES="8 16 32 64 128"
 EPOCHS=100
 SEED=42
+MAX_RSS_GB=""        # e.g. 100  — leave empty to disable RSS guard
 
 EXTRA_TRAIN_ARGS=""
 EXTRA_INFER_ARGS=""
@@ -34,13 +35,19 @@ EXTRA_INFER_ARGS=""
 # Parse remaining args as --key value pairs forwarded to sub-scripts
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --epochs)    EPOCHS="$2";             shift 2 ;;
-        --k-values)  K_VALUES="${@:2}";       break   ;;
-        --train-frac) TRAIN_FRAC="$2";        shift 2 ;;
-        --seed)      SEED="$2";               shift 2 ;;
-        *)           EXTRA_TRAIN_ARGS="$EXTRA_TRAIN_ARGS $1"; shift ;;
+        --epochs)      EPOCHS="$2";           shift 2 ;;
+        --k-values)    K_VALUES="${@:2}";     break   ;;
+        --train-frac)  TRAIN_FRAC="$2";       shift 2 ;;
+        --seed)        SEED="$2";             shift 2 ;;
+        --max-rss-gb)  MAX_RSS_GB="$2";       shift 2 ;;
+        *)             EXTRA_TRAIN_ARGS="$EXTRA_TRAIN_ARGS $1"; shift ;;
     esac
 done
+
+# Thread --max-rss-gb into exp3 if set
+if [[ -n "${MAX_RSS_GB}" ]]; then
+    EXTRA_INFER_ARGS="${EXTRA_INFER_ARGS} --max-rss-gb ${MAX_RSS_GB}"
+fi
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
@@ -87,7 +94,8 @@ for p in cfg.suggested_paths:
             --epochs "${EPOCHS}" \
             --partition-json "${PART_JSON}" \
             --seed "${SEED}" \
-            ${EXTRA_TRAIN_ARGS}
+            ${EXTRA_TRAIN_ARGS} \
+        || { log "WARNING: exp2 failed for ${DS} / ${MP} (exit $?) — continuing"; continue; }
 
         log "--- EXP3: ${DS}  metapath=${MP}  k=${K_VALUES} ---"
         python scripts/exp3_inference.py "${DS}" \
@@ -96,7 +104,8 @@ for p in cfg.suggested_paths:
             --k-values ${K_VALUES} \
             --partition-json "${PART_JSON}" \
             --weights-dir "results/${DS}/weights" \
-            ${EXTRA_INFER_ARGS}
+            ${EXTRA_INFER_ARGS} \
+        || log "WARNING: exp3 failed for ${DS} / ${MP} (exit $?) — continuing"
 
     done <<< "${METAPATHS}"
 

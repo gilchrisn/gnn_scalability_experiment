@@ -68,6 +68,7 @@ from src.bridge import PyGToCppAdapter
 from src.bridge.engine import CppEngine
 from src.analysis.cka import LinearCKA
 from src.models import get_model
+from src.kernels.mprw import MPRWKernel, parse_metapath_triples
 from scripts.bench_utils import compile_rule_for_cpp, generate_qnodes, setup_global_res_dirs
 
 
@@ -571,21 +572,150 @@ def main():
         gc.collect()
 
     # ------------------------------------------------------------------
-    # MPRW placeholder rows
+    # MPRW sweep — same k values as KMV
     # ------------------------------------------------------------------
-    for L in args.depth:
-        for k in args.k_values:
-            if (args.metapath, str(L), "MPRW", str(k)) in done_runs:
+    try:
+        mprw_triples = parse_metapath_triples(args.metapath, g_full)
+        log.info("\n--- MPRW sweep ---")
+    except (ValueError, RuntimeError) as e:
+        log.warning("  MPRW: could not parse metapath into triples — %s", e)
+        mprw_triples = None
+
+    for k in args.k_values:
+        log.info("\n--- MPRW k=%d ---", k)
+
+        if mprw_triples is None:
+            for L in args.depth:
+                csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
+                    "Dataset": args.dataset, "MetaPath": args.metapath,
+                    "L": L, "Method": "MPRW", "k_value": k,
+                    "exact_status": "MPRW_PARSE_ERR",
+                }))
+            csv_fh.flush()
+            continue
+
+        if args.max_rss_gb is not None:
+            rss = _rss_gb()
+            if rss is not None and rss > args.max_rss_gb:
+                log.warning("  [MPRW k=%d] RSS guard: %.1f GB > %.1f GB — skipping",
+                            k, rss, args.max_rss_gb)
+                for L in args.depth:
+                    csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
+                        "Dataset": args.dataset, "MetaPath": args.metapath,
+                        "L": L, "Method": "MPRW", "k_value": k,
+                        "exact_status": f"RSS_OOM({rss:.0f}GB)",
+                    }))
+                csv_fh.flush()
                 continue
-            csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
-                "Dataset":      args.dataset,
-                "MetaPath":     args.metapath,
-                "L":            L,
-                "Method":       "MPRW",
-                "k_value":      k,
-                "exact_status": "MPRW_PENDING",
-            }))
-    csv_fh.flush()
+
+        try:
+            import psutil as _psutil
+            _proc = _psutil.Process(os.getpid())
+            rss_before_mb = _proc.memory_info().rss / 1e6
+        except ImportError:
+            rss_before_mb = _rss_mb()
+
+        try:
+            mprw_kernel = MPRWKernel(k=k, seed=kmv_seed, device=device)
+            g_mprw, t_mprw_mat = mprw_kernel.materialize(
+                g_full, mprw_triples, target_ntype
+            )
+            g_mprw.x = x_full
+        except (MemoryError, RuntimeError) as e:
+            log.warning("  [MPRW k=%d] materialization error: %s", k, e)
+            for L in args.depth:
+                csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
+                    "Dataset": args.dataset, "MetaPath": args.metapath,
+                    "L": L, "Method": "MPRW", "k_value": k,
+                    "exact_status": f"MPRW_ERR:{str(e)[:60]}",
+                }))
+            csv_fh.flush()
+            continue
+
+        try:
+            mprw_peak_mb = _psutil.Process(os.getpid()).memory_info().rss / 1e6 - rss_before_mb
+            mprw_peak_mb = max(mprw_peak_mb, 0.0)
+        except Exception:
+            mprw_peak_mb = None
+
+        mprw_edge_count = g_mprw.edge_index.size(1)
+        log.info("  MPRW done: edges=%d  mat_time=%.2fs  delta_ram=%s",
+                 mprw_edge_count, t_mprw_mat,
+                 f"{mprw_peak_mb:.0f}MB" if mprw_peak_mb is not None else "n/a")
+
+        for L in args.depth:
+            if (args.metapath, str(L), "MPRW", str(k)) in done_runs:
+                log.info("  [MPRW k=%d L=%d] already in CSV — skipping", k, L)
+                continue
+
+            weights_path = weights_dir / f"{mp_safe}_L{L}.pt"
+            if not weights_path.exists():
+                log.warning("  [MPRW k=%d L=%d] weights not found — skipping", k, L)
+                continue
+
+            model = get_model("SAGE", in_dim, num_classes, config.HIDDEN_DIM,
+                              num_layers=L).to(device)
+            model.load_state_dict(torch.load(weights_path, weights_only=True,
+                                             map_location=device))
+            model.eval()
+            for p in model.parameters():
+                p.requires_grad_(False)
+
+            t0_inf  = time.perf_counter()
+            z_mprw  = _infer(model, g_mprw, in_dim, device)
+            t_inf   = time.perf_counter() - t0_inf
+            f1_mprw = _f1_macro(z_mprw, labels_full.to(device), test_mask.to(device))
+
+            cka_cols    = {f"CKA_L{i+1}": "" for i in range(4)}
+            pred_sim    = ""
+            z_exact_cpu = z_exact_by_L.get(L)
+
+            if z_exact_cpu is not None:
+                mask_dev = test_mask.to(device)
+                pred_sim = _fmt(_pred_agreement(
+                    z_exact_cpu.to(device), z_mprw, mask_dev))
+
+                layers_exact = layers_exact_by_L.get(L)
+                if layers_exact is not None:
+                    try:
+                        layers_mprw = _infer_layerwise(model, g_mprw, in_dim, device)
+                        for i, (le, lm) in enumerate(zip(layers_exact, layers_mprw)):
+                            if i >= 4:
+                                break
+                            val = cka_calc.calculate(
+                                le.to(device)[mask_dev], lm[mask_dev])
+                            cka_cols[f"CKA_L{i+1}"] = _fmt(val)
+                    except (MemoryError, RuntimeError) as e:
+                        log.warning("  [MPRW k=%d L=%d] layerwise CKA OOM: %s", k, L, e)
+
+            log.info("  [MPRW k=%d L=%d] F1=%.4f  inf=%.2fs  pred_sim=%s",
+                     k, L, f1_mprw, t_inf,
+                     pred_sim if pred_sim != "" else "n/a")
+
+            csv_w.writerow({
+                "Dataset":              args.dataset,
+                "MetaPath":             args.metapath,
+                "L":                    L,
+                "Method":               "MPRW",
+                "k_value":              k,
+                "Density_Matched_w":    mprw_kernel.min_visits,
+                "Materialization_Time": _fmt(t_mprw_mat),
+                "Inference_Time":       _fmt(t_inf),
+                "Peak_RAM_MB":          _fmt(mprw_peak_mb, 1) if mprw_peak_mb is not None else "",
+                "Edge_Count":           mprw_edge_count,
+                **cka_cols,
+                "Pred_Similarity":      pred_sim,
+                "Macro_F1":             _fmt(f1_mprw),
+                "exact_status":         exact_status_flag,
+            })
+            csv_fh.flush()
+
+            del model
+            gc.collect()
+
+        del g_mprw
+        gc.collect()
+
     csv_fh.close()
 
     log.info("\nDone. Results → %s", csv_path)
