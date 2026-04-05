@@ -2,11 +2,12 @@
 C++ Execution Engine implementation.
 Handles subprocess calls and result parsing for the graph_prep binary.
 """
-import cmd
 import os
+import re
 import time
 import subprocess
-from typing import List, Any
+import sys
+from typing import List, Any, Optional
 import torch
 import torch_geometric.utils as pyg_utils
 from torch_geometric.data import Data
@@ -20,9 +21,20 @@ class CppEngine(ExecutionEngine):
     def __init__(self, executable_path: str, data_dir: str):
         self.executable = executable_path
         self.data_dir = data_dir
+        self.last_peak_mb: Optional[float] = None   # set after each run_command call
 
         if not os.path.exists(executable_path):
             raise FileNotFoundError(f"C++ binary missing: {executable_path}")
+
+    @staticmethod
+    def _time_binary() -> Optional[str]:
+        """Return path to GNU time -v if available (Linux only)."""
+        if sys.platform == "win32":
+            return None
+        for candidate in ("/usr/bin/time", "/usr/local/bin/gtime"):
+            if os.path.exists(candidate):
+                return candidate
+        return None
 
     def _sanitize_path(self, path: str) -> str:
         """
@@ -42,27 +54,40 @@ class CppEngine(ExecutionEngine):
         Args:
             timeout: Subprocess timeout in seconds. Raises RuntimeError on expiry.
         """
+        self.last_peak_mb = None   # reset before each run
+
         bin_path = self._sanitize_path(self.executable)
         data_path = self._sanitize_path(self.data_dir)
         rule_path = self._sanitize_path(rule_file)
         out_path = self._sanitize_path(output_file)
 
-        cmd: List[str] = [bin_path, mode, data_path, rule_path, out_path]
+        inner_cmd: List[str] = [bin_path, mode, data_path, rule_path, out_path]
 
         if mode == 'sketch':
             if k is None:
                 raise ValueError("Argument 'k' is required for sketch mode.")
-            cmd.append(str(k))
-            cmd.append(str(l_val))
+            inner_cmd.append(str(k))
+            inner_cmd.append(str(l_val))
             if seed is not None:
-                cmd.append(str(seed))
+                inner_cmd.append(str(seed))
 
-        print(f"    [C++] Exec: {' '.join(cmd)}")
+        # Wrap with GNU time -v on Linux to capture child-process peak RSS.
+        # Falls back silently if the binary is unavailable (Windows, minimal containers).
+        time_bin = self._time_binary()
+        cmd: List[str] = ([time_bin, "-v"] + inner_cmd) if time_bin else inner_cmd
+
+        print(f"    [C++] Exec: {' '.join(inner_cmd)}")
         start_fallback = time.perf_counter()
 
         try:
             res = subprocess.run(cmd, check=True, capture_output=True, text=True,
                                  timeout=timeout)
+
+            # Parse GNU time peak RSS from stderr (Linux only path).
+            # "Maximum resident set size (kbytes): 12345"
+            m = re.search(r"Maximum resident set size \(kbytes\):\s+(\d+)", res.stderr)
+            if m:
+                self.last_peak_mb = int(m.group(1)) / 1024.0
 
             # 1. Try to intercept Pure C++ Algorithmic Time (For Benchmarking Mode)
             for line in res.stdout.split('\n'):

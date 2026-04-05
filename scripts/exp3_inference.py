@@ -1,7 +1,7 @@
 """
 Experiment 3 — Inference sweep: Exact vs KMV across k values.
 
-Reads partition.json (from exp1_inductive_split.py) and frozen weights
+Reads partition.json (from exp1_partition.py) and frozen weights
 (from exp2_train.py), then materializes the FULL graph with ExactD (once)
 and with KMV sketch at each k, runs the frozen SAGE model, and evaluates
 all metrics restricted to V_test nodes only.
@@ -101,30 +101,15 @@ def _rss_gb() -> Optional[float]:
 
 def _make_test_mask(g_full: HeteroData, part: dict) -> torch.Tensor:
     """
-    Returns a boolean mask over g_full[pivot_ntype] where True = V_test.
-    V_test = complement of V_train determined from partition.json.
+    Returns a boolean mask over g_full[target_type] where True = V_test.
+    test_node_ids is read directly from partition.json (exp1_partition.py).
     """
-    pivot_ntype    = part["pivot_ntype"]
-    partition_mode = part["partition_mode"]
-    train_frac     = part["train_frac"]
-    n_pivot        = g_full[pivot_ntype].num_nodes
-
-    if partition_mode == "temporal_year":
-        years = g_full[pivot_ntype].year.squeeze()
-        sorted_years, _ = years.sort()
-        cutoff_idx = max(1, int(train_frac * len(sorted_years))) - 1
-        year_cutoff = sorted_years[cutoff_idx].item()
-        train_mask = years <= year_cutoff
-    else:  # random_nodes
-        seed = part["seed"]
-        gen  = torch.Generator()
-        gen.manual_seed(seed)
-        perm  = torch.randperm(n_pivot, generator=gen)
-        n_tr  = max(1, int(train_frac * n_pivot))
-        train_mask = torch.zeros(n_pivot, dtype=torch.bool)
-        train_mask[perm[:n_tr]] = True
-
-    return ~train_mask  # V_test = NOT in V_train
+    target_ntype = part["target_type"]   # exp1_partition.py key
+    n_target     = g_full[target_ntype].num_nodes
+    test_ids     = torch.tensor(part["test_node_ids"], dtype=torch.long)
+    mask         = torch.zeros(n_target, dtype=torch.bool)
+    mask[test_ids] = True
+    return mask
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +203,7 @@ def _pred_agreement(z_exact: torch.Tensor, z_kmv: torch.Tensor,
 # ---------------------------------------------------------------------------
 
 _FIELDS = [
-    "Dataset", "MetaPath", "L", "Method", "k_value",
+    "Dataset", "MetaPath", "L", "Method", "k_value", "Density_Matched_w",
     "Materialization_Time", "Inference_Time", "Peak_RAM_MB", "Edge_Count",
     "CKA_L1", "CKA_L2", "CKA_L3", "CKA_L4",
     "Pred_Similarity", "Macro_F1", "exact_status",
@@ -311,20 +296,17 @@ def main():
     folder       = config.get_folder_name(args.dataset)
     data_dir     = os.path.join(project_root, folder)
     target_ntype = cfg.target_node
-    pivot_ntype  = part["pivot_ntype"]
+
+    assert part["target_type"] == target_ntype, (
+        f"partition target_type '{part['target_type']}' != config target_node "
+        f"'{target_ntype}'. Re-run exp1_partition.py."
+    )
 
     g_full, info = DatasetFactory.get_data(cfg.source, cfg.dataset_name, cfg.target_node)
     num_classes  = info["num_classes"]
     labels_full  = info["labels"]    # [N_target]
 
-    # Test mask (over pivot nodes, which equals target nodes in practice)
-    test_mask_pivot = _make_test_mask(g_full, part)   # shape [N_pivot]
-    # If pivot == target, test_mask applies directly to labels
-    assert pivot_ntype == target_ntype, (
-        f"pivot_ntype '{pivot_ntype}' != target_ntype '{target_ntype}'. "
-        "Mixed-type partitioning not supported in exp3."
-    )
-    test_mask = test_mask_pivot   # [N_target]
+    test_mask = _make_test_mask(g_full, part)   # True = V_test, shape [N_target]
 
     log.info("  V_test=%d / V_total=%d  (%.1f%%)",
              test_mask.sum().item(), len(test_mask),
@@ -348,8 +330,8 @@ def main():
     x_full      = g_full[target_ntype].x     # feature matrix [N_target, D]
     in_dim      = x_full.size(1)
 
-    kmv_seed    = part.get("kmv_seed", 0)
-    device      = config.DEVICE
+    kmv_seed    = part.get("hash_seed", 0)   # exp1_partition.py key
+    device      = torch.device("cpu")   # inference always on CPU for fair timing
     cka_calc    = LinearCKA(device=device)
 
     # ------------------------------------------------------------------
@@ -372,9 +354,11 @@ def main():
     try:
         t0             = time.perf_counter()
         t_exact_mat, exact_file = _run_exact(engine, folder, args.timeout)
+        exact_peak_mb = engine.last_peak_mb   # C++ child-process peak (Linux only)
         exact_edge_count = _count_edges(exact_file)
-        log.info("  ExactD done: edges=%d  mat_time=%.2fs  [RAM=%.0fMB]",
-                 exact_edge_count, t_exact_mat, _rss_mb())
+        log.info("  ExactD done: edges=%d  mat_time=%.2fs  peak_ram=%s",
+                 exact_edge_count, t_exact_mat,
+                 f"{exact_peak_mb:.0f}MB" if exact_peak_mb else "n/a")
 
         g_exact = _load_adj(engine, exact_file, n_target, node_offset, args.max_adj_mb)
         g_exact.x = x_full
@@ -412,7 +396,6 @@ def main():
 
             z_exact_by_L[L]      = z_exact.cpu()
             layers_exact_by_L[L] = [t.cpu() for t in layers_exact] if layers_exact else None
-            ram_mb = _rss_mb()
 
             # Write Exact row
             cka_cols = {f"CKA_L{i+1}": "" for i in range(4)}
@@ -422,9 +405,10 @@ def main():
                 "L":                    L,
                 "Method":               "Exact",
                 "k_value":              "",
+                "Density_Matched_w":    "",
                 "Materialization_Time": _fmt(t_exact_mat),
                 "Inference_Time":       _fmt(t_inf),
-                "Peak_RAM_MB":          _fmt(ram_mb, 1),
+                "Peak_RAM_MB":          _fmt(exact_peak_mb, 1),
                 "Edge_Count":           exact_edge_count,
                 **cka_cols,
                 "Pred_Similarity":      "",
@@ -432,8 +416,9 @@ def main():
                 "exact_status":         "OK",
             })
             csv_fh.flush()
-            log.info("  [L=%d] Exact  F1=%.4f  inf=%.2fs  RAM=%.0fMB",
-                     L, f1_exact, t_inf, ram_mb)
+            log.info("  [L=%d] Exact  F1=%.4f  inf=%.2fs  peak_ram=%s",
+                     L, f1_exact, t_inf,
+                     f"{exact_peak_mb:.0f}MB" if exact_peak_mb else "n/a")
 
             del model
             gc.collect()
@@ -472,9 +457,11 @@ def main():
 
         try:
             t_kmv_mat, kmv_file = _run_sketch(engine, folder, k, kmv_seed, args.timeout)
+            kmv_peak_mb = engine.last_peak_mb   # C++ child-process peak (Linux only)
             kmv_edge_count = _count_edges(kmv_file)
-            log.info("  KMV done: edges=%d  mat_time=%.2fs  [RAM=%.0fMB]",
-                     kmv_edge_count, t_kmv_mat, _rss_mb())
+            log.info("  KMV done: edges=%d  mat_time=%.2fs  peak_ram=%s",
+                     kmv_edge_count, t_kmv_mat,
+                     f"{kmv_peak_mb:.0f}MB" if kmv_peak_mb else "n/a")
 
             g_kmv = _load_adj(engine, kmv_file, n_target, node_offset, args.max_adj_mb)
             g_kmv.x = x_full
@@ -522,7 +509,6 @@ def main():
             z_kmv  = _infer(model, g_kmv, in_dim, device)
             t_inf  = time.perf_counter() - t0_inf
             f1_kmv = _f1_macro(z_kmv, labels_full.to(device), test_mask.to(device))
-            ram_mb = _rss_mb()
 
             # CKA metrics against exact (if available)
             cka_cols    = {f"CKA_L{i+1}": "" for i in range(4)}
@@ -548,8 +534,9 @@ def main():
                     except (MemoryError, RuntimeError) as e:
                         log.warning("  [k=%d L=%d] layerwise CKA OOM: %s", k, L, e)
 
-            log.info("  [k=%d L=%d] KMV  F1=%.4f  inf=%.2fs  RAM=%.0fMB  pred_sim=%s",
-                     k, L, f1_kmv, t_inf, ram_mb,
+            log.info("  [k=%d L=%d] KMV  F1=%.4f  inf=%.2fs  peak_ram=%s  pred_sim=%s",
+                     k, L, f1_kmv, t_inf,
+                     f"{kmv_peak_mb:.0f}MB" if kmv_peak_mb else "n/a",
                      pred_sim if pred_sim != "" else "n/a")
 
             csv_w.writerow({
@@ -558,9 +545,10 @@ def main():
                 "L":                    L,
                 "Method":               "KMV",
                 "k_value":              k,
+                "Density_Matched_w":    "",
                 "Materialization_Time": _fmt(t_kmv_mat),
                 "Inference_Time":       _fmt(t_inf),
-                "Peak_RAM_MB":          _fmt(ram_mb, 1),
+                "Peak_RAM_MB":          _fmt(kmv_peak_mb, 1),
                 "Edge_Count":           kmv_edge_count,
                 **cka_cols,
                 "Pred_Similarity":      pred_sim,

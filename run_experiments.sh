@@ -55,20 +55,24 @@ for DS in "${DATASETS[@]}"; do
     # Exp 1 — Temporal / stratified partition
     # -----------------------------------------------------------------------
     log "=== EXP1: ${DS} ==="
-    python scripts/exp1_inductive_split.py "${DS}" \
-        --train-frac "${TRAIN_FRAC}" \
-        --seed "${SEED}"
 
-    [[ -f "${PART_JSON}" ]] || { echo "ERROR: partition.json missing for ${DS}"; exit 1; }
-    log "partition.json ready: ${PART_JSON}"
-
-    # Read metapaths from config
+    # Read target node type and metapaths from config (no hardcoding)
+    TARGET_TYPE=$(python -c "from src.config import config; print(config.get_dataset_config('${DS}').target_node)")
     METAPATHS=$(python -c "
 from src.config import config
 cfg = config.get_dataset_config('${DS}')
 for p in cfg.suggested_paths:
     print(p)
 ")
+
+    python scripts/exp1_partition.py \
+        --dataset "${DS}" \
+        --target-type "${TARGET_TYPE}" \
+        --train-frac "${TRAIN_FRAC}" \
+        --seed "${SEED}"
+
+    [[ -f "${PART_JSON}" ]] || { echo "ERROR: partition.json missing for ${DS}"; exit 1; }
+    log "partition.json ready: ${PART_JSON}"
 
     # -----------------------------------------------------------------------
     # Exp 2 + 3 — per metapath

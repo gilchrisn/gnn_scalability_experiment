@@ -1,7 +1,7 @@
 """
 Experiment 2 — Train SAGE(L) on V_train.
 
-Reads partition.json (from exp1_inductive_split.py), reconstructs the V_train
+Reads partition.json (from exp1_partition.py), reconstructs the V_train
 induced subgraph, runs C++ ExactD once for strict isolation, then trains
 SAGEConv with num_layers=L for each requested depth.
 
@@ -16,7 +16,7 @@ Output
 
 Usage
 -----
-    python scripts/exp1_inductive_split.py HGB_DBLP --train-frac 0.1
+    python scripts/exp1_partition.py --dataset HGB_DBLP --target-type author --train-frac 0.1
     python scripts/exp2_train.py HGB_DBLP \\
         --metapath author_to_paper,paper_to_author \\
         --depth 2 3 4 \\
@@ -60,28 +60,15 @@ from scripts.bench_utils import compile_rule_for_cpp, generate_qnodes, setup_glo
 def _make_train_subgraph(g: HeteroData, part: dict, labels: torch.Tensor,
                          masks: dict, target_ntype: str) -> HeteroData:
     """
-    Build the training subgraph by filtering ONLY the pivot node type to
-    train_frac.  Every other node type is kept at 100% — authors, subjects,
-    institutions etc. are not pruned just because some of their papers are
-    held out.  Only edges whose pivot-type endpoint falls outside V_train
+    Build the training subgraph by filtering ONLY the target node type to
+    V_train (read directly from partition.json).  Every other node type is
+    kept at 100%.  Only edges whose target-type endpoint falls outside V_train
     are dropped.
     """
-    pivot_ntype    = part["pivot_ntype"]
-    partition_mode = part["partition_mode"]
-    train_frac     = part["train_frac"]
+    pivot_ntype = part["target_type"]   # exp1_partition.py key
 
-    # Determine which pivot nodes to keep (sorted for deterministic remapping)
-    if partition_mode == "temporal_year":
-        years = g[pivot_ntype].year.squeeze()
-        sorted_years, _ = years.sort()
-        cutoff   = sorted_years[max(1, int(train_frac * len(sorted_years))) - 1].item()
-        keep_ids = (years <= cutoff).nonzero(as_tuple=False).squeeze(1)
-    else:
-        gen = torch.Generator()
-        gen.manual_seed(part["seed"])
-        perm     = torch.randperm(g[pivot_ntype].num_nodes, generator=gen)
-        keep_ids = perm[:max(1, int(train_frac * g[pivot_ntype].num_nodes))]
-
+    # V_train node IDs are pre-computed and stored in partition.json.
+    keep_ids = torch.tensor(part["train_node_ids"], dtype=torch.long)
     keep_ids, _ = keep_ids.sort()  # deterministic new-ID assignment
 
     # old pivot ID → new pivot ID (non-kept → -1)
@@ -388,9 +375,20 @@ def main():
 
             log.info("\n[L=%d] Training SAGE(%d)...", L, L)
             t0 = time.perf_counter()
-            model, history, conv_epoch = _train(
-                g_h0, in_dim, info["num_classes"], L, args.epochs, device, log
-            )
+            try:
+                model, history, conv_epoch = _train(
+                    g_h0, in_dim, info["num_classes"], L, args.epochs, device, log
+                )
+            except RuntimeError as e:
+                if "CUDA" in str(e) and device.type == "cuda":
+                    log.warning("  [L=%d] GPU OOM — retrying on CPU", L)
+                    torch.cuda.empty_cache()
+                    device = torch.device("cpu")
+                    model, history, conv_epoch = _train(
+                        g_h0, in_dim, info["num_classes"], L, args.epochs, device, log
+                    )
+                else:
+                    raise
             t_train = time.perf_counter() - t0
 
             weights_path = str(weights_dir / f"{mp_safe}_L{L}.pt")
