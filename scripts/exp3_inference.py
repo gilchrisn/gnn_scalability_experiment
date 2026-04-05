@@ -360,6 +360,13 @@ def main():
                  exact_edge_count, t_exact_mat,
                  f"{exact_peak_mb:.0f}MB" if exact_peak_mb else "n/a")
 
+        if args.max_rss_gb is not None:
+            rss = _rss_gb()
+            if rss is not None and rss > args.max_rss_gb:
+                raise MemoryError(
+                    f"RSS guard: {rss:.1f} GB > {args.max_rss_gb:.1f} GB before loading exact adj"
+                )
+
         g_exact = _load_adj(engine, exact_file, n_target, node_offset, args.max_adj_mb)
         g_exact.x = x_full
         log.info("  Loaded exact adjacency  [RAM=%.0fMB]", _rss_mb())
