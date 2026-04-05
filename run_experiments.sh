@@ -21,13 +21,13 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Defaults — override via positional env or CLI style args
 # ---------------------------------------------------------------------------
-DATASETS=("HGB_ACM" "HGB_DBLP" "HGB_IMDB")
+DATASETS=("HGB_ACM" "HGB_DBLP" "HGB_IMDB" "OAG CS" "OGB_M")
 TRAIN_FRAC=0.1
 DEPTHS="2 3 4"
 K_VALUES="8 16 32 64 128"
 EPOCHS=100
 SEED=42
-MAX_RSS_GB=""        # e.g. 100  — leave empty to disable RSS guard
+MAX_RSS_GB=32        # e.g. 100  — leave empty to disable RSS guard
 
 EXTRA_TRAIN_ARGS=""
 EXTRA_INFER_ARGS=""
@@ -104,6 +104,7 @@ for p in cfg.suggested_paths:
             --k-values ${K_VALUES} \
             --partition-json "${PART_JSON}" \
             --weights-dir "results/${DS}/weights" \
+            --max-rss-gb ${MAX_RSS_GB} \
             ${EXTRA_INFER_ARGS} \
         || log "WARNING: exp3 failed for ${DS} / ${MP} (exit $?) — continuing"
 
