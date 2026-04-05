@@ -47,6 +47,22 @@ def _mem_mb() -> str:
     except ImportError:
         return "?MB"
 
+
+def _rss_gb() -> Optional[float]:
+    """Current RSS in GB. Returns None if psutil not available."""
+    try:
+        with open('/proc/self/status') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1]) / (1024 * 1024)
+    except FileNotFoundError:
+        pass
+    try:
+        import psutil
+        return psutil.Process().memory_info().rss / 1e9
+    except ImportError:
+        return None
+
 import torch
 import torch.nn.functional as F
 from torch_geometric.data import Data
@@ -441,6 +457,7 @@ def _run_one_metapath(
     ext_fh,
     ext_w:       csv.DictWriter,
     log:         logging.Logger,
+    max_rss_gb:  Optional[float] = None,
 ) -> None:
     infer_device = config.DEVICE  # CPU when --cpu is set (fair timing for Phase 2)
     train_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -594,6 +611,26 @@ def _run_one_metapath(
     for i, frac in enumerate(fractions):
         label = f"t={i} ({int(frac*100)}%)"
         log.info("    [Phase 2] %s  [RSS=%s]", label, _mem_mb())
+
+        # RSS guard: if process memory already exceeds limit, skip this fraction
+        # entirely (both exact and KMV). Python's allocator doesn't release heap
+        # back to the OS even after gc.collect(), so RSS can only grow across
+        # fractions. This prevents SIGKILL on large feature-heavy datasets like
+        # OAG_CS (768-dim × millions of nodes).
+        if max_rss_gb is not None:
+            current_rss = _rss_gb()
+            if current_rss is not None and current_rss > max_rss_gb:
+                log.warning("      [RSS guard] %.1f GB > limit %.1f GB — skipping fraction",
+                            current_rss, max_rss_gb)
+                ext_w.writerow({f: "" for f in _EXT_FIELDS} | {
+                    "dataset": dataset, "metapath": metapath,
+                    "snapshot": label, "fraction": frac, "k": k,
+                    "t_train": round(t_train, 6),
+                    "exact_status": f"RSS_OOM({current_rss:.0f}GB)",
+                })
+                ext_fh.flush()
+                continue
+
         g_snap = _make_snap(frac)
 
         # Per-snapshot params (node counts change with node-level filtering)
@@ -799,6 +836,12 @@ def main() -> None:
     parser.add_argument("--max-adj-mb",      type=float, default=50.0,
                         help="Skip metapaths whose EXACT adjacency file exceeds this size in MB. "
                              "Default: 50 (laptop-safe). Set 0 to disable (no limit, for servers).")
+    parser.add_argument("--max-rss-gb",      type=float, default=None,
+                        help="Skip a fraction when process RSS already exceeds this threshold (GB). "
+                             "Guards against SIGKILL on large feature-heavy datasets (e.g. OAG_CS "
+                             "with 768-dim features). Writes RSS_OOM(<GB>) to exact_status. "
+                             "KMV adj file is small so --max-adj-mb won't catch accumulated RSS. "
+                             "Recommended: 24 for 32GB servers (leaves headroom for g_full).")
     parser.add_argument("--max-dirichlet-edges", type=int, default=0,
                         help="Skip dirichlet/layerwise on exact graphs with more edges than this. "
                              "Prevents Linux OOM-killer (SIGKILL). 0 = no limit. "
@@ -840,9 +883,10 @@ def main() -> None:
              args.fractions, args.k, args.epochs, args.topr)
     log.info("  min_conf=%.3f  max_metapaths=%d  mining_timeout=%ds",
              args.min_conf, args.max_metapaths, args.mining_timeout)
-    log.info("  timeout=%ds  max_adj_mb=%s  num_cpu_threads=%d",
+    log.info("  timeout=%ds  max_adj_mb=%s  max_rss_gb=%s  num_cpu_threads=%d",
              args.timeout,
              f"{args.max_adj_mb:.0f} MB" if args.max_adj_mb else "unlimited",
+             f"{args.max_rss_gb:.0f} GB" if args.max_rss_gb else "unlimited",
              args.num_cpu_threads)
     log.info("  Output → %s/", out_dir)
     log.info("=" * 60)
@@ -936,6 +980,7 @@ def main() -> None:
                     topr=args.topr, max_adj_mb=args.max_adj_mb,
                     max_dirichlet_edges=args.max_dirichlet_edges,
                     timeout=args.timeout, ext_fh=ext_fh, ext_w=ext_w, log=log,
+                    max_rss_gb=args.max_rss_gb,
                 )
                 ext_fh.flush()
             except SystemExit as exc:

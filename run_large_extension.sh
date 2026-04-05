@@ -43,6 +43,10 @@ MAX_ADJ_MB=10000        # 10GB — skip Python load on huge adj files (prevents 
                         # 40% OGB_MAG (263M edges, ~4GB) loads fine for CKA comparison
                         # 60%+ (772M+ edges, ~12GB+) → LOAD_OOM, KMV still runs
 MAX_DIRICHLET=50000000  # Skip dirichlet on exact graphs >50M edges (prevents SIGKILL)
+MAX_RSS_OAG_CS=24       # OAG_CS: 768-dim XLNet features accumulate ~32GB RSS by 80%
+                        # g_full + g_snap copies don't release back to OS (Python allocator)
+                        # --max-adj-mb can't catch this (KMV adj file is tiny, ~20MB)
+                        # 24GB threshold: completes 20%/40%/60%, skips 80%/100% gracefully
 NUM_THREADS=2           # PyTorch CPU threads
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -81,6 +85,7 @@ python scripts/run_extension_experiments.py OAG_CS \
     --epochs "$EPOCHS" --k "$K" --timeout "$TIMEOUT" \
     --max-adj-mb "$MAX_ADJ_MB" \
     --max-dirichlet-edges "$MAX_DIRICHLET" \
+    --max-rss-gb "$MAX_RSS_OAG_CS" \
     --num-cpu-threads "$NUM_THREADS" \
     --cpu \
     2>&1 | tee -a "$LOG" || echo "  [WARN] OAG_CS extension failed" | tee -a "$LOG"
