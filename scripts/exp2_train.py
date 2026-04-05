@@ -47,7 +47,7 @@ sys.path.insert(0, project_root)
 
 from src.config import config
 from src.data import DatasetFactory
-from src.bridge import PyGToCppAdapter, GraphPrepRunner
+from src.bridge import PyGToCppAdapter
 from src.bridge.engine import CppEngine
 from src.models import get_model
 from scripts.bench_utils import compile_rule_for_cpp, generate_qnodes, setup_global_res_dirs
@@ -57,85 +57,78 @@ from scripts.bench_utils import compile_rule_for_cpp, generate_qnodes, setup_glo
 # V_train reconstruction
 # ---------------------------------------------------------------------------
 
-def _induced_subgraph(g: HeteroData, keep_ids: torch.Tensor, pivot_ntype: str) -> HeteroData:
-    id_map = torch.full((g[pivot_ntype].num_nodes,), -1, dtype=torch.long)
-    id_map[keep_ids] = torch.arange(keep_ids.size(0))
-
-    filtered_edges: dict = {}
-    referenced: dict = {nt: set() for nt in g.node_types if nt != pivot_ntype}
-
-    for src_type, rel, dst_type in g.edge_types:
-        ei    = g[src_type, rel, dst_type].edge_index
-        src_i, dst_i = ei[0].clone(), ei[1].clone()
-        valid = torch.ones(ei.size(1), dtype=torch.bool)
-        if src_type == pivot_ntype:
-            valid &= id_map[src_i] >= 0
-        if dst_type == pivot_ntype:
-            valid &= id_map[dst_i] >= 0
-        src_i, dst_i = src_i[valid], dst_i[valid]
-        filtered_edges[(src_type, rel, dst_type)] = (src_i, dst_i)
-        if src_type != pivot_ntype and src_i.numel() > 0:
-            referenced[src_type].update(src_i.tolist())
-        if dst_type != pivot_ntype and dst_i.numel() > 0:
-            referenced[dst_type].update(dst_i.tolist())
-
-    for ntype in g.node_types:
-        if ntype == pivot_ntype:
-            continue
-        old = (torch.tensor(sorted(referenced[ntype]), dtype=torch.long)
-               if referenced[ntype] else torch.zeros(0, dtype=torch.long))
-        mapping = torch.full((g[ntype].num_nodes,), -1, dtype=torch.long)
-        mapping[old] = torch.arange(old.size(0))
-        referenced[ntype] = mapping  # reuse dict
-
-    id_maps = {pivot_ntype: id_map}
-    for ntype in g.node_types:
-        if ntype != pivot_ntype:
-            id_maps[ntype] = referenced[ntype]
-
-    g_sub = HeteroData()
-    for ntype in g.node_types:
-        surviving = (id_maps[ntype] >= 0).nonzero(as_tuple=False).squeeze(1)
-        for key, val in g[ntype].items():
-            if isinstance(val, torch.Tensor) and val.size(0) == g[ntype].num_nodes:
-                g_sub[ntype][key] = val[surviving]
-            else:
-                g_sub[ntype][key] = val
-        g_sub[ntype].num_nodes = surviving.size(0)
-
-    for (src_type, rel, dst_type), (src_i, dst_i) in filtered_edges.items():
-        if src_i.numel() == 0:
-            g_sub[src_type, rel, dst_type].edge_index = torch.zeros((2, 0), dtype=torch.long)
-            continue
-        g_sub[src_type, rel, dst_type].edge_index = torch.stack(
-            [id_maps[src_type][src_i], id_maps[dst_type][dst_i]], dim=0
-        )
-    return g_sub
-
-
 def _make_train_subgraph(g: HeteroData, part: dict, labels: torch.Tensor,
                          masks: dict, target_ntype: str) -> HeteroData:
+    """
+    Build the training subgraph by filtering ONLY the pivot node type to
+    train_frac.  Every other node type is kept at 100% — authors, subjects,
+    institutions etc. are not pruned just because some of their papers are
+    held out.  Only edges whose pivot-type endpoint falls outside V_train
+    are dropped.
+    """
     pivot_ntype    = part["pivot_ntype"]
     partition_mode = part["partition_mode"]
     train_frac     = part["train_frac"]
 
-    g[target_ntype].y          = labels
-    g[target_ntype].train_mask = masks["train"]
-    g[target_ntype].val_mask   = masks["val"]
-    g[target_ntype].test_mask  = masks["test"]
-
+    # Determine which pivot nodes to keep (sorted for deterministic remapping)
     if partition_mode == "temporal_year":
         years = g[pivot_ntype].year.squeeze()
         sorted_years, _ = years.sort()
-        cutoff = sorted_years[max(1, int(train_frac * len(sorted_years))) - 1].item()
+        cutoff   = sorted_years[max(1, int(train_frac * len(sorted_years))) - 1].item()
         keep_ids = (years <= cutoff).nonzero(as_tuple=False).squeeze(1)
     else:
         gen = torch.Generator()
         gen.manual_seed(part["seed"])
-        perm = torch.randperm(g[pivot_ntype].num_nodes, generator=gen)
+        perm     = torch.randperm(g[pivot_ntype].num_nodes, generator=gen)
         keep_ids = perm[:max(1, int(train_frac * g[pivot_ntype].num_nodes))]
 
-    return _induced_subgraph(g, keep_ids, pivot_ntype)
+    keep_ids, _ = keep_ids.sort()  # deterministic new-ID assignment
+
+    # old pivot ID → new pivot ID (non-kept → -1)
+    id_map = torch.full((g[pivot_ntype].num_nodes,), -1, dtype=torch.long)
+    id_map[keep_ids] = torch.arange(keep_ids.size(0))
+
+    g_sub = HeteroData()
+
+    # All non-pivot node types: copy everything unchanged
+    for ntype in g.node_types:
+        if ntype == pivot_ntype:
+            continue
+        g_sub[ntype].num_nodes = g[ntype].num_nodes
+        for key, val in g[ntype].items():
+            g_sub[ntype][key] = val
+
+    # Pivot type: slice to kept nodes, attach labels/masks
+    g_sub[pivot_ntype].num_nodes = keep_ids.size(0)
+    for key, val in g[pivot_ntype].items():
+        if isinstance(val, torch.Tensor) and val.size(0) == g[pivot_ntype].num_nodes:
+            g_sub[pivot_ntype][key] = val[keep_ids]
+        else:
+            g_sub[pivot_ntype][key] = val
+
+    # Attach labels / masks onto the (already sliced) target type
+    g_sub[target_ntype].y          = labels[keep_ids] if target_ntype == pivot_ntype else labels
+    g_sub[target_ntype].train_mask = (masks["train"][keep_ids]
+                                      if target_ntype == pivot_ntype else masks["train"])
+    g_sub[target_ntype].val_mask   = (masks["val"][keep_ids]
+                                      if target_ntype == pivot_ntype else masks["val"])
+    g_sub[target_ntype].test_mask  = (masks["test"][keep_ids]
+                                      if target_ntype == pivot_ntype else masks["test"])
+
+    # Edges: drop any edge whose pivot-type endpoint is outside keep_ids;
+    # remap pivot-type endpoints to new local IDs; leave all other IDs unchanged.
+    for src_type, rel, dst_type in g.edge_types:
+        ei    = g[src_type, rel, dst_type].edge_index
+        valid = torch.ones(ei.size(1), dtype=torch.bool)
+        if src_type == pivot_ntype:
+            valid &= id_map[ei[0]] >= 0
+        if dst_type == pivot_ntype:
+            valid &= id_map[ei[1]] >= 0
+        new_src = id_map[ei[0][valid]] if src_type == pivot_ntype else ei[0][valid]
+        new_dst = id_map[ei[1][valid]] if dst_type == pivot_ntype else ei[1][valid]
+        g_sub[src_type, rel, dst_type].edge_index = torch.stack([new_src, new_dst])
+
+    return g_sub
 
 
 def _fix_masks(g_snap: HeteroData, target_ntype: str) -> None:
@@ -349,9 +342,9 @@ def main():
     # ------------------------------------------------------------------
     # Stage C++ files + run ExactD (once, reused across all L)
     # ------------------------------------------------------------------
-    data_dir, _ = setup_global_res_dirs(args.dataset)
-    runner      = GraphPrepRunner(config.CPP_EXECUTABLE)
-    engine      = CppEngine(data_dir, runner)
+    data_dir = os.path.join(project_root, folder)
+    setup_global_res_dirs(folder, project_root)
+    engine   = CppEngine(executable_path=config.CPP_EXECUTABLE, data_dir=data_dir)
 
     PyGToCppAdapter(data_dir).convert(g_train)
     compile_rule_for_cpp(args.metapath, g_train, data_dir, folder)

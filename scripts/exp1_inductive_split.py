@@ -66,16 +66,16 @@ DEFAULT_INFER_STEPS = 5
 # Induced-subgraph preview  (no data saved — just count nodes for sanity check)
 # ---------------------------------------------------------------------------
 
-def _count_train_nodes(
+def _count_train_edges(
     g: HeteroData,
     pivot_ntype: str,
     keep_ids: torch.Tensor,
-) -> dict:
-    """Count surviving nodes per type after induced-subgraph filtering."""
+) -> int:
+    """Count edges whose pivot-type endpoint is in keep_ids.
+    Non-pivot node types are fully kept, so only the pivot endpoint matters."""
     id_map = torch.full((g[pivot_ntype].num_nodes,), -1, dtype=torch.long)
     id_map[keep_ids] = torch.arange(keep_ids.size(0))
-
-    referenced: dict = {nt: set() for nt in g.node_types if nt != pivot_ntype}
+    total = 0
     for src_type, rel, dst_type in g.edge_types:
         ei    = g[src_type, rel, dst_type].edge_index
         valid = torch.ones(ei.size(1), dtype=torch.bool)
@@ -83,15 +83,8 @@ def _count_train_nodes(
             valid &= id_map[ei[0]] >= 0
         if dst_type == pivot_ntype:
             valid &= id_map[ei[1]] >= 0
-        if src_type != pivot_ntype and valid.any():
-            referenced[src_type].update(ei[0][valid].tolist())
-        if dst_type != pivot_ntype and valid.any():
-            referenced[dst_type].update(ei[1][valid].tolist())
-
-    counts = {pivot_ntype: keep_ids.size(0)}
-    for nt, ids in referenced.items():
-        counts[nt] = len(ids)
-    return counts
+        total += int(valid.sum())
+    return total
 
 
 def _keep_ids_for_frac(
@@ -115,41 +108,6 @@ def _keep_ids_for_frac(
         return perm[:max(1, int(train_frac * n))]
 
 
-def _count_induced_edges(g: HeteroData, pivot_ntype: str, keep_ids: torch.Tensor) -> int:
-    """Count edges in the induced subgraph without allocating the full HeteroData."""
-    id_map = torch.full((g[pivot_ntype].num_nodes,), -1, dtype=torch.long)
-    id_map[keep_ids] = torch.arange(keep_ids.size(0))
-
-    # Pass 1: find surviving non-pivot nodes
-    referenced = {nt: set() for nt in g.node_types if nt != pivot_ntype}
-    for src_type, rel, dst_type in g.edge_types:
-        ei    = g[src_type, rel, dst_type].edge_index
-        valid = torch.ones(ei.size(1), dtype=torch.bool)
-        if src_type == pivot_ntype:
-            valid &= id_map[ei[0]] >= 0
-        if dst_type == pivot_ntype:
-            valid &= id_map[ei[1]] >= 0
-        if src_type != pivot_ntype and valid.any():
-            referenced[src_type].update(ei[0][valid].tolist())
-        if dst_type != pivot_ntype and valid.any():
-            referenced[dst_type].update(ei[1][valid].tolist())
-
-    # Build id_maps for non-pivot types
-    all_maps = {pivot_ntype: id_map}
-    for ntype, ids in referenced.items():
-        m = torch.full((g[ntype].num_nodes,), -1, dtype=torch.long)
-        if ids:
-            old = torch.tensor(sorted(ids), dtype=torch.long)
-            m[old] = torch.arange(old.size(0))
-        all_maps[ntype] = m
-
-    # Pass 2: count edges where both endpoints survive
-    total = 0
-    for src_type, rel, dst_type in g.edge_types:
-        ei    = g[src_type, rel, dst_type].edge_index
-        valid = (all_maps[src_type][ei[0]] >= 0) & (all_maps[dst_type][ei[1]] >= 0)
-        total += int(valid.sum())
-    return total
 
 
 _LOG_FIELDS = [
@@ -248,15 +206,16 @@ def main():
     # ------------------------------------------------------------------
     # Preview node counts at each fraction
     # ------------------------------------------------------------------
-    print(f"\nNode counts per snapshot:")
-    print(f"  {'fraction':>10}  {pivot_ntype:>20}  (induced)")
+    other_ntypes = [nt for nt in g.node_types if nt != pivot_ntype]
+    print(f"\nSnapshot preview  (only '{pivot_ntype}' is partitioned; other types stay full):")
+    print(f"  {'fraction':>10}  {pivot_ntype:>20}  train_edges")
     for frac in [args.train_frac] + infer_fracs:
         keep_ids = _keep_ids_for_frac(g, pivot_ntype, partition_mode, frac, seed)
-        counts   = _count_train_nodes(g, pivot_ntype, keep_ids)
         tag      = " <- train" if frac == args.train_frac else ""
-        pivot_n  = counts[pivot_ntype]
-        other    = {k: v for k, v in counts.items() if k != pivot_ntype}
-        print(f"  {frac:>10.0%}  {pivot_n:>20,}  {other}{tag}")
+        n_edges  = _count_train_edges(g, pivot_ntype, keep_ids)
+        print(f"  {frac:>10.0%}  {keep_ids.size(0):>20,}  {n_edges:>12,}{tag}")
+    print(f"  (other types unchanged: "
+          + ", ".join(f"{nt}={g[nt].num_nodes:,}" for nt in other_ntypes) + ")")
 
     # ------------------------------------------------------------------
     # Compute partition stats + generate kmv_seed
@@ -266,15 +225,15 @@ def main():
     total_edges = sum(g[et].edge_index.size(1) for et in g.edge_types)
 
     keep_ids_train = _keep_ids_for_frac(g, pivot_ntype, partition_mode, args.train_frac, seed)
-    train_nodes    = sum(_count_train_nodes(g, pivot_ntype, keep_ids_train).values())
-    train_edges    = _count_induced_edges(g, pivot_ntype, keep_ids_train)
+    # train_nodes = pivot type only (other types are untouched)
+    train_nodes    = keep_ids_train.size(0)
+    train_edges    = _count_train_edges(g, pivot_ntype, keep_ids_train)
     kmv_seed       = random.randint(0, 2**31 - 1)
 
-    cfg_tmp        = config.get_dataset_config(args.dataset)
-    suggested_mps  = "|".join(cfg_tmp.suggested_paths)
+    suggested_mps  = "|".join(config.get_dataset_config(args.dataset).suggested_paths)
 
-    print(f"  total_nodes={total_nodes:,}  total_edges={total_edges:,}")
-    print(f"  train_nodes={train_nodes:,}  train_edges={train_edges:,}")
+    print(f"  {pivot_ntype} total={g[pivot_ntype].num_nodes:,}  train={train_nodes:,}")
+    print(f"  total_edges={total_edges:,}  train_edges={train_edges:,}")
     print(f"  kmv_seed={kmv_seed}")
 
     # ------------------------------------------------------------------
