@@ -68,14 +68,12 @@ from src.data import DatasetFactory
 from src.bridge import PyGToCppAdapter
 from src.bridge.engine import CppEngine
 from src.analysis.cka import LinearCKA
-from src.analysis.metrics import DirichletEnergyMetric
-from src.models import get_model
 from src.kernels.mprw import MPRWKernel, parse_metapath_triples
 from scripts.bench_utils import compile_rule_for_cpp, generate_qnodes, setup_global_res_dirs
 
 
 # ---------------------------------------------------------------------------
-# Memory helpers
+# RSS helpers (parent process — used only for the RSS guard, not for peaking)
 # ---------------------------------------------------------------------------
 
 def _rss_mb() -> float:
@@ -103,11 +101,7 @@ def _rss_gb() -> Optional[float]:
 # ---------------------------------------------------------------------------
 
 def _make_test_mask(g_full: HeteroData, part: dict) -> torch.Tensor:
-    """
-    Returns a boolean mask over g_full[target_type] where True = V_test.
-    test_node_ids is read directly from partition.json (exp1_partition.py).
-    """
-    target_ntype = part["target_type"]   # exp1_partition.py key
+    target_ntype = part["target_type"]
     n_target     = g_full[target_ntype].num_nodes
     test_ids     = torch.tensor(part["test_node_ids"], dtype=torch.long)
     mask         = torch.zeros(n_target, dtype=torch.bool)
@@ -158,59 +152,76 @@ def _load_adj(engine: CppEngine, filepath: str, num_nodes: int, node_offset: int
 
 
 # ---------------------------------------------------------------------------
-# Inference helpers
+# Subprocess inference helper
 # ---------------------------------------------------------------------------
 
-def _infer(model: torch.nn.Module, g_homo: Data, in_dim: int,
-           device: torch.device) -> torch.Tensor:
-    x          = F.pad(g_homo.x, (0, max(0, in_dim - g_homo.x.size(1)))).to(device)
-    edge_index = g_homo.edge_index.to(device)
-    with torch.no_grad():
-        return model(x, edge_index)
+_INF_WORKER = str(Path(__file__).resolve().parent / "inference_worker.py")
 
 
-def _infer_layerwise(model: torch.nn.Module, g_homo: Data, in_dim: int,
-                     device: torch.device) -> List[torch.Tensor]:
-    """Returns list of intermediate activations, one per layer."""
-    x          = F.pad(g_homo.x, (0, max(0, in_dim - g_homo.x.size(1)))).to(device)
-    edge_index = g_homo.edge_index.to(device)
-    intermediates = []
-    with torch.no_grad():
-        for i, layer in enumerate(model.layers):
-            x = layer(x, edge_index)
-            if i < model.num_layers - 1:
-                x = F.relu(x)
-            intermediates.append(x.clone())
-    return intermediates
-
-
-def _f1_macro(logits: torch.Tensor, labels: torch.Tensor,
-              mask: torch.Tensor) -> float:
-    from torchmetrics.functional import f1_score
-    valid = mask & (labels >= 0)
-    if valid.sum() == 0:
-        return 0.0
-    return f1_score(
-        logits[valid].argmax(1), labels[valid],
-        task="multiclass", num_classes=logits.size(1), average="macro",
-    ).item()
-
-
-def _pred_agreement(z_exact: torch.Tensor, z_kmv: torch.Tensor,
-                    mask: torch.Tensor) -> float:
-    return (z_exact[mask].argmax(1) == z_kmv[mask].argmax(1)).float().mean().item()
-
-
-_de_metric = DirichletEnergyMetric()
-
-
-def _dirichlet_energy(z: torch.Tensor, edge_index: torch.Tensor,
-                      num_nodes: int, device: torch.device) -> Optional[float]:
-    """Dirichlet energy of embeddings z on the materialized graph."""
+def _run_inference_worker(
+    graph_file: str,
+    graph_type: str,      # "adj" or "pt"
+    feat_file: str,
+    weights_path: str,
+    z_out: str,
+    labels_file: str,
+    mask_file: str,
+    n_target: int,
+    node_offset: int,
+    in_dim: int,
+    num_classes: int,
+    num_layers: int,
+    timeout: int,
+    log: logging.Logger,
+    label: str = "",
+) -> Optional[dict]:
+    """
+    Runs inference_worker.py in a fresh subprocess.
+    Returns dict with keys: inf_peak_ram_mb, inf_time, inf_f1, inf_de.
+    Returns None on failure.
+    """
+    cmd = [
+        sys.executable, _INF_WORKER,
+        "--graph-file",  graph_file,
+        "--graph-type",  graph_type,
+        "--feat-file",   feat_file,
+        "--weights",     weights_path,
+        "--z-out",       z_out,
+        "--labels-file", labels_file,
+        "--mask-file",   mask_file,
+        "--n-target",    str(n_target),
+        "--node-offset", str(node_offset),
+        "--in-dim",      str(in_dim),
+        "--num-classes", str(num_classes),
+        "--num-layers",  str(num_layers),
+    ]
     try:
-        return _de_metric.calculate(z.to(device), edge_index.to(device))
-    except Exception:
+        res = subprocess.run(cmd, check=True, capture_output=True, text=True,
+                             timeout=timeout)
+    except subprocess.TimeoutExpired:
+        log.warning("  [inference %s] subprocess timed out", label)
         return None
+    except subprocess.CalledProcessError as e:
+        log.warning("  [inference %s] subprocess failed (exit %d):\n%s",
+                    label, e.returncode, e.stderr[-400:])
+        return None
+
+    out = {}
+    for line in res.stdout.split("\n"):
+        line = line.strip()
+        for key in ("inf_peak_ram_mb", "inf_time", "inf_f1", "inf_de"):
+            if line.lower().startswith(f"{key}:"):
+                try:
+                    out[key] = float(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+    return out
+
+
+def _pred_agreement(z_a: torch.Tensor, z_b: torch.Tensor,
+                    mask: torch.Tensor) -> float:
+    return (z_a[mask].argmax(1) == z_b[mask].argmax(1)).float().mean().item()
+
 
 
 _MPRW_CALIB_MAX_ITERS = 15
@@ -308,7 +319,10 @@ def _calibrate_mprw_w(
 
 _FIELDS = [
     "Dataset", "MetaPath", "L", "Method", "k_value", "Density_Matched_w",
-    "Materialization_Time", "Inference_Time", "Peak_RAM_MB", "Edge_Count",
+    "Materialization_Time", "Inference_Time",
+    "Mat_RAM_MB",   # subprocess-isolated materialization peak
+    "Inf_RAM_MB",   # subprocess-isolated inference peak
+    "Edge_Count",
     "CKA_L1", "CKA_L2", "CKA_L3", "CKA_L4",
     "Pred_Similarity", "Macro_F1", "Dirichlet_Energy", "exact_status",
 ]
@@ -461,71 +475,117 @@ def main():
     mp_safe       = args.metapath.replace(",", "_").replace("/", "_")
 
     # ------------------------------------------------------------------
-    # Run ExactD once (k-independent)
+    # Persist auxiliary tensors to disk once — inference_worker loads them.
+    # These are written to a per-metapath scratch dir so the worker subprocess
+    # starts with a completely fresh Python process (RSS = 0 base).
     # ------------------------------------------------------------------
-    z_exact_by_L: dict  = {}   # L → tensor
-    layers_exact_by_L: dict = {}  # L → list[tensor]
-    exact_edge_count   = None
-    exact_status_flag  = "OK"
-    t_exact_mat        = None
+    scratch_dir = out_dir / "inf_scratch" / mp_safe
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    feat_file   = str(scratch_dir / "x.pt")
+    labels_file = str(scratch_dir / "labels.pt")
+    mask_file   = str(scratch_dir / "mask.pt")
+    torch.save(x_full.cpu(),           feat_file)
+    torch.save(labels_full.cpu(),      labels_file)
+    torch.save(test_mask.cpu(),        mask_file)
+
+    # ------------------------------------------------------------------
+    # Helper: run one inference subprocess, load z from disk for CKA.
+    # Returns (inf_results_dict, z_path, layers_path_or_None).
+    # ------------------------------------------------------------------
+    def _inf_subprocess(graph_file, graph_type, label, L):
+        z_out = str(scratch_dir / f"z_{label}_L{L}.pt")
+        res = _run_inference_worker(
+            graph_file=graph_file, graph_type=graph_type,
+            feat_file=feat_file,
+            weights_path=str(weights_dir / f"{mp_safe}_L{L}.pt"),
+            z_out=z_out,
+            labels_file=labels_file, mask_file=mask_file,
+            n_target=n_target, node_offset=node_offset,
+            in_dim=in_dim, num_classes=num_classes, num_layers=L,
+            timeout=args.timeout, log=log, label=f"{label}_L{L}",
+        )
+        layers_path = z_out.replace(".pt", "_layers.pt")
+        if not os.path.exists(layers_path):
+            layers_path = None
+        return res, z_out, layers_path
+
+    def _cka_from_disk(z_exact_path, layers_exact_path, z_approx_path,
+                       layers_approx_path, L, label):
+        """Load saved embeddings and compute CKA + pred_sim. No fresh inference."""
+        cka_cols = {f"CKA_L{i+1}": "" for i in range(4)}
+        pred_sim = ""
+        if not (z_exact_path and os.path.exists(z_exact_path)):
+            return cka_cols, pred_sim
+        try:
+            z_exact  = torch.load(z_exact_path,  weights_only=True).to(device)
+            z_approx = torch.load(z_approx_path, weights_only=True).to(device)
+            mask_dev = test_mask.to(device)
+            pred_sim = _fmt(_pred_agreement(z_exact, z_approx, mask_dev))
+
+            if layers_exact_path and os.path.exists(layers_exact_path) \
+               and layers_approx_path and os.path.exists(layers_approx_path):
+                try:
+                    le_list = torch.load(layers_exact_path,  weights_only=True)
+                    la_list = torch.load(layers_approx_path, weights_only=True)
+                    for i, (le, la) in enumerate(zip(le_list, la_list)):
+                        if i >= 4:
+                            break
+                        val = cka_calc.calculate(le.to(device)[mask_dev],
+                                                 la.to(device)[mask_dev])
+                        cka_cols[f"CKA_L{i+1}"] = _fmt(val)
+                except (MemoryError, RuntimeError) as e:
+                    log.warning("  [%s L=%d] layerwise CKA OOM: %s", label, L, e)
+            del z_exact, z_approx
+            gc.collect()
+        except Exception as e:
+            log.warning("  [%s L=%d] CKA disk load failed: %s", label, L, e)
+        return cka_cols, pred_sim
+
+    # ------------------------------------------------------------------
+    # ExactD — materialization subprocess (C++ child), inference subprocess.
+    # Mat_RAM_MB  = C++ child process peak via /usr/bin/time -v (isolated).
+    # Inf_RAM_MB  = inference_worker.py fresh subprocess peak (isolated).
+    # ------------------------------------------------------------------
+    exact_edge_count  = None
+    exact_status_flag = "OK"
+    t_exact_mat       = None
+    exact_mat_mb: Optional[float] = None
+    z_exact_by_L: dict      = {}   # L → z_path (for comparison)
+    layers_exact_by_L: dict = {}   # L → layers_path
 
     log.info("\n--- Running ExactD on full graph ---")
     try:
-        t0             = time.perf_counter()
         t_exact_mat, exact_file = _run_exact(engine, folder, args.timeout)
-        exact_peak_mb = engine.last_peak_mb   # C++ child-process peak (Linux only)
+        exact_mat_mb     = engine.last_peak_mb   # C++ child peak (Linux /usr/bin/time -v)
         exact_edge_count = _count_edges(exact_file)
-        log.info("  ExactD done: edges=%d  mat_time=%.2fs  peak_ram=%s",
+        log.info("  ExactD done: edges=%d  mat_time=%.2fs  mat_ram=%s",
                  exact_edge_count, t_exact_mat,
-                 f"{exact_peak_mb:.0f}MB" if exact_peak_mb else "n/a")
+                 f"{exact_mat_mb:.0f}MB" if exact_mat_mb else "n/a (Windows)")
 
         if args.max_rss_gb is not None:
             rss = _rss_gb()
             if rss is not None and rss > args.max_rss_gb:
                 raise MemoryError(
-                    f"RSS guard: {rss:.1f} GB > {args.max_rss_gb:.1f} GB before loading exact adj"
-                )
-
-        g_exact = _load_adj(engine, exact_file, n_target, node_offset, args.max_adj_mb)
-        g_exact.x = x_full
-        log.info("  Loaded exact adjacency  [RAM=%.0fMB]", _rss_mb())
+                    f"RSS guard: {rss:.1f} GB > {args.max_rss_gb:.1f} GB after ExactD")
 
         for L in args.depth:
             weights_path = weights_dir / f"{mp_safe}_L{L}.pt"
             if not weights_path.exists():
-                log.warning("  [L=%d] weights not found at %s — skipping", L, weights_path)
+                log.warning("  [Exact L=%d] weights not found — skipping", L)
                 continue
-
             if (args.metapath, str(L), "Exact", "") in done_runs:
-                log.info("  [L=%d] Exact row already in CSV — skipping", L)
+                log.info("  [Exact L=%d] already in CSV — skipping", L)
                 continue
 
-            model = get_model("SAGE", in_dim, num_classes, config.HIDDEN_DIM,
-                              num_layers=L).to(device)
-            model.load_state_dict(torch.load(weights_path, weights_only=True,
-                                             map_location=device))
-            model.eval()
-            for p in model.parameters():
-                p.requires_grad_(False)
+            inf_res, z_path, layers_path = _inf_subprocess(
+                exact_file, "adj", "exact", L)
+            if inf_res is None:
+                log.warning("  [Exact L=%d] inference subprocess failed", L)
+                continue
 
-            t0_inf    = time.perf_counter()
-            z_exact   = _infer(model, g_exact, in_dim, device)
-            t_inf     = time.perf_counter() - t0_inf
-            f1_exact  = _f1_macro(z_exact, labels_full.to(device), test_mask.to(device))
+            z_exact_by_L[L]      = z_path
+            layers_exact_by_L[L] = layers_path
 
-            # Layerwise for CKA computation against KMV later
-            try:
-                layers_exact = _infer_layerwise(model, g_exact, in_dim, device)
-            except (MemoryError, RuntimeError):
-                layers_exact = None
-                log.warning("  [L=%d] layerwise OOM on exact", L)
-
-            z_exact_by_L[L]      = z_exact.cpu()
-            layers_exact_by_L[L] = [t.cpu() for t in layers_exact] if layers_exact else None
-
-            de_exact = _dirichlet_energy(z_exact, g_exact.edge_index, n_target, device)
-
-            # Write Exact row
             cka_cols = {f"CKA_L{i+1}": "" for i in range(4)}
             csv_w.writerow({
                 "Dataset":              args.dataset,
@@ -535,46 +595,45 @@ def main():
                 "k_value":              "",
                 "Density_Matched_w":    "",
                 "Materialization_Time": _fmt(t_exact_mat),
-                "Inference_Time":       _fmt(t_inf),
-                "Peak_RAM_MB":          _fmt(exact_peak_mb, 1),
+                "Inference_Time":       _fmt(inf_res.get("inf_time")),
+                "Mat_RAM_MB":           _fmt(exact_mat_mb, 1) if exact_mat_mb else "",
+                "Inf_RAM_MB":           _fmt(inf_res.get("inf_peak_ram_mb"), 1),
                 "Edge_Count":           exact_edge_count,
                 **cka_cols,
                 "Pred_Similarity":      "",
-                "Macro_F1":             _fmt(f1_exact),
-                "Dirichlet_Energy":     _fmt(de_exact) if de_exact is not None else "",
+                "Macro_F1":             _fmt(inf_res.get("inf_f1")),
+                "Dirichlet_Energy":     _fmt(inf_res.get("inf_de")),
                 "exact_status":         "OK",
             })
             csv_fh.flush()
-            log.info("  [L=%d] Exact  F1=%.4f  inf=%.2fs  peak_ram=%s",
-                     L, f1_exact, t_inf,
-                     f"{exact_peak_mb:.0f}MB" if exact_peak_mb else "n/a")
+            log.info("  [Exact L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  inf_ram=%s  mat_ram=%s",
+                     L, inf_res.get("inf_f1", 0), inf_res.get("inf_de", 0),
+                     inf_res.get("inf_time", 0),
+                     f"{inf_res.get('inf_peak_ram_mb', 0):.0f}MB",
+                     f"{exact_mat_mb:.0f}MB" if exact_mat_mb else "n/a")
 
-            del model
-            gc.collect()
-
-        del g_exact
-        gc.collect()
-        log.info("  Exact done for all depths.  [RAM=%.0fMB]", _rss_mb())
+        log.info("  Exact done for all depths.  [parent RSS=%.0fMB]", _rss_mb())
 
     except MemoryError as e:
-        exact_status_flag = f"MAT_OOM"
-        log.warning("  ExactD C++ OOM: %s", e)
+        exact_status_flag = "MAT_OOM"
+        log.warning("  ExactD OOM: %s", e)
     except RuntimeError as e:
         exact_status_flag = ("MAT_TIMEOUT" if "timed out" in str(e)
                              else f"MAT_ERR:{str(e)[:80]}")
         log.warning("  ExactD error: %s", e)
 
     # ------------------------------------------------------------------
-    # KMV sweep over k values
+    # KMV sweep — materialization: C++ child peak. Inference: subprocess.
     # ------------------------------------------------------------------
-    kmv_edges_by_k: dict = {}   # k → edge count; used later for MPRW calibration
+    kmv_edges_by_k: dict = {}
+
     for k in args.k_values:
         log.info("\n--- KMV k=%d ---", k)
 
         if args.max_rss_gb is not None:
             rss = _rss_gb()
             if rss is not None and rss > args.max_rss_gb:
-                log.warning("  [k=%d] RSS guard: %.1f GB > %.1f GB — skipping",
+                log.warning("  [KMV k=%d] RSS guard: %.1f GB > %.1f GB — skipping",
                             k, rss, args.max_rss_gb)
                 for L in args.depth:
                     csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
@@ -587,18 +646,14 @@ def main():
 
         try:
             t_kmv_mat, kmv_file = _run_sketch(engine, folder, k, kmv_seed, args.timeout)
-            kmv_peak_mb = engine.last_peak_mb   # C++ child-process peak (Linux only)
+            kmv_mat_mb     = engine.last_peak_mb   # C++ child peak
             kmv_edge_count = _count_edges(kmv_file)
             kmv_edges_by_k[k] = kmv_edge_count
-            log.info("  KMV done: edges=%d  mat_time=%.2fs  peak_ram=%s",
+            log.info("  KMV done: edges=%d  mat_time=%.2fs  mat_ram=%s",
                      kmv_edge_count, t_kmv_mat,
-                     f"{kmv_peak_mb:.0f}MB" if kmv_peak_mb else "n/a")
-
-            g_kmv = _load_adj(engine, kmv_file, n_target, node_offset, args.max_adj_mb)
-            g_kmv.x = x_full
-
+                     f"{kmv_mat_mb:.0f}MB" if kmv_mat_mb else "n/a (Windows)")
         except MemoryError as e:
-            log.warning("  [k=%d] KMV OOM: %s", k, e)
+            log.warning("  [KMV k=%d] OOM: %s", k, e)
             for L in args.depth:
                 csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
                     "Dataset": args.dataset, "MetaPath": args.metapath,
@@ -608,7 +663,7 @@ def main():
             csv_fh.flush()
             continue
         except RuntimeError as e:
-            log.warning("  [k=%d] KMV error: %s", k, e)
+            log.warning("  [KMV k=%d] error: %s", k, e)
             for L in args.depth:
                 csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
                     "Dataset": args.dataset, "MetaPath": args.metapath,
@@ -620,57 +675,29 @@ def main():
 
         for L in args.depth:
             if (args.metapath, str(L), "KMV", str(k)) in done_runs:
-                log.info("  [k=%d L=%d] already in CSV — skipping", k, L)
+                log.info("  [KMV k=%d L=%d] already in CSV — skipping", k, L)
                 continue
-
             weights_path = weights_dir / f"{mp_safe}_L{L}.pt"
             if not weights_path.exists():
-                log.warning("  [k=%d L=%d] weights not found — skipping", k, L)
+                log.warning("  [KMV k=%d L=%d] weights not found — skipping", k, L)
                 continue
 
-            model = get_model("SAGE", in_dim, num_classes, config.HIDDEN_DIM,
-                              num_layers=L).to(device)
-            model.load_state_dict(torch.load(weights_path, weights_only=True,
-                                             map_location=device))
-            model.eval()
-            for p in model.parameters():
-                p.requires_grad_(False)
+            inf_res, z_kmv_path, layers_kmv_path = _inf_subprocess(
+                kmv_file, "adj", f"kmv_{k}", L)
+            if inf_res is None:
+                log.warning("  [KMV k=%d L=%d] inference subprocess failed", k, L)
+                continue
 
-            t0_inf = time.perf_counter()
-            z_kmv  = _infer(model, g_kmv, in_dim, device)
-            t_inf  = time.perf_counter() - t0_inf
-            f1_kmv = _f1_macro(z_kmv, labels_full.to(device), test_mask.to(device))
+            cka_cols, pred_sim = _cka_from_disk(
+                z_exact_by_L.get(L), layers_exact_by_L.get(L),
+                z_kmv_path, layers_kmv_path, L, f"KMV k={k}")
 
-            # CKA metrics against exact (if available)
-            cka_cols    = {f"CKA_L{i+1}": "" for i in range(4)}
-            pred_sim    = ""
-            z_exact_cpu = z_exact_by_L.get(L)
-
-            if z_exact_cpu is not None:
-                mask_dev = test_mask.to(device)
-                pred_sim = _fmt(_pred_agreement(
-                    z_exact_cpu.to(device), z_kmv, mask_dev))
-
-                # Layerwise CKA
-                layers_exact = layers_exact_by_L.get(L)
-                if layers_exact is not None:
-                    try:
-                        layers_kmv = _infer_layerwise(model, g_kmv, in_dim, device)
-                        for i, (le, lk) in enumerate(zip(layers_exact, layers_kmv)):
-                            if i >= 4:
-                                break
-                            val = cka_calc.calculate(
-                                le.to(device)[mask_dev], lk[mask_dev])
-                            cka_cols[f"CKA_L{i+1}"] = _fmt(val)
-                    except (MemoryError, RuntimeError) as e:
-                        log.warning("  [k=%d L=%d] layerwise CKA OOM: %s", k, L, e)
-
-            de_kmv = _dirichlet_energy(z_kmv, g_kmv.edge_index, n_target, device)
-
-            log.info("  [k=%d L=%d] KMV  F1=%.4f  DE=%.4f  inf=%.2fs  peak_ram=%s  pred_sim=%s",
-                     k, L, f1_kmv, de_kmv or 0, t_inf,
-                     f"{kmv_peak_mb:.0f}MB" if kmv_peak_mb else "n/a",
-                     pred_sim if pred_sim != "" else "n/a")
+            log.info("  [KMV k=%d L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  inf_ram=%s  mat_ram=%s  pred_sim=%s",
+                     k, L, inf_res.get("inf_f1", 0), inf_res.get("inf_de", 0),
+                     inf_res.get("inf_time", 0),
+                     f"{inf_res.get('inf_peak_ram_mb', 0):.0f}MB",
+                     f"{kmv_mat_mb:.0f}MB" if kmv_mat_mb else "n/a",
+                     pred_sim or "n/a")
 
             csv_w.writerow({
                 "Dataset":              args.dataset,
@@ -680,39 +707,28 @@ def main():
                 "k_value":              k,
                 "Density_Matched_w":    "",
                 "Materialization_Time": _fmt(t_kmv_mat),
-                "Inference_Time":       _fmt(t_inf),
-                "Peak_RAM_MB":          _fmt(kmv_peak_mb, 1),
+                "Inference_Time":       _fmt(inf_res.get("inf_time")),
+                "Mat_RAM_MB":           _fmt(kmv_mat_mb, 1) if kmv_mat_mb else "",
+                "Inf_RAM_MB":           _fmt(inf_res.get("inf_peak_ram_mb"), 1),
                 "Edge_Count":           kmv_edge_count,
                 **cka_cols,
                 "Pred_Similarity":      pred_sim,
-                "Macro_F1":             _fmt(f1_kmv),
-                "Dirichlet_Energy":     _fmt(de_kmv) if de_kmv is not None else "",
+                "Macro_F1":             _fmt(inf_res.get("inf_f1")),
+                "Dirichlet_Energy":     _fmt(inf_res.get("inf_de")),
                 "exact_status":         exact_status_flag,
             })
             csv_fh.flush()
 
-            del model
-            gc.collect()
-
-        del g_kmv
-        gc.collect()
-
     # ------------------------------------------------------------------
-    # MPRW sweep — subprocess-based so /usr/bin/time -v measures peak RSS
-    # consistently with Exact/KMV C++ measurement.
+    # MPRW sweep — materialization: mprw_worker net_ram_mb. Inference: subprocess.
     # ------------------------------------------------------------------
-
-    # Parse metapath into triples once.
     try:
         mprw_triples = parse_metapath_triples(args.metapath, g_full)
     except (ValueError, RuntimeError) as e:
         log.warning("  MPRW: could not parse metapath — %s", e)
         mprw_triples = None
 
-    # Serialize edge indices for each metapath step to .pt files (done once,
-    # reused across all k values).  These are tiny — just int64 COO arrays —
-    # so the subprocess never has to load the full HeteroData.
-    mprw_work_dir = Path(data_dir) / "mprw_work"
+    mprw_work_dir  = Path(data_dir) / "mprw_work"
     mprw_meta_file = mprw_work_dir / "meta.json"
 
     if mprw_triples is not None:
@@ -722,20 +738,16 @@ def main():
             edge_file = mprw_work_dir / f"edge_{i}.pt"
             torch.save(g_full[src_t, edge_name, dst_t].edge_index.cpu(), edge_file)
             mprw_meta["steps"].append({
-                "src_type":  src_t,
-                "edge_name": edge_name,
-                "dst_type":  dst_t,
+                "src_type":  src_t, "edge_name": edge_name, "dst_type": dst_t,
                 "n_src":     g_full[src_t].num_nodes,
                 "n_dst":     g_full[dst_t].num_nodes,
                 "edge_file": str(edge_file),
             })
         with open(mprw_meta_file, "w") as f:
             json.dump(mprw_meta, f)
-        log.info("\n--- MPRW sweep (subprocess) ---")
+        log.info("\n--- MPRW sweep ---")
 
-    # Reuse CppEngine's /usr/bin/time -v detection.
-    time_bin = engine._time_binary()
-    worker   = str(Path(project_root) / "scripts" / "mprw_worker.py")
+    mprw_worker = str(Path(project_root) / "scripts" / "mprw_worker.py")
 
     for k in args.k_values:
         log.info("\n--- MPRW k=%d (density-matched to KMV) ---", k)
@@ -764,47 +776,32 @@ def main():
                 csv_fh.flush()
                 continue
 
-        # ------------------------------------------------------------------
-        # Timer starts HERE — calibration time is part of materialization cost.
-        # In a real system, an engineer using MPRW would have to run this same
-        # search to hit a memory/density budget. KMV avoids this entirely.
-        # ------------------------------------------------------------------
+        # Timer starts before calibration — that IS materialization cost.
         t_mat_start = time.perf_counter()
 
-        # Density calibration: binary-search for walk count w such that
-        # MPRW global edge count ≈ KMV(k) global edge count (±5%).
         target_edges = kmv_edges_by_k.get(k)
         if target_edges is None:
-            calibrated_w        = k
-            calibrated_edge_count = None
-            calib_converged     = False
+            calibrated_w, calibrated_edge_count, calib_converged = k, None, False
             log.warning("  [MPRW k=%d] KMV edge count unavailable — using w=k", k)
         else:
             log.info("  [MPRW k=%d] calibrating w to match KMV edge count %d ...",
                      k, target_edges)
             calibrated_w, calibrated_edge_count, calib_converged = _calibrate_mprw_w(
                 g_full, mprw_triples, target_ntype,
-                target_edges=target_edges,
-                seed=kmv_seed, device=device, log=log,
+                target_edges=target_edges, seed=kmv_seed, device=device, log=log,
             )
 
-        # ------------------------------------------------------------------
-        # Subprocess call with calibrated_w — for fair peak-RSS measurement.
-        # Time elapsed so far (calibration) is preserved in t_mat_start.
-        # ------------------------------------------------------------------
-        mprw_out  = mprw_work_dir / f"mat_mprw_{k}.pt"
-        inner_cmd = [sys.executable, worker,
-                     str(mprw_meta_file), str(mprw_out),
-                     str(calibrated_w), str(kmv_seed)]
-        cmd = ([time_bin, "-v"] + inner_cmd) if time_bin else inner_cmd
-
-        log.info("  [MPRW] Subprocess (w=%d): %s", calibrated_w, " ".join(inner_cmd))
+        mprw_out = mprw_work_dir / f"mat_mprw_{k}.pt"
+        mat_cmd  = [sys.executable, mprw_worker,
+                    str(mprw_meta_file), str(mprw_out),
+                    str(calibrated_w), str(kmv_seed)]
+        log.info("  [MPRW] Materializing (w=%d) ...", calibrated_w)
 
         try:
-            res = subprocess.run(cmd, check=True, capture_output=True, text=True,
-                                 timeout=args.timeout)
+            mat_res = subprocess.run(mat_cmd, check=True, capture_output=True,
+                                     text=True, timeout=args.timeout)
         except subprocess.TimeoutExpired:
-            log.warning("  [MPRW k=%d] subprocess timed out", k)
+            log.warning("  [MPRW k=%d] materialization timed out", k)
             for L in args.depth:
                 csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
                     "Dataset": args.dataset, "MetaPath": args.metapath,
@@ -814,7 +811,7 @@ def main():
             csv_fh.flush()
             continue
         except subprocess.CalledProcessError as e:
-            log.warning("  [MPRW k=%d] subprocess failed (exit %d):\n%s",
+            log.warning("  [MPRW k=%d] materialization failed (exit %d):\n%s",
                         k, e.returncode, e.stderr[-400:])
             for L in args.depth:
                 csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
@@ -825,90 +822,56 @@ def main():
             csv_fh.flush()
             continue
 
-        # Total materialization time = calibration + subprocess execution.
         t_mprw_mat = time.perf_counter() - t_mat_start
 
-        # Parse net RSS from worker stdout (preferred: excludes Python/PyTorch
-        # runtime overhead that inflates /usr/bin/time -v by ~300 MB and has no
-        # equivalent in the C++ Exact/KMV subprocesses).
-        # Falls back to /usr/bin/time -v peak if net_ram_mb line is absent.
-        mprw_peak_mb: Optional[float] = None
-        for line in res.stdout.split("\n"):
+        # Parse net_ram_mb from worker stdout (excludes Python runtime overhead)
+        mprw_mat_mb: Optional[float] = None
+        for line in mat_res.stdout.split("\n"):
             if line.strip().lower().startswith("net_ram_mb:"):
                 try:
-                    mprw_peak_mb = float(line.split(":")[1].strip())
+                    mprw_mat_mb = float(line.split(":", 1)[1].strip())
                 except ValueError:
                     pass
                 break
-        if mprw_peak_mb is None:
-            m = re.search(r"Maximum resident set size \(kbytes\):\s+(\d+)", res.stderr)
-            if m:
-                mprw_peak_mb = int(m.group(1)) / 1024.0
 
         if not mprw_out.exists():
             log.warning("  [MPRW k=%d] output file missing", k)
             continue
 
-        mprw_ei         = torch.load(mprw_out, weights_only=True)
-        mprw_edge_count = mprw_ei.size(1)
+        # Edge count from saved .pt (load is small — just int64 COO)
+        tmp_ei          = torch.load(mprw_out, weights_only=True)
+        mprw_edge_count = tmp_ei.size(1)
+        del tmp_ei
 
-        log.info("  MPRW done: edges=%d (calibrated_w=%d)  mat_time=%.2fs  peak_ram=%s",
+        log.info("  MPRW done: edges=%d (w=%d)  mat_time=%.2fs  mat_ram=%s",
                  mprw_edge_count, calibrated_w, t_mprw_mat,
-                 f"{mprw_peak_mb:.0f}MB" if mprw_peak_mb else "n/a")
-
-        from torch_geometric.data import Data as _Data
-        g_mprw_data = _Data(edge_index=mprw_ei, num_nodes=n_target)
-        g_mprw_data.x = x_full
+                 f"{mprw_mat_mb:.0f}MB" if mprw_mat_mb is not None else "n/a")
 
         for L in args.depth:
             if (args.metapath, str(L), "MPRW", str(k)) in done_runs:
                 log.info("  [MPRW k=%d L=%d] already in CSV — skipping", k, L)
                 continue
-
             weights_path = weights_dir / f"{mp_safe}_L{L}.pt"
             if not weights_path.exists():
                 log.warning("  [MPRW k=%d L=%d] weights not found — skipping", k, L)
                 continue
 
-            model = get_model("SAGE", in_dim, num_classes, config.HIDDEN_DIM,
-                              num_layers=L).to(device)
-            model.load_state_dict(torch.load(weights_path, weights_only=True,
-                                             map_location=device))
-            model.eval()
-            for p in model.parameters():
-                p.requires_grad_(False)
+            inf_res, z_mprw_path, layers_mprw_path = _inf_subprocess(
+                str(mprw_out), "pt", f"mprw_{k}", L)
+            if inf_res is None:
+                log.warning("  [MPRW k=%d L=%d] inference subprocess failed", k, L)
+                continue
 
-            t0_inf  = time.perf_counter()
-            z_mprw  = _infer(model, g_mprw_data, in_dim, device)
-            t_inf   = time.perf_counter() - t0_inf
-            f1_mprw = _f1_macro(z_mprw, labels_full.to(device), test_mask.to(device))
+            cka_cols, pred_sim = _cka_from_disk(
+                z_exact_by_L.get(L), layers_exact_by_L.get(L),
+                z_mprw_path, layers_mprw_path, L, f"MPRW k={k}")
 
-            de_mprw  = _dirichlet_energy(z_mprw, mprw_ei, n_target, device)
-            cka_cols = {f"CKA_L{i+1}": "" for i in range(4)}
-            pred_sim = ""
-            z_exact_cpu = z_exact_by_L.get(L)
-
-            if z_exact_cpu is not None:
-                mask_dev = test_mask.to(device)
-                pred_sim = _fmt(_pred_agreement(
-                    z_exact_cpu.to(device), z_mprw, mask_dev))
-
-                layers_exact = layers_exact_by_L.get(L)
-                if layers_exact is not None:
-                    try:
-                        layers_mprw = _infer_layerwise(model, g_mprw_data, in_dim, device)
-                        for i, (le, lm) in enumerate(zip(layers_exact, layers_mprw)):
-                            if i >= 4:
-                                break
-                            val = cka_calc.calculate(
-                                le.to(device)[mask_dev], lm[mask_dev])
-                            cka_cols[f"CKA_L{i+1}"] = _fmt(val)
-                    except (MemoryError, RuntimeError) as e:
-                        log.warning("  [MPRW k=%d L=%d] layerwise CKA OOM: %s", k, L, e)
-
-            log.info("  [MPRW k=%d L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  pred_sim=%s",
-                     k, L, f1_mprw, de_mprw or 0, t_inf,
-                     pred_sim if pred_sim != "" else "n/a")
+            log.info("  [MPRW k=%d L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  inf_ram=%s  mat_ram=%s  pred_sim=%s",
+                     k, L, inf_res.get("inf_f1", 0), inf_res.get("inf_de", 0),
+                     inf_res.get("inf_time", 0),
+                     f"{inf_res.get('inf_peak_ram_mb', 0):.0f}MB",
+                     f"{mprw_mat_mb:.0f}MB" if mprw_mat_mb is not None else "n/a",
+                     pred_sim or "n/a")
 
             csv_w.writerow({
                 "Dataset":              args.dataset,
@@ -918,27 +881,21 @@ def main():
                 "k_value":              k,
                 "Density_Matched_w":    calibrated_w,
                 "Materialization_Time": _fmt(t_mprw_mat),
-                "Inference_Time":       _fmt(t_inf),
-                "Peak_RAM_MB":          _fmt(mprw_peak_mb, 1) if mprw_peak_mb else "",
+                "Inference_Time":       _fmt(inf_res.get("inf_time")),
+                "Mat_RAM_MB":           _fmt(mprw_mat_mb, 1) if mprw_mat_mb is not None else "",
+                "Inf_RAM_MB":           _fmt(inf_res.get("inf_peak_ram_mb"), 1),
                 "Edge_Count":           mprw_edge_count,
                 **cka_cols,
                 "Pred_Similarity":      pred_sim,
-                "Macro_F1":             _fmt(f1_mprw),
-                "Dirichlet_Energy":     _fmt(de_mprw) if de_mprw is not None else "",
+                "Macro_F1":             _fmt(inf_res.get("inf_f1")),
+                "Dirichlet_Energy":     _fmt(inf_res.get("inf_de")),
                 "exact_status":         (exact_status_flag if calib_converged
                                          else f"MPRW_CALIB_APPROX|{exact_status_flag}"),
             })
             csv_fh.flush()
 
-            del model
-            gc.collect()
-
-        del g_mprw_data, mprw_ei
-        gc.collect()
-
     csv_fh.close()
-
-    log.info("\nDone. Results → %s", csv_path)
+    log.info("\nDone. Results -> %s", csv_path)
 
 
 if __name__ == "__main__":

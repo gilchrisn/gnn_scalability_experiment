@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 import torch
 import torch.nn.functional as F
 from typing import Optional, Any
-from torch_geometric.utils import get_laplacian, to_dense_adj
+from torch_geometric.utils import to_dense_adj
 
 # --- Comparison Metrics (Binary) ---
 
@@ -58,41 +58,25 @@ class RepresentationMetric(ABC):
 
 class DirichletEnergyMetric(RepresentationMetric):
     """
-    Calculates Dirichlet Energy to quantify Oversmoothing.
-    
-    E(X) = 1/N * Tr(X^T * L * X)
-    Low energy -> Features vary little across connected nodes (Oversmoothing).
+    Calculates Dirichlet Energy to quantify oversmoothing.
+
+    E(X) = (1 / |E|) * Σ_{(i,j) ∈ E} ||x_i - x_j||^2
+
+    Uses the direct edge-difference formula rather than the Laplacian trace
+    form, which requires a symmetric (undirected) graph to guarantee
+    non-negative values.  The materialized graphs here are directed, so the
+    Laplacian trace can produce negative results due to asymmetric degree
+    normalization.  The edge-difference formula is always >= 0.
     """
     def calculate(self, x: torch.Tensor, edge_index: Optional[torch.Tensor] = None) -> float:
         if edge_index is None:
             raise ValueError("Dirichlet Energy requires edge_index.")
-        
-        num_nodes = x.size(0)
-        
-        # 1. Compute Normalized Laplacian usually, but standard Dirichlet is typically 
-        # defined on the combinatorial or symmetric normalized Laplacian.
-        # We use the standard form: sum_{i,j} A_ij ||x_i - x_j||^2.
-        # Efficient computation via Laplacian matrix operation: Trace(X^T L X)
-        
-        # Get Laplacian index and weights
-        # L = I - D^{-1/2} A D^{-1/2} (Symmetric Normalized)
-        edge_index_L, edge_weight_L = get_laplacian(
-            edge_index, 
-            normalization='sym', 
-            num_nodes=num_nodes
-        )
-        
-        # 2. Sparse Matrix Multiplication (L @ X)
-        # Supports CUDA if tensors are on device
-        Lx = torch.sparse.mm(
-            torch.sparse_coo_tensor(edge_index_L, edge_weight_L, (num_nodes, num_nodes), device=x.device),
-            x
-        )
-        
-        # 3. Trace(X^T @ Lx) / N
-        # Optimized: sum(X * Lx) is equivalent to diagonal of product
-        energy = torch.trace(torch.mm(x.t(), Lx)) / num_nodes
-        
+        if edge_index.size(1) == 0:
+            return 0.0
+
+        src, dst = edge_index[0], edge_index[1]
+        diff   = x[src] - x[dst]               # [|E|, D]
+        energy = (diff * diff).sum(dim=1).mean()  # mean over edges, sum over dims
         return energy.item()
 
 class MeanAverageDistanceMetric(RepresentationMetric):

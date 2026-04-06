@@ -62,7 +62,8 @@ def run(cmd: list[str], step: str) -> None:
 # ── Table printer ─────────────────────────────────────────────────────────
 
 _COL_ORDER = ["Method", "k_value", "Density_Matched_w", "L", "Edge_Count",
-              "Materialization_Time", "Inference_Time", "Peak_RAM_MB",
+              "Materialization_Time", "Inference_Time",
+              "Mat_RAM_MB", "Inf_RAM_MB",
               "Macro_F1", "Pred_Similarity", "Dirichlet_Energy",
               "CKA_L1", "CKA_L2", "CKA_L3", "CKA_L4"]
 
@@ -74,7 +75,8 @@ _HEADERS = {
     "Edge_Count":           "Edges",
     "Materialization_Time": "Mat(s)",
     "Inference_Time":       "Inf(s)",
-    "Peak_RAM_MB":          "RAM(MB)",
+    "Mat_RAM_MB":           "MatRAM",
+    "Inf_RAM_MB":           "InfRAM",
     "Macro_F1":             "MacroF1",
     "Pred_Similarity":      "PredSim",
     "Dirichlet_Energy":     "DirE",
@@ -86,7 +88,8 @@ _HEADERS = {
 
 _WIDTHS = {
     "Method": 7, "k_value": 5, "Density_Matched_w": 6, "L": 3, "Edge_Count": 12,
-    "Materialization_Time": 7, "Inference_Time": 7, "Peak_RAM_MB": 8,
+    "Materialization_Time": 7, "Inference_Time": 7,
+    "Mat_RAM_MB": 8, "Inf_RAM_MB": 8,
     "Macro_F1": 8, "Pred_Similarity": 8, "Dirichlet_Energy": 8,
     "CKA_L1": 8, "CKA_L2": 8, "CKA_L3": 8, "CKA_L4": 8,
 }
@@ -101,7 +104,7 @@ def _fmt(val: str, col: str) -> str:
             return str(int(f)) if val.strip() != "" else "—"
         if col in ("Materialization_Time", "Inference_Time"):
             return f"{f:.2f}"
-        if col == "Peak_RAM_MB":
+        if col in ("Mat_RAM_MB", "Inf_RAM_MB"):
             return f"{f:.0f}"
         return f"{f:.4f}"
     except ValueError:
