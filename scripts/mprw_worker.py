@@ -1,22 +1,22 @@
 """
 mprw_worker.py — MPRW materialization subprocess.
 
-Runs as a child process so /usr/bin/time -v can measure peak RSS,
-consistent with how Exact/KMV are measured via the C++ binary.
-
 Memory measurement
 ------------------
-/usr/bin/time -v captures the entire subprocess peak RSS, which includes
-~300 MB of Python/PyTorch runtime overhead unrelated to the algorithm.
-To isolate only the materialization memory, we also self-report a net RSS
-delta: rss_after_materialize - rss_before_materialize (measured via psutil
-after all setup is complete).  exp3_inference.py prefers this net figure
-and falls back to /usr/bin/time -v only if psutil is unavailable.
+We measure the true OS-level high-water mark RSS *during* materialize()
+using a background polling thread (10 ms interval).  The reported value is
+peak_RSS_during_materialize - baseline_RSS_before_materialize.
+
+This correctly captures transient intermediate tensors (e.g. the full
+N_target × k walker-state tensor) that may be garbage-collected before a
+simple rss_after - rss_before snapshot is taken.  The design mirrors what
+/usr/bin/time -v does for the C++ Exact/KMV subprocesses, making the
+comparison methodologically consistent.
 
 Stdout lines (all parsed by exp3_inference.py)
 -----------------------------------------------
     time: X.XXXXXX          — wall-clock seconds for materialize() only
-    net_ram_mb: X.X         — net RSS increase during materialize() in MB
+    peak_ram_mb: X.X        — true RSS high-water mark above baseline (MB)
 
 Usage (internal — called by exp3_inference.py)
 -----------------------------------------------
@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 
 # Project root on path
@@ -53,6 +54,61 @@ def _rss_mb() -> float:
     except FileNotFoundError:
         pass
     return 0.0
+
+
+class _PeakRSSTracker:
+    """Context manager that polls process RSS every 10 ms in a daemon thread,
+    capturing the true high-water mark during a specific code section.
+
+    Correctly reports intermediate allocations that are freed before the
+    section ends (e.g. transient walker-state tensors in MPRW, scatter
+    buffers in GNN message passing).
+
+    Usage:
+        with _PeakRSSTracker() as tracker:
+            do_work()
+        net_peak = tracker.net_peak_mb   # peak - baseline, always >= 0
+    """
+    _POLL_INTERVAL = 0.01  # 10 ms
+
+    def __init__(self):
+        self._baseline: float = 0.0
+        self._peak: float = 0.0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self):
+        self._baseline = _rss_mb()
+        self._peak = self._baseline
+        self._stop.clear()
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self._stop.set()
+        self._thread.join()
+
+    def _run(self):
+        try:
+            import psutil
+            proc = psutil.Process(os.getpid())
+            while not self._stop.wait(self._POLL_INTERVAL):
+                try:
+                    rss = proc.memory_info().rss / 1e6
+                    if rss > self._peak:
+                        self._peak = rss
+                except Exception:
+                    pass
+        except ImportError:
+            while not self._stop.wait(self._POLL_INTERVAL):
+                rss = _rss_mb()
+                if rss > self._peak:
+                    self._peak = rss
+
+    @property
+    def net_peak_mb(self) -> float:
+        """True RSS high-water mark minus baseline, in MB. Always >= 0."""
+        return max(0.0, self._peak - self._baseline)
 
 
 def main() -> None:
@@ -89,16 +145,12 @@ def main() -> None:
 
     kernel = MPRWKernel(k=k, seed=seed, device=torch.device("cpu"))
 
-    # Measure RSS baseline AFTER all setup (torch loaded, edge files read).
-    # This excludes Python/PyTorch runtime overhead (~300 MB) that has nothing
-    # to do with the materialization algorithm — the same overhead is absent
-    # from the C++ Exact/KMV subprocesses, so including it would be unfair.
-    rss_before_mb = _rss_mb()
-
-    data, elapsed = kernel.materialize(g, triples, target_type)
-
-    rss_after_mb  = _rss_mb()
-    net_ram_mb    = max(rss_after_mb - rss_before_mb, 0.0)
+    # Measure true peak RSS during materialize() only.
+    # Baseline is taken after all setup (Python + torch loaded, edges read),
+    # so Python runtime overhead is excluded — consistent with C++ measurements.
+    with _PeakRSSTracker() as tracker:
+        data, elapsed = kernel.materialize(g, triples, target_type)
+    peak_ram_mb = tracker.net_peak_mb
 
     # Write output edge_index
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -106,7 +158,7 @@ def main() -> None:
 
     # Emit parsed fields for exp3_inference.py
     print(f"time: {elapsed:.6f}")
-    print(f"net_ram_mb: {net_ram_mb:.2f}")
+    print(f"peak_ram_mb: {peak_ram_mb:.2f}")
 
 
 if __name__ == "__main__":

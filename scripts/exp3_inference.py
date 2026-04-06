@@ -824,10 +824,10 @@ def main():
 
         t_mprw_mat = time.perf_counter() - t_mat_start
 
-        # Parse net_ram_mb from worker stdout (excludes Python runtime overhead)
+        # Parse peak_ram_mb from worker stdout (true high-water mark above baseline)
         mprw_mat_mb: Optional[float] = None
         for line in mat_res.stdout.split("\n"):
-            if line.strip().lower().startswith("net_ram_mb:"):
+            if line.strip().lower().startswith("peak_ram_mb:"):
                 try:
                     mprw_mat_mb = float(line.split(":", 1)[1].strip())
                 except ValueError:

@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -64,6 +65,55 @@ def _peak_ram_mb() -> float:
     except FileNotFoundError:
         pass
     return 0.0
+
+
+class _PeakRSSTracker:
+    """Context manager that polls process RSS every 10 ms in a daemon thread,
+    capturing the true high-water mark during a specific code section.
+
+    Correctly captures intermediate activation tensors (e.g. scatter/gather
+    buffers in GNN message passing) that are freed before the section ends,
+    which a simple rss_after - rss_before snapshot would miss.
+    """
+    _POLL_INTERVAL = 0.01
+
+    def __init__(self):
+        self._baseline: float = 0.0
+        self._peak: float = 0.0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self):
+        self._baseline = _peak_ram_mb()
+        self._peak = self._baseline
+        self._stop.clear()
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self._stop.set()
+        self._thread.join()
+
+    def _run(self):
+        try:
+            import psutil
+            proc = psutil.Process(os.getpid())
+            while not self._stop.wait(self._POLL_INTERVAL):
+                try:
+                    rss = proc.memory_info().rss / 1e6
+                    if rss > self._peak:
+                        self._peak = rss
+                except Exception:
+                    pass
+        except ImportError:
+            while not self._stop.wait(self._POLL_INTERVAL):
+                rss = _peak_ram_mb()
+                if rss > self._peak:
+                    self._peak = rss
+
+    @property
+    def net_peak_mb(self) -> float:
+        return max(0.0, self._peak - self._baseline)
 
 
 def main() -> None:
@@ -128,16 +178,16 @@ def main() -> None:
     for param in model.parameters():
         param.requires_grad_(False)
 
-    # Snapshot RSS AFTER loading everything — before forward pass.
-    rss_before = _peak_ram_mb()
-
-    t0 = time.perf_counter()
-    with torch.no_grad():
-        z = model(g.x.to(device), g.edge_index.to(device))
-    inf_time = time.perf_counter() - t0
-
-    rss_after = _peak_ram_mb()
-    inf_peak  = max(0.0, rss_after - rss_before)
+    # Measure true peak RSS during the forward pass using a background polling
+    # thread (10 ms interval).  This captures transient intermediate tensors
+    # (scatter/gather buffers in SAGEConv message passing) that may be freed
+    # before a simple rss_after - rss_before snapshot is taken.
+    with _PeakRSSTracker() as _tracker:
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            z = model(g.x.to(device), g.edge_index.to(device))
+        inf_time = time.perf_counter() - t0
+    inf_peak = _tracker.net_peak_mb
 
     # F1 on test mask
     from torchmetrics.functional import f1_score as _f1
