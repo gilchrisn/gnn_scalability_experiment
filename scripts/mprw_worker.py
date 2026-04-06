@@ -27,7 +27,6 @@ import json
 import os
 import sys
 import time
-import tracemalloc
 
 # Project root on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -36,6 +35,27 @@ import torch
 from torch_geometric.data import HeteroData
 
 from src.kernels.mprw import MPRWKernel
+
+
+def _subprocess_peak_rss_mb() -> float:
+    """OS high-water mark RSS for this process since start, in MB.
+
+    Uses resource.getrusage (Linux/macOS) — same metric as /usr/bin/time -v,
+    making MPRW memory comparable to C++ Exact/KMV measurements.
+    Falls back to psutil current RSS on Windows.
+    """
+    try:
+        import resource
+        kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        import platform
+        return kb / 1e6 if platform.system() == "Darwin" else kb / 1024.0
+    except ImportError:
+        pass
+    try:
+        import psutil
+        return psutil.Process(os.getpid()).memory_info().rss / 1e6
+    except Exception:
+        return 0.0
 
 
 def main() -> None:
@@ -72,15 +92,11 @@ def main() -> None:
 
     kernel = MPRWKernel(k=k, seed=seed, device=torch.device("cpu"))
 
-    # Measure peak allocation during materialize() only.
-    # clear_traces() resets the peak counter so setup allocations (edge files,
-    # HeteroData construction) are excluded — consistent with inference_worker.
-    tracemalloc.start()
-    tracemalloc.clear_traces()
     data, elapsed = kernel.materialize(g, triples, target_type)
-    _, peak_bytes = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-    peak_ram_mb = peak_bytes / 1e6
+    # Peak RSS of this subprocess since start — captured immediately after
+    # materialize() so the high-water mark includes all walker-state tensors
+    # and intermediate allocations.  Comparable to /usr/bin/time -v for C++.
+    peak_ram_mb = _subprocess_peak_rss_mb()
 
     # Write output edge_index
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)

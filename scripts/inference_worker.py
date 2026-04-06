@@ -54,7 +54,6 @@ import argparse
 import os
 import sys
 import time
-import tracemalloc
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -64,6 +63,30 @@ import torch.nn.functional as F
 from src.models import get_model
 from src.config import config
 from src.analysis.metrics import DirichletEnergyMetric
+
+
+def _subprocess_peak_rss_mb() -> float:
+    """OS high-water mark RSS for this process since start, in MB.
+
+    Uses resource.getrusage (Linux/macOS) — the same metric that
+    /usr/bin/time -v reports for C++ subprocesses, so measurements are
+    methodologically consistent across all methods.
+
+    Falls back to psutil current RSS on Windows (no ru_maxrss available).
+    """
+    try:
+        import resource
+        kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # Linux: ru_maxrss is in KB.  macOS/BSD: in bytes.
+        import platform
+        return kb / 1e6 if platform.system() == "Darwin" else kb / 1024.0
+    except ImportError:
+        pass
+    try:
+        import psutil
+        return psutil.Process(os.getpid()).memory_info().rss / 1e6
+    except Exception:
+        return 0.0
 
 
 # ── Strict SpMM graph ops ────────────────────────────────────────────────────
@@ -251,19 +274,16 @@ def main() -> None:
     n = args.n_target
     adj_csr = _build_normalized_adj_csr(ei, n, device)
 
-    # ── Inference — strict SpMM, measured with tracemalloc ───────────────
-    # tracemalloc.clear_traces() resets the peak counter so we measure only
-    # the forward pass, not allocations from graph loading or model init.
+    # ── Inference — strict SpMM ───────────────────────────────────────────
     x_dev = x.to(device)
-    tracemalloc.start()
-    tracemalloc.clear_traces()
     t0 = time.perf_counter()
     with torch.no_grad():
         z = _sage_spmm_forward(model, x_dev, adj_csr)
     inf_time = time.perf_counter() - t0
-    _, inf_peak_bytes = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-    inf_peak = inf_peak_bytes / 1e6
+    # Peak RSS of this subprocess since start — captured after the forward
+    # pass so the high-water mark includes graph loading + model + adj_csr +
+    # all forward-pass intermediates.  Comparable to /usr/bin/time -v for C++.
+    inf_peak = _subprocess_peak_rss_mb()
 
     # ── F1 on test mask ───────────────────────────────────────────────────
     from torchmetrics.functional import f1_score as _f1
