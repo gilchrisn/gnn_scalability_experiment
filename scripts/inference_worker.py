@@ -8,6 +8,13 @@ peak RSS + macro-F1 to stdout.
 Because this runs as a subprocess with a fresh Python process, RSS starts at
 zero — no contamination from materialization memory or other methods' tensors.
 
+Forward pass uses strict SpMM (torch.sparse_csr_tensor + torch.sparse.mm).
+PyG's MessagePassing engine is bypassed entirely, so no dense [|E|, d] message
+buffer is allocated at any point.  Each layer computes:
+
+    agg_i  = (1 / deg_i) * sum_{j -> i} h_j        [SpMM, O(N*d) memory]
+    h_i^+  = lin_l( agg_i ) + lin_r( h_i )          [SAGEConv mean aggregation]
+
 Stdout lines (parsed by exp3_inference.py)
 ------------------------------------------
     inf_peak_ram_mb: X.XX    — peak RSS during inference (MB)
@@ -50,6 +57,8 @@ from src.config import config
 from src.analysis.metrics import DirichletEnergyMetric
 
 
+# ── RSS measurement ──────────────────────────────────────────────────────────
+
 def _peak_ram_mb() -> float:
     """Current process RSS in MB."""
     try:
@@ -71,9 +80,8 @@ class _PeakRSSTracker:
     """Context manager that polls process RSS every 10 ms in a daemon thread,
     capturing the true high-water mark during a specific code section.
 
-    Correctly captures intermediate activation tensors (e.g. scatter/gather
-    buffers in GNN message passing) that are freed before the section ends,
-    which a simple rss_after - rss_before snapshot would miss.
+    Correctly captures intermediate activation tensors that are freed before
+    the section ends, which a simple rss_after - rss_before snapshot misses.
     """
     _POLL_INTERVAL = 0.01
 
@@ -116,6 +124,125 @@ class _PeakRSSTracker:
         return max(0.0, self._peak - self._baseline)
 
 
+# ── Strict SpMM graph ops ────────────────────────────────────────────────────
+
+def _build_normalized_adj_csr(
+    ei: torch.Tensor,
+    n: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build D^{-1} A as a torch.sparse_csr_tensor.
+
+    A[dst, src] = 1 / deg(dst)  for each edge (src -> dst).
+
+    SpMM with this matrix computes mean neighbourhood aggregation:
+        (D^{-1} A) @ x  =>  row i = mean_{j in N(i)} x_j
+    Memory: O(N + E) for the sparse structure, O(N * d) for the matmul.
+    No dense [|E|, d] buffer is ever allocated.
+    """
+    if ei.size(1) == 0:
+        crow = torch.zeros(n + 1, dtype=torch.long, device=device)
+        col  = torch.empty(0, dtype=torch.long, device=device)
+        vals = torch.empty(0, dtype=torch.float32, device=device)
+        return torch.sparse_csr_tensor(crow, col, vals, size=(n, n))
+
+    src = ei[0].to(device)
+    dst = ei[1].to(device)
+
+    # Degree = number of incoming neighbours per dst node
+    deg = torch.zeros(n, dtype=torch.float32, device=device)
+    deg.scatter_add_(0, dst, torch.ones(src.size(0), dtype=torch.float32, device=device))
+    deg_inv = deg.clamp(min=1.0).reciprocal()   # safe: no isolated-node NaN
+
+    # Edge weights: 1 / deg(dst_node)
+    vals = deg_inv[dst]                          # shape [|E|]
+
+    # CSR requires rows (dst) in non-decreasing order.
+    # Use lexicographic sort (dst, src) so duplicate (dst,src) pairs land
+    # adjacently — coalesce was applied upstream so duplicates are absent.
+    perm   = torch.argsort(dst * n + src)        # int64 safe for n < 3e9
+    dst_s  = dst[perm]
+    src_s  = src[perm]
+    vals_s = vals[perm]
+
+    # crow_indices: prefix-sum of per-row edge counts
+    crow = torch.zeros(n + 1, dtype=torch.long, device=device)
+    crow[1:].scatter_add_(0, dst_s, torch.ones_like(dst_s))
+    crow = crow.cumsum(0)
+
+    return torch.sparse_csr_tensor(crow, src_s, vals_s, size=(n, n))
+
+
+def _sage_spmm_forward(
+    model,
+    x: torch.Tensor,
+    adj_csr: torch.Tensor,
+) -> torch.Tensor:
+    """Strict SpMM forward pass for SAGE.  Bypasses PyG MessagePassing entirely.
+
+    Each layer:
+        agg   = adj_csr @ x                  # SpMM, O(N*d) — mean aggregation
+        x_out = lin_l(agg) + lin_r(x)        # SAGEConv mean formula
+        x_out = ReLU(x_out)                  # (all but last layer)
+
+    adj_csr already encodes D^{-1} A, so the SpMM is the exact paper Eq. 1
+    neighbourhood term without any intermediate message buffer.
+
+    Raises RuntimeError if SAGEConv weight attributes cannot be located.
+    """
+    for i, layer in enumerate(model.layers):
+        # Strict SpMM: O(N * in_dim) working memory, no [|E|, d] allocation
+        agg = torch.sparse.mm(adj_csr, x)    # [N, in_dim]
+
+        # SAGEConv weight attributes (PyG >= 2.0 uses lin_l / lin_r)
+        if hasattr(layer, "lin_l") and hasattr(layer, "lin_r"):
+            x_out = layer.lin_l(agg) + layer.lin_r(x)
+        elif hasattr(layer, "lin") and hasattr(layer, "lin_r"):
+            # Some older PyG builds use lin / lin_r
+            x_out = layer.lin(agg) + layer.lin_r(x)
+        else:
+            available = [name for name, _ in layer.named_children()]
+            raise RuntimeError(
+                f"Cannot find SAGEConv weight attributes on layer {i}. "
+                f"Detected children: {available}"
+            )
+
+        if i < model.num_layers - 1:
+            x_out = F.relu(x_out)
+        x = x_out
+    return x
+
+
+def _sage_spmm_layerwise(
+    model,
+    x: torch.Tensor,
+    adj_csr: torch.Tensor,
+) -> list[torch.Tensor]:
+    """Same as _sage_spmm_forward but returns a list of per-layer outputs."""
+    intermediates: list[torch.Tensor] = []
+    for i, layer in enumerate(model.layers):
+        agg = torch.sparse.mm(adj_csr, x)
+
+        if hasattr(layer, "lin_l") and hasattr(layer, "lin_r"):
+            x_out = layer.lin_l(agg) + layer.lin_r(x)
+        elif hasattr(layer, "lin") and hasattr(layer, "lin_r"):
+            x_out = layer.lin(agg) + layer.lin_r(x)
+        else:
+            available = [name for name, _ in layer.named_children()]
+            raise RuntimeError(
+                f"Cannot find SAGEConv weight attributes on layer {i}. "
+                f"Detected children: {available}"
+            )
+
+        if i < model.num_layers - 1:
+            x_out = F.relu(x_out)
+        x = x_out
+        intermediates.append(x.cpu().clone())
+    return intermediates
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--graph-file",  required=True)
@@ -134,7 +261,7 @@ def main() -> None:
 
     device = torch.device("cpu")
 
-    # Load materialized graph
+    # ── Load materialized graph ───────────────────────────────────────────
     if args.graph_type == "adj":
         # Parse C++ adjacency list format: "u v1 v2 ..."
         srcs, dsts = [], []
@@ -161,15 +288,13 @@ def main() -> None:
     else:
         ei = torch.load(args.graph_file, weights_only=True)
 
-    x       = torch.load(args.feat_file,  weights_only=True)
-    labels  = torch.load(args.labels_file, weights_only=True)
-    mask    = torch.load(args.mask_file,   weights_only=True)
+    x      = torch.load(args.feat_file,   weights_only=True)
+    labels = torch.load(args.labels_file, weights_only=True)
+    mask   = torch.load(args.mask_file,   weights_only=True)
 
     x = F.pad(x, (0, max(0, args.in_dim - x.size(1))))
 
-    g = Data(edge_index=ei, num_nodes=args.n_target)
-    g.x = x
-
+    # ── Model ────────────────────────────────────────────────────────────
     model = get_model("SAGE", args.in_dim, args.num_classes,
                       config.HIDDEN_DIM, num_layers=args.num_layers).to(device)
     model.load_state_dict(torch.load(args.weights, weights_only=True,
@@ -178,20 +303,24 @@ def main() -> None:
     for param in model.parameters():
         param.requires_grad_(False)
 
-    # Measure true peak RSS during the forward pass using a background polling
-    # thread (10 ms interval).  This captures transient intermediate tensors
-    # (scatter/gather buffers in SAGEConv message passing) that may be freed
-    # before a simple rss_after - rss_before snapshot is taken.
+    # ── Build D^{-1}A CSR — O(N+E), no dense buffer ──────────────────────
+    # Self-loops were added above (adj format) or are expected in .pt files;
+    # normalization includes them in the degree count.
+    n = args.n_target
+    adj_csr = _build_normalized_adj_csr(ei, n, device)
+
+    # ── Inference — strict SpMM, measured with background RSS poll ────────
+    x_dev = x.to(device)
     with _PeakRSSTracker() as _tracker:
         t0 = time.perf_counter()
         with torch.no_grad():
-            z = model(g.x.to(device), g.edge_index.to(device))
+            z = _sage_spmm_forward(model, x_dev, adj_csr)
         inf_time = time.perf_counter() - t0
     inf_peak = _tracker.net_peak_mb
 
-    # F1 on test mask
+    # ── F1 on test mask ───────────────────────────────────────────────────
     from torchmetrics.functional import f1_score as _f1
-    valid  = mask & (labels >= 0)
+    valid = mask & (labels >= 0)
     if valid.sum() > 0:
         f1 = _f1(z[valid].argmax(1), labels[valid],
                  task="multiclass", num_classes=args.num_classes,
@@ -199,29 +328,22 @@ def main() -> None:
     else:
         f1 = 0.0
 
-    # Dirichlet energy
+    # ── Dirichlet energy ──────────────────────────────────────────────────
     de_metric = DirichletEnergyMetric()
     try:
         de = de_metric.calculate(z, ei)
     except Exception:
         de = 0.0
 
-    # Save embedding for CKA comparison in parent
+    # ── Save embedding ────────────────────────────────────────────────────
     os.makedirs(os.path.dirname(os.path.abspath(args.z_out)), exist_ok=True)
     torch.save(z.cpu(), args.z_out)
 
-    # Also save layerwise intermediates for layerwise CKA
+    # ── Layerwise intermediates for CKA ──────────────────────────────────
     layers_out = args.z_out.replace(".pt", "_layers.pt")
     try:
-        intermediates = []
-        x_tmp = g.x.to(device)
-        ei_tmp = g.edge_index.to(device)
         with torch.no_grad():
-            for i, layer in enumerate(model.layers):
-                x_tmp = layer(x_tmp, ei_tmp)
-                if i < model.num_layers - 1:
-                    x_tmp = F.relu(x_tmp)
-                intermediates.append(x_tmp.cpu().clone())
+            intermediates = _sage_spmm_layerwise(model, x_dev, adj_csr)
         torch.save(intermediates, layers_out)
     except Exception:
         pass

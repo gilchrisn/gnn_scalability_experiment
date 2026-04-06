@@ -21,10 +21,11 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Defaults — override via positional env or CLI style args
 # ---------------------------------------------------------------------------
-DATASETS=("HGB_ACM" "HGB_DBLP" "HGB_IMDB" "OAG_CS" "OGB_MAG")
-TRAIN_FRAC=0.1
+# DATASETS=("HGB_ACM" "HGB_DBLP" "HGB_IMDB" "OAG_CS" "OGB_MAG")
+DATASETS=("HGB_ACM" "HGB_DBLP" "HGB_IMDB")
+TRAIN_FRAC=0.4
 DEPTHS="2 3 4"
-K_VALUES="8 16 32 64 128"
+K_VALUES="2 4 8 16 32"
 EPOCHS=100
 SEED=42
 MAX_RSS_GB=32        # e.g. 100  — leave empty to disable RSS guard

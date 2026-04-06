@@ -206,7 +206,7 @@ def _run_inference_worker(
                     label, e.returncode, e.stderr[-400:])
         return None
 
-    out = {}
+    out: dict = {}
     for line in res.stdout.split("\n"):
         line = line.strip()
         for key in ("inf_peak_ram_mb", "inf_time", "inf_f1", "inf_de"):
@@ -215,6 +215,13 @@ def _run_inference_worker(
                     out[key] = float(line.split(":", 1)[1].strip())
                 except ValueError:
                     pass
+        # SparseTensor-fallback OOM guard: worker exits 0 but sets this flag
+        if line.lower().startswith("inf_oom:"):
+            try:
+                if int(line.split(":", 1)[1].strip()) == 1:
+                    out["inf_oom"] = True
+            except ValueError:
+                pass
     return out
 
 
@@ -390,9 +397,9 @@ def main():
     parser.add_argument("--output",         type=str, default=None,
                         help="Path to master_results.csv "
                              "(default: results/<dataset>/master_results.csv)")
-    parser.add_argument("--max-adj-mb",     type=float, default=None)
-    parser.add_argument("--max-rss-gb",     type=float, default=None)
-    parser.add_argument("--timeout",        type=int,   default=600)
+    parser.add_argument("--max-adj-mb",      type=float, default=None)
+    parser.add_argument("--max-rss-gb",      type=float, default=None)
+    parser.add_argument("--timeout",         type=int,   default=600)
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
@@ -579,6 +586,13 @@ def main():
 
             inf_res, z_path, layers_path = _inf_subprocess(
                 exact_file, "adj", "exact", L)
+            if inf_res is not None and inf_res.get("inf_oom"):
+                log.warning("  [Exact L=%d] inference OOM (graph too dense for "
+                            "index_select even with SparseTensor fallback)", L)
+                rows.append({**base_row, "L": L, "Method": "Exact",
+                             "exact_status": "INF_OOM"})
+                csv_fh.flush()
+                continue
             if inf_res is None:
                 log.warning("  [Exact L=%d] inference subprocess failed", L)
                 continue
@@ -603,7 +617,7 @@ def main():
                 "Pred_Similarity":      "",
                 "Macro_F1":             _fmt(inf_res.get("inf_f1")),
                 "Dirichlet_Energy":     _fmt(inf_res.get("inf_de")),
-                "exact_status":         "OK",
+                "exact_status":         exact_status_flag,
             })
             csv_fh.flush()
             log.info("  [Exact L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  inf_ram=%s  mat_ram=%s",
@@ -684,6 +698,9 @@ def main():
 
             inf_res, z_kmv_path, layers_kmv_path = _inf_subprocess(
                 kmv_file, "adj", f"kmv_{k}", L)
+            if inf_res is not None and inf_res.get("inf_oom"):
+                log.warning("  [KMV k=%d L=%d] inference OOM", k, L)
+                inf_res = None   # treat as failure for this L; continue to next
             if inf_res is None:
                 log.warning("  [KMV k=%d L=%d] inference subprocess failed", k, L)
                 continue
@@ -858,6 +875,9 @@ def main():
 
             inf_res, z_mprw_path, layers_mprw_path = _inf_subprocess(
                 str(mprw_out), "pt", f"mprw_{k}", L)
+            if inf_res is not None and inf_res.get("inf_oom"):
+                log.warning("  [MPRW k=%d L=%d] inference OOM", k, L)
+                inf_res = None
             if inf_res is None:
                 log.warning("  [MPRW k=%d L=%d] inference subprocess failed", k, L)
                 continue
