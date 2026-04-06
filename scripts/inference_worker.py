@@ -3,10 +3,20 @@ inference_worker.py — SAGE inference subprocess.
 
 Loads a pre-materialized graph (adjacency .adj or edge_index .pt) plus frozen
 model weights, runs one forward pass, saves the embedding to disk, and reports
-peak RSS + macro-F1 to stdout.
+peak allocation + macro-F1 to stdout.
 
-Because this runs as a subprocess with a fresh Python process, RSS starts at
-zero — no contamination from materialization memory or other methods' tensors.
+Because this runs as a subprocess with a fresh Python process, there is no
+contamination from materialization memory or other methods' tensors.
+
+Memory measurement
+------------------
+tracemalloc is started immediately before the forward pass and stopped after.
+tracemalloc.clear_traces() resets the peak counter so the reported value is
+the true peak Python-level allocation during the forward pass only, not
+accumulated from earlier setup.  This captures all tensor constructions through
+Python's PyMem_Raw* layer regardless of whether new OS pages are faulted in
+(PyTorch's CPU caching allocator reuses mapped pages, which makes RSS-delta
+approaches report 0 on small graphs).
 
 Forward pass uses strict SpMM (torch.sparse_csr_tensor + torch.sparse.mm).
 PyG's MessagePassing engine is bypassed entirely, so no dense [|E|, d] message
@@ -17,7 +27,7 @@ buffer is allocated at any point.  Each layer computes:
 
 Stdout lines (parsed by exp3_inference.py)
 ------------------------------------------
-    inf_peak_ram_mb: X.XX    — peak RSS during inference (MB)
+    inf_peak_ram_mb: X.XX    — peak tracemalloc allocation during forward (MB)
     inf_time: X.XXXXXX       — wall-clock seconds for forward pass
     inf_f1: X.XXXXXX         — macro-F1 on test nodes
     inf_de: X.XXXXXX         — Dirichlet energy of embeddings
@@ -43,85 +53,17 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import threading
 import time
+import tracemalloc
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn.functional as F
-from torch_geometric.data import Data
 
 from src.models import get_model
 from src.config import config
 from src.analysis.metrics import DirichletEnergyMetric
-
-
-# ── RSS measurement ──────────────────────────────────────────────────────────
-
-def _peak_ram_mb() -> float:
-    """Current process RSS in MB."""
-    try:
-        import psutil
-        return psutil.Process(os.getpid()).memory_info().rss / 1e6
-    except ImportError:
-        pass
-    try:
-        with open("/proc/self/status") as f:
-            for line in f:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) / 1024.0
-    except FileNotFoundError:
-        pass
-    return 0.0
-
-
-class _PeakRSSTracker:
-    """Context manager that polls process RSS every 10 ms in a daemon thread,
-    capturing the true high-water mark during a specific code section.
-
-    Correctly captures intermediate activation tensors that are freed before
-    the section ends, which a simple rss_after - rss_before snapshot misses.
-    """
-    _POLL_INTERVAL = 0.01
-
-    def __init__(self):
-        self._baseline: float = 0.0
-        self._peak: float = 0.0
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def __enter__(self):
-        self._baseline = _peak_ram_mb()
-        self._peak = self._baseline
-        self._stop.clear()
-        self._thread.start()
-        return self
-
-    def __exit__(self, *_):
-        self._stop.set()
-        self._thread.join()
-
-    def _run(self):
-        try:
-            import psutil
-            proc = psutil.Process(os.getpid())
-            while not self._stop.wait(self._POLL_INTERVAL):
-                try:
-                    rss = proc.memory_info().rss / 1e6
-                    if rss > self._peak:
-                        self._peak = rss
-                except Exception:
-                    pass
-        except ImportError:
-            while not self._stop.wait(self._POLL_INTERVAL):
-                rss = _peak_ram_mb()
-                if rss > self._peak:
-                    self._peak = rss
-
-    @property
-    def net_peak_mb(self) -> float:
-        return max(0.0, self._peak - self._baseline)
 
 
 # ── Strict SpMM graph ops ────────────────────────────────────────────────────
@@ -309,14 +251,19 @@ def main() -> None:
     n = args.n_target
     adj_csr = _build_normalized_adj_csr(ei, n, device)
 
-    # ── Inference — strict SpMM, measured with background RSS poll ────────
+    # ── Inference — strict SpMM, measured with tracemalloc ───────────────
+    # tracemalloc.clear_traces() resets the peak counter so we measure only
+    # the forward pass, not allocations from graph loading or model init.
     x_dev = x.to(device)
-    with _PeakRSSTracker() as _tracker:
-        t0 = time.perf_counter()
-        with torch.no_grad():
-            z = _sage_spmm_forward(model, x_dev, adj_csr)
-        inf_time = time.perf_counter() - t0
-    inf_peak = _tracker.net_peak_mb
+    tracemalloc.start()
+    tracemalloc.clear_traces()
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        z = _sage_spmm_forward(model, x_dev, adj_csr)
+    inf_time = time.perf_counter() - t0
+    _, inf_peak_bytes = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    inf_peak = inf_peak_bytes / 1e6
 
     # ── F1 on test mask ───────────────────────────────────────────────────
     from torchmetrics.functional import f1_score as _f1
