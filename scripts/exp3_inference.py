@@ -200,11 +200,14 @@ def _run_inference_worker(
                              timeout=timeout)
     except subprocess.TimeoutExpired:
         log.warning("  [inference %s] subprocess timed out", label)
-        return None
+        return {"inf_failed": True, "inf_timeout": True}
     except subprocess.CalledProcessError as e:
-        log.warning("  [inference %s] subprocess failed (exit %d):\n%s",
-                    label, e.returncode, e.stderr[-400:])
-        return None
+        # Exit 137 = SIGKILL (9), the Linux OOM killer's signature.
+        oom = e.returncode == 137
+        log.warning("  [inference %s] subprocess failed (exit %d%s):\n%s",
+                    label, e.returncode, " — OOM killer" if oom else "",
+                    e.stderr[-400:])
+        return {"inf_failed": True, "inf_oom": oom}
 
     out: dict = {}
     for line in res.stdout.split("\n"):
@@ -586,15 +589,21 @@ def main():
 
             inf_res, z_path, layers_path = _inf_subprocess(
                 exact_file, "adj", "exact", L)
-            if inf_res is not None and inf_res.get("inf_oom"):
-                log.warning("  [Exact L=%d] inference OOM (graph too dense for "
-                            "index_select even with SparseTensor fallback)", L)
-                rows.append({**base_row, "L": L, "Method": "Exact",
-                             "exact_status": "INF_OOM"})
+            if inf_res is not None and inf_res.get("inf_failed"):
+                status = ("INF_OOM"     if inf_res.get("inf_oom")
+                          else "INF_TIMEOUT" if inf_res.get("inf_timeout")
+                          else "INF_FAIL")
+                log.warning("  [Exact L=%d] inference failed: %s", L, status)
+                csv_w.writerow({
+                    **{f: "" for f in _FIELDS},
+                    "Dataset": args.dataset, "MetaPath": args.metapath,
+                    "L": L, "Method": "Exact", "k_value": "",
+                    "Materialization_Time": _fmt(t_exact_mat),
+                    "Mat_RAM_MB": _fmt(exact_mat_mb, 1) if exact_mat_mb else "",
+                    "Edge_Count": exact_edge_count,
+                    "exact_status": status,
+                })
                 csv_fh.flush()
-                continue
-            if inf_res is None:
-                log.warning("  [Exact L=%d] inference subprocess failed", L)
                 continue
 
             z_exact_by_L[L]      = z_path
@@ -698,11 +707,21 @@ def main():
 
             inf_res, z_kmv_path, layers_kmv_path = _inf_subprocess(
                 kmv_file, "adj", f"kmv_{k}", L)
-            if inf_res is not None and inf_res.get("inf_oom"):
-                log.warning("  [KMV k=%d L=%d] inference OOM", k, L)
-                inf_res = None   # treat as failure for this L; continue to next
-            if inf_res is None:
-                log.warning("  [KMV k=%d L=%d] inference subprocess failed", k, L)
+            if inf_res is not None and inf_res.get("inf_failed"):
+                status = ("INF_OOM"     if inf_res.get("inf_oom")
+                          else "INF_TIMEOUT" if inf_res.get("inf_timeout")
+                          else "INF_FAIL")
+                log.warning("  [KMV k=%d L=%d] inference failed: %s", k, L, status)
+                csv_w.writerow({
+                    **{f: "" for f in _FIELDS},
+                    "Dataset": args.dataset, "MetaPath": args.metapath,
+                    "L": L, "Method": "KMV", "k_value": k,
+                    "Materialization_Time": _fmt(t_kmv_mat),
+                    "Mat_RAM_MB": _fmt(kmv_mat_mb, 1) if kmv_mat_mb else "",
+                    "Edge_Count": kmv_edge_count,
+                    "exact_status": status,
+                })
+                csv_fh.flush()
                 continue
 
             cka_cols, pred_sim = _cka_from_disk(
@@ -875,11 +894,24 @@ def main():
 
             inf_res, z_mprw_path, layers_mprw_path = _inf_subprocess(
                 str(mprw_out), "pt", f"mprw_{k}", L)
-            if inf_res is not None and inf_res.get("inf_oom"):
-                log.warning("  [MPRW k=%d L=%d] inference OOM", k, L)
-                inf_res = None
-            if inf_res is None:
-                log.warning("  [MPRW k=%d L=%d] inference subprocess failed", k, L)
+            if inf_res is not None and inf_res.get("inf_failed"):
+                status = ("INF_OOM"     if inf_res.get("inf_oom")
+                          else "INF_TIMEOUT" if inf_res.get("inf_timeout")
+                          else "INF_FAIL")
+                log.warning("  [MPRW k=%d L=%d] inference failed: %s", k, L, status)
+                calib_flag = ("" if calib_converged
+                              else f"MPRW_CALIB_APPROX|")
+                csv_w.writerow({
+                    **{f: "" for f in _FIELDS},
+                    "Dataset": args.dataset, "MetaPath": args.metapath,
+                    "L": L, "Method": "MPRW", "k_value": k,
+                    "Density_Matched_w": calibrated_w,
+                    "Materialization_Time": _fmt(t_mprw_mat),
+                    "Mat_RAM_MB": _fmt(mprw_mat_mb, 1) if mprw_mat_mb is not None else "",
+                    "Edge_Count": mprw_edge_count,
+                    "exact_status": f"{calib_flag}{status}",
+                })
+                csv_fh.flush()
                 continue
 
             cka_cols, pred_sim = _cka_from_disk(
