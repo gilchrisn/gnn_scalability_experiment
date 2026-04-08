@@ -121,7 +121,8 @@ def _make_train_subgraph(g: HeteroData, part: dict, labels: torch.Tensor,
 def _fix_masks(g_snap: HeteroData, target_ntype: str) -> None:
     """Recreate 80/10/10 masks if the sliced subgraph has no valid val entries."""
     labels  = g_snap[target_ntype].y
-    valid   = labels >= 0
+    # Multi-label: labeled = row has at least one active class; single-label: label >= 0
+    valid   = (labels.sum(dim=1) > 0) if labels.dim() == 2 else (labels >= 0)
     val_mask = getattr(g_snap[target_ntype], "val_mask",
                        torch.zeros(labels.size(0), dtype=torch.bool))
     if valid.sum() > 0 and (val_mask & valid).sum() == 0:
@@ -146,6 +147,15 @@ def _fix_masks(g_snap: HeteroData, target_ntype: str) -> None:
 
 def _f1(logits: torch.Tensor, labels: torch.Tensor, mask: torch.Tensor) -> float:
     from torchmetrics.functional import f1_score
+    if labels.dim() == 2:  # multi-label
+        valid = mask & (labels.sum(dim=1) > 0)
+        if valid.sum() == 0:
+            return 0.0
+        preds = (logits[valid] > 0).long()
+        return f1_score(
+            preds, labels[valid].long(),
+            task="multilabel", num_labels=labels.size(1), average="macro",
+        ).item()
     valid = mask & (labels >= 0)
     if valid.sum() == 0:
         return 0.0
@@ -173,8 +183,16 @@ def _train(
     x          = g_homo.x.to(device)
     edge_index = g_homo.edge_index.to(device)
     labels     = g_homo.y.to(device)
-    train_mask = (g_homo.train_mask & (g_homo.y >= 0)).to(device)
-    val_mask   = (g_homo.val_mask   & (g_homo.y >= 0)).to(device)
+    is_multilabel = labels.dim() == 2
+
+    if is_multilabel:
+        # Restrict masks to rows that have at least one active label
+        labeled     = labels.sum(dim=1) > 0
+        train_mask  = (g_homo.train_mask.to(device) & labeled)
+        val_mask    = (g_homo.val_mask.to(device)   & labeled)
+    else:
+        train_mask  = (g_homo.train_mask & (g_homo.y >= 0)).to(device)
+        val_mask    = (g_homo.val_mask   & (g_homo.y >= 0)).to(device)
 
     best_val   = float("inf")
     best_state = None
@@ -187,15 +205,23 @@ def _train(
         model.train()
         opt.zero_grad()
         out  = model(x, edge_index)
-        loss = F.cross_entropy(out[train_mask], labels[train_mask])
+        if is_multilabel:
+            loss = F.binary_cross_entropy_with_logits(out[train_mask], labels[train_mask])
+        else:
+            loss = F.cross_entropy(out[train_mask], labels[train_mask])
         loss.backward()
         opt.step()
 
         model.eval()
         with torch.no_grad():
             out_e    = model(x, edge_index)
-            val_loss = (F.cross_entropy(out_e[val_mask], labels[val_mask]).item()
-                        if val_mask.sum() > 0 else float("nan"))
+            if is_multilabel:
+                val_loss = (F.binary_cross_entropy_with_logits(
+                                out_e[val_mask], labels[val_mask]).item()
+                            if val_mask.sum() > 0 else float("nan"))
+            else:
+                val_loss = (F.cross_entropy(out_e[val_mask], labels[val_mask]).item()
+                            if val_mask.sum() > 0 else float("nan"))
             train_f1 = _f1(out_e, labels, train_mask)
 
         history.append({

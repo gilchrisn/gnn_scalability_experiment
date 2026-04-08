@@ -287,13 +287,23 @@ def main() -> None:
 
     # ── F1 on test mask ───────────────────────────────────────────────────
     from torchmetrics.functional import f1_score as _f1
-    valid = mask & (labels >= 0)
-    if valid.sum() > 0:
-        f1 = _f1(z[valid].argmax(1), labels[valid],
-                 task="multiclass", num_classes=args.num_classes,
-                 average="macro").item()
+    if labels.dim() == 2:  # multi-label (e.g. HGB IMDB)
+        valid = mask & (labels.sum(dim=1) > 0)
+        if valid.sum() > 0:
+            preds = (z[valid] > 0).long()
+            f1 = _f1(preds, labels[valid].long(),
+                     task="multilabel", num_labels=args.num_classes,
+                     average="macro").item()
+        else:
+            f1 = 0.0
     else:
-        f1 = 0.0
+        valid = mask & (labels >= 0)
+        if valid.sum() > 0:
+            f1 = _f1(z[valid].argmax(1), labels[valid],
+                     task="multiclass", num_classes=args.num_classes,
+                     average="macro").item()
+        else:
+            f1 = 0.0
 
     # ── Dirichlet energy ──────────────────────────────────────────────────
     de_metric = DirichletEnergyMetric()

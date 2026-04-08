@@ -70,32 +70,36 @@ class BaseGraphLoader(ABC):
 
     def _extract_labels(self, g: tg_data.HeteroData, target_ntype: str, default_classes: int = 2) -> Tuple[torch.Tensor, int]:
         """
-        Extracts ground truth from 'y'. Flattens multi-dim labels and infers class count.
+        Extracts ground truth from 'y'. Handles both single-label (1-D int64) and
+        multi-label (2-D float multi-hot) formats.
+
+        Multi-label: returns the raw float multi-hot tensor [N, C] unchanged.
+          Rows that are all-zero are unlabeled — callers must exclude them from
+          loss/metric computation using ``(labels.sum(dim=1) > 0)``.
+
+        Single-label: flattens to 1-D int64 and maps -1 → IGNORE_LABEL_INDEX.
         """
         if hasattr(g[target_ntype], 'y') and g[target_ntype].y is not None:
             labels = g[target_ntype].y
-            if labels.dim() > 1:
-                if labels.size(1) > 1:
-                    labels = labels.argmax(dim=1)
-                else:
-                    labels = labels.view(-1)
 
-            labels = labels.long()
+            # Multi-hot multi-label (e.g. HGB IMDB: [N, 5] float32)
+            if labels.dim() > 1 and labels.size(1) > 1:
+                num_classes = labels.size(1)
+                return labels.float(), num_classes
 
+            # Single-label (possibly [N,1] → flatten)
+            labels = labels.view(-1).long()
             mask_invalid = (labels == -1)
             if mask_invalid.any():
                 labels[mask_invalid] = config.IGNORE_LABEL_INDEX
 
             valid_labels = labels[labels != config.IGNORE_LABEL_INDEX]
-            if valid_labels.numel() > 0:
-                num_classes = int(valid_labels.max()) + 1
-            else:
-                num_classes = default_classes
+            num_classes = int(valid_labels.max()) + 1 if valid_labels.numel() > 0 else default_classes
         else:
             print(f"[Loader] No labels found for '{target_ntype}'; using random targets.")
             num_classes = default_classes
             labels = torch.randint(0, num_classes, (g[target_ntype].num_nodes,))
-            
+
         return labels, num_classes
 
     def create_info_dict(self, 
