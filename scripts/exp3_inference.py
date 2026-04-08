@@ -202,10 +202,12 @@ def _run_inference_worker(
         log.warning("  [inference %s] subprocess timed out", label)
         return {"inf_failed": True, "inf_timeout": True}
     except subprocess.CalledProcessError as e:
-        # Exit 137 = SIGKILL (9), the Linux OOM killer's signature.
-        oom = e.returncode == 137
+        # Python subprocess reports signal kills as negative signal numbers:
+        # SIGKILL (9) → returncode = -9.
+        # The shell represents this as 128+9=137, but Python gives -9 directly.
+        oom = e.returncode in (-9, 137)
         log.warning("  [inference %s] subprocess failed (exit %d%s):\n%s",
-                    label, e.returncode, " — OOM killer" if oom else "",
+                    label, e.returncode, " — OOM killer (SIGKILL)" if oom else "",
                     e.stderr[-400:])
         return {"inf_failed": True, "inf_oom": oom}
 
@@ -402,8 +404,15 @@ def main():
                              "(default: results/<dataset>/master_results.csv)")
     parser.add_argument("--max-adj-mb",      type=float, default=None)
     parser.add_argument("--max-rss-gb",      type=float, default=None)
-    parser.add_argument("--timeout",         type=int,   default=600)
+    parser.add_argument("--timeout",         type=int,   default=600,
+                        help="Timeout (s) for BOTH materialization and inference "
+                             "subprocesses unless overridden by --inf-timeout")
+    parser.add_argument("--inf-timeout",     type=int,   default=None,
+                        help="Timeout (s) for inference subprocesses only "
+                             "(default: same as --timeout)")
     args = parser.parse_args()
+    # Resolve inference timeout: explicit --inf-timeout overrides --timeout
+    args.inf_timeout = args.inf_timeout if args.inf_timeout is not None else args.timeout
 
     # ------------------------------------------------------------------
     # Paths
@@ -512,7 +521,7 @@ def main():
             labels_file=labels_file, mask_file=mask_file,
             n_target=n_target, node_offset=node_offset,
             in_dim=in_dim, num_classes=num_classes, num_layers=L,
-            timeout=args.timeout, log=log, label=f"{label}_L{L}",
+            timeout=args.inf_timeout, log=log, label=f"{label}_L{L}",
         )
         layers_path = z_out.replace(".pt", "_layers.pt")
         if not os.path.exists(layers_path):
@@ -578,6 +587,11 @@ def main():
                 raise MemoryError(
                     f"RSS guard: {rss:.1f} GB > {args.max_rss_gb:.1f} GB after ExactD")
 
+        # L-cascade flag: if inference fails for one L on this materialized graph,
+        # it will fail for all larger L too (same adj_csr + features, similar peak RAM).
+        # Write cascade rows immediately so mat data is preserved.
+        exact_inf_cascade: Optional[str] = None  # set to status string on first failure
+
         for L in args.depth:
             weights_path = weights_dir / f"{mp_safe}_L{L}.pt"
             if not weights_path.exists():
@@ -587,13 +601,30 @@ def main():
                 log.info("  [Exact L=%d] already in CSV — skipping", L)
                 continue
 
+            if exact_inf_cascade is not None:
+                log.warning("  [Exact L=%d] skipping — cascaded from earlier L failure (%s)",
+                            L, exact_inf_cascade)
+                csv_w.writerow({
+                    **{f: "" for f in _FIELDS},
+                    "Dataset": args.dataset, "MetaPath": args.metapath,
+                    "L": L, "Method": "Exact", "k_value": "",
+                    "Materialization_Time": _fmt(t_exact_mat),
+                    "Mat_RAM_MB": _fmt(exact_mat_mb, 1) if exact_mat_mb else "",
+                    "Edge_Count": exact_edge_count,
+                    "exact_status": f"INF_CASCADE({exact_inf_cascade})",
+                })
+                csv_fh.flush()
+                continue
+
             inf_res, z_path, layers_path = _inf_subprocess(
                 exact_file, "adj", "exact", L)
             if inf_res is not None and inf_res.get("inf_failed"):
                 status = ("INF_OOM"     if inf_res.get("inf_oom")
                           else "INF_TIMEOUT" if inf_res.get("inf_timeout")
                           else "INF_FAIL")
-                log.warning("  [Exact L=%d] inference failed: %s", L, status)
+                log.warning("  [Exact L=%d] inference failed: %s — cascading remaining depths",
+                            L, status)
+                exact_inf_cascade = status   # trigger cascade for remaining L
                 csv_w.writerow({
                     **{f: "" for f in _FIELDS},
                     "Dataset": args.dataset, "MetaPath": args.metapath,
@@ -696,6 +727,8 @@ def main():
             csv_fh.flush()
             continue
 
+        kmv_inf_cascade: Optional[str] = None  # L-cascade flag for this k
+
         for L in args.depth:
             if (args.metapath, str(L), "KMV", str(k)) in done_runs:
                 log.info("  [KMV k=%d L=%d] already in CSV — skipping", k, L)
@@ -705,13 +738,30 @@ def main():
                 log.warning("  [KMV k=%d L=%d] weights not found — skipping", k, L)
                 continue
 
+            if kmv_inf_cascade is not None:
+                log.warning("  [KMV k=%d L=%d] skipping — cascaded from earlier L failure (%s)",
+                            k, L, kmv_inf_cascade)
+                csv_w.writerow({
+                    **{f: "" for f in _FIELDS},
+                    "Dataset": args.dataset, "MetaPath": args.metapath,
+                    "L": L, "Method": "KMV", "k_value": k,
+                    "Materialization_Time": _fmt(t_kmv_mat),
+                    "Mat_RAM_MB": _fmt(kmv_mat_mb, 1) if kmv_mat_mb else "",
+                    "Edge_Count": kmv_edge_count,
+                    "exact_status": f"INF_CASCADE({kmv_inf_cascade})",
+                })
+                csv_fh.flush()
+                continue
+
             inf_res, z_kmv_path, layers_kmv_path = _inf_subprocess(
                 kmv_file, "adj", f"kmv_{k}", L)
             if inf_res is not None and inf_res.get("inf_failed"):
                 status = ("INF_OOM"     if inf_res.get("inf_oom")
                           else "INF_TIMEOUT" if inf_res.get("inf_timeout")
                           else "INF_FAIL")
-                log.warning("  [KMV k=%d L=%d] inference failed: %s", k, L, status)
+                log.warning("  [KMV k=%d L=%d] inference failed: %s — cascading remaining depths",
+                            k, L, status)
+                kmv_inf_cascade = status
                 csv_w.writerow({
                     **{f: "" for f in _FIELDS},
                     "Dataset": args.dataset, "MetaPath": args.metapath,
@@ -883,6 +933,8 @@ def main():
                  mprw_edge_count, calibrated_w, t_mprw_mat,
                  f"{mprw_mat_mb:.0f}MB" if mprw_mat_mb is not None else "n/a")
 
+        mprw_inf_cascade: Optional[str] = None  # L-cascade flag for this k
+
         for L in args.depth:
             if (args.metapath, str(L), "MPRW", str(k)) in done_runs:
                 log.info("  [MPRW k=%d L=%d] already in CSV — skipping", k, L)
@@ -892,15 +944,33 @@ def main():
                 log.warning("  [MPRW k=%d L=%d] weights not found — skipping", k, L)
                 continue
 
+            calib_flag = "" if calib_converged else "MPRW_CALIB_APPROX|"
+
+            if mprw_inf_cascade is not None:
+                log.warning("  [MPRW k=%d L=%d] skipping — cascaded from earlier L failure (%s)",
+                            k, L, mprw_inf_cascade)
+                csv_w.writerow({
+                    **{f: "" for f in _FIELDS},
+                    "Dataset": args.dataset, "MetaPath": args.metapath,
+                    "L": L, "Method": "MPRW", "k_value": k,
+                    "Density_Matched_w": calibrated_w,
+                    "Materialization_Time": _fmt(t_mprw_mat),
+                    "Mat_RAM_MB": _fmt(mprw_mat_mb, 1) if mprw_mat_mb is not None else "",
+                    "Edge_Count": mprw_edge_count,
+                    "exact_status": f"{calib_flag}INF_CASCADE({mprw_inf_cascade})",
+                })
+                csv_fh.flush()
+                continue
+
             inf_res, z_mprw_path, layers_mprw_path = _inf_subprocess(
                 str(mprw_out), "pt", f"mprw_{k}", L)
             if inf_res is not None and inf_res.get("inf_failed"):
                 status = ("INF_OOM"     if inf_res.get("inf_oom")
                           else "INF_TIMEOUT" if inf_res.get("inf_timeout")
                           else "INF_FAIL")
-                log.warning("  [MPRW k=%d L=%d] inference failed: %s", k, L, status)
-                calib_flag = ("" if calib_converged
-                              else f"MPRW_CALIB_APPROX|")
+                log.warning("  [MPRW k=%d L=%d] inference failed: %s — cascading remaining depths",
+                            k, L, status)
+                mprw_inf_cascade = status
                 csv_w.writerow({
                     **{f: "" for f in _FIELDS},
                     "Dataset": args.dataset, "MetaPath": args.metapath,
