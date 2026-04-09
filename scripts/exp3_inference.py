@@ -141,6 +141,13 @@ def _count_edges(filepath: str) -> int:
     return n
 
 
+def _graph_density(edge_count: Optional[int], n_nodes: int) -> str:
+    """Directed graph density: edges / (n * (n-1)). Returns '' if inputs are invalid."""
+    if edge_count is None or n_nodes <= 1:
+        return ""
+    return f"{edge_count / (n_nodes * (n_nodes - 1)):.6e}"
+
+
 def _load_adj(engine: CppEngine, filepath: str, num_nodes: int, node_offset: int,
               max_adj_mb: Optional[float] = None) -> Data:
     if max_adj_mb is not None and os.path.exists(filepath):
@@ -334,7 +341,7 @@ _FIELDS = [
     "Materialization_Time", "Inference_Time",
     "Mat_RAM_MB",   # subprocess-isolated materialization peak
     "Inf_RAM_MB",   # subprocess-isolated inference peak
-    "Edge_Count",
+    "Edge_Count", "Graph_Density",
     "CKA_L1", "CKA_L2", "CKA_L3", "CKA_L4",
     "Pred_Similarity", "Macro_F1", "Dirichlet_Energy", "exact_status",
 ]
@@ -611,6 +618,7 @@ def main():
                     "Materialization_Time": _fmt(t_exact_mat),
                     "Mat_RAM_MB": _fmt(exact_mat_mb, 1) if exact_mat_mb else "",
                     "Edge_Count": exact_edge_count,
+                    "Graph_Density": _graph_density(exact_edge_count, n_target),
                     "exact_status": f"INF_CASCADE({exact_inf_cascade})",
                 })
                 csv_fh.flush()
@@ -632,6 +640,7 @@ def main():
                     "Materialization_Time": _fmt(t_exact_mat),
                     "Mat_RAM_MB": _fmt(exact_mat_mb, 1) if exact_mat_mb else "",
                     "Edge_Count": exact_edge_count,
+                    "Graph_Density": _graph_density(exact_edge_count, n_target),
                     "exact_status": status,
                 })
                 csv_fh.flush()
@@ -653,6 +662,7 @@ def main():
                 "Mat_RAM_MB":           _fmt(exact_mat_mb, 1) if exact_mat_mb else "",
                 "Inf_RAM_MB":           _fmt(inf_res.get("inf_peak_ram_mb"), 1),
                 "Edge_Count":           exact_edge_count,
+                "Graph_Density":        _graph_density(exact_edge_count, n_target),
                 **cka_cols,
                 "Pred_Similarity":      "",
                 "Macro_F1":             _fmt(inf_res.get("inf_f1")),
@@ -748,6 +758,7 @@ def main():
                     "Materialization_Time": _fmt(t_kmv_mat),
                     "Mat_RAM_MB": _fmt(kmv_mat_mb, 1) if kmv_mat_mb else "",
                     "Edge_Count": kmv_edge_count,
+                    "Graph_Density": _graph_density(kmv_edge_count, n_target),
                     "exact_status": f"INF_CASCADE({kmv_inf_cascade})",
                 })
                 csv_fh.flush()
@@ -769,6 +780,7 @@ def main():
                     "Materialization_Time": _fmt(t_kmv_mat),
                     "Mat_RAM_MB": _fmt(kmv_mat_mb, 1) if kmv_mat_mb else "",
                     "Edge_Count": kmv_edge_count,
+                    "Graph_Density": _graph_density(kmv_edge_count, n_target),
                     "exact_status": status,
                 })
                 csv_fh.flush()
@@ -797,6 +809,7 @@ def main():
                 "Mat_RAM_MB":           _fmt(kmv_mat_mb, 1) if kmv_mat_mb else "",
                 "Inf_RAM_MB":           _fmt(inf_res.get("inf_peak_ram_mb"), 1),
                 "Edge_Count":           kmv_edge_count,
+                "Graph_Density":        _graph_density(kmv_edge_count, n_target),
                 **cka_cols,
                 "Pred_Similarity":      pred_sim,
                 "Macro_F1":             _fmt(inf_res.get("inf_f1")),
@@ -957,6 +970,7 @@ def main():
                     "Materialization_Time": _fmt(t_mprw_mat),
                     "Mat_RAM_MB": _fmt(mprw_mat_mb, 1) if mprw_mat_mb is not None else "",
                     "Edge_Count": mprw_edge_count,
+                    "Graph_Density": _graph_density(mprw_edge_count, n_target),
                     "exact_status": f"{calib_flag}INF_CASCADE({mprw_inf_cascade})",
                 })
                 csv_fh.flush()
@@ -979,6 +993,7 @@ def main():
                     "Materialization_Time": _fmt(t_mprw_mat),
                     "Mat_RAM_MB": _fmt(mprw_mat_mb, 1) if mprw_mat_mb is not None else "",
                     "Edge_Count": mprw_edge_count,
+                    "Graph_Density": _graph_density(mprw_edge_count, n_target),
                     "exact_status": f"{calib_flag}{status}",
                 })
                 csv_fh.flush()
@@ -1007,6 +1022,7 @@ def main():
                 "Mat_RAM_MB":           _fmt(mprw_mat_mb, 1) if mprw_mat_mb is not None else "",
                 "Inf_RAM_MB":           _fmt(inf_res.get("inf_peak_ram_mb"), 1),
                 "Edge_Count":           mprw_edge_count,
+                "Graph_Density":        _graph_density(mprw_edge_count, n_target),
                 **cka_cols,
                 "Pred_Similarity":      pred_sim,
                 "Macro_F1":             _fmt(inf_res.get("inf_f1")),

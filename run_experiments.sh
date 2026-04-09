@@ -83,6 +83,16 @@ for p in cfg.suggested_paths:
     log "partition.json ready: ${PART_JSON}"
 
     # -----------------------------------------------------------------------
+    # Dummy + MLP baselines (once per dataset, no metapath needed)
+    # -----------------------------------------------------------------------
+    log "--- BASELINES: ${DS} ---"
+    python scripts/dummy_baseline.py "${DS}" \
+        --strategies most_frequent prior mlp \
+        --epochs 200 \
+        --master-csv "results/${DS}/master_results.csv" \
+    || log "WARNING: dummy_baseline failed for ${DS} (exit $?) — continuing"
+
+    # -----------------------------------------------------------------------
     # Exp 2 + 3 — per metapath
     # -----------------------------------------------------------------------
     while IFS= read -r MP; do
