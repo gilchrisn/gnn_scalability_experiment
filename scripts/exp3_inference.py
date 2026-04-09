@@ -244,10 +244,10 @@ def _pred_agreement(z_a: torch.Tensor, z_b: torch.Tensor,
 
 
 _MPRW_CALIB_MAX_ITERS = 15
-_MPRW_CALIB_TOL       = 0.05   # 5% edge-count tolerance
+_MPRW_OVERSHOOT_FRAC  = 0.15   # target 15% overshoot before truncation
 
 
-def _calibrate_mprw_w(
+def _find_overshoot_w(
     g_full: "HeteroData",
     mprw_triples: list,
     target_ntype: str,
@@ -255,81 +255,117 @@ def _calibrate_mprw_w(
     seed: int,
     device: torch.device,
     log: logging.Logger,
-    tol: float = _MPRW_CALIB_TOL,
+    overshoot_frac: float = _MPRW_OVERSHOOT_FRAC,
     w_max: int = 2000,
 ) -> Tuple[int, int, bool]:
     """
-    Binary search for walk count w such that MPRW edge count ≈ target_edges ± tol.
+    Binary search for the minimum walk count w such that MPRW edge count
+    >= target_edges * (1 + overshoot_frac).
 
-    Termination guarantees (Gemini protocol):
-      - Halts after MAX_ITERS=15 iterations regardless of convergence.
-      - Halts early if |E_mprw - E_target| / E_target ≤ tol (5%).
-      - Halts if w_hi ceiling is hit and MPRW still can't reach target density
-        (topology exhausted — more walks only revisit the same hub nodes).
-      - Always returns the best (w, count) seen, never oscillates indefinitely.
-
-    Stochasticity note: E_mprw(w) is not perfectly monotone — random walk
-    coverage has variance. Tracking best-so-far guards against bouncing.
+    The caller is expected to truncate the materialized graph to exactly
+    target_edges afterwards.  This guarantees a deterministic edge-count
+    match regardless of walk-coverage variance.
 
     Returns:
-        (calibrated_w, actual_edge_count, converged)
-        converged=False means best-effort fallback was used.
+        (w, actual_count, found_overshoot)
+        found_overshoot=False means even w_max can't reach the threshold
+        (topology exhausted); caller should truncate to min(count, target).
     """
-    w_lo, w_hi   = 1, w_max
-    best_w       = w_lo
-    best_count   = 0
-    best_dist    = float("inf")
-    ceiling_hit  = False
+    threshold = int(target_edges * (1 + overshoot_frac))
+    w_lo, w_hi = 1, w_max
+    best_w, best_count = w_max, 0
 
     for i in range(_MPRW_CALIB_MAX_ITERS):
         w_mid = (w_lo + w_hi) // 2
         kern  = MPRWKernel(k=w_mid, seed=seed, device=device)
         data, _ = kern.materialize(g_full, mprw_triples, target_ntype)
         count = data.edge_index.size(1)
-        dist  = abs(count - target_edges)
 
-        if dist < best_dist:
-            best_w, best_count, best_dist = w_mid, count, dist
+        log.debug("  [overshoot iter %d] w=%d  edges=%d  threshold=%d",
+                  i + 1, w_mid, count, threshold)
 
-        log.debug("  [calib iter %d] w=%d  edges=%d  target=%d  dist=%d",
-                  i + 1, w_mid, count, target_edges, dist)
-
-        # Early exit: within tolerance
-        if dist / max(target_edges, 1) <= tol:
-            log.info("  [calib] converged at iter %d: w=%d  edges=%d  (%.1f%% of target)",
-                     i + 1, w_mid, count, 100 * count / max(target_edges, 1))
-            return w_mid, count, True
-
-        if count > target_edges:
-            w_hi = w_mid - 1
+        if count >= threshold:
+            best_w, best_count = w_mid, count
+            w_hi = w_mid - 1   # try a smaller w that still overshoots
         else:
-            # Check ceiling: if w_mid is already at w_max and still under target,
-            # the graph topology is exhausted — more walks won't help.
-            if w_mid >= w_max:
-                ceiling_hit = True
-                log.warning(
-                    "  [calib] ceiling hit (w=%d): MPRW can only reach %d edges "
-                    "(target=%d, gap=%.1f%%). Graph topology likely exhausted.",
-                    w_mid, count, target_edges,
-                    100 * dist / max(target_edges, 1),
-                )
-                break
             w_lo = w_mid + 1
 
         if w_lo > w_hi:
             break
 
-    converged = best_dist / max(target_edges, 1) <= tol
-    if not converged:
-        log.warning(
-            "  [calib] did not converge after %d iters%s. "
-            "Using best-so-far: w=%d  edges=%d  (%.1f%% of target).",
-            _MPRW_CALIB_MAX_ITERS,
-            " (ceiling hit)" if ceiling_hit else "",
-            best_w, best_count,
-            100 * best_count / max(target_edges, 1),
-        )
-    return best_w, best_count, converged
+    if best_count >= threshold:
+        log.info("  [overshoot] w=%d  edges=%d  (+%.1f%% over target=%d)",
+                 best_w, best_count,
+                 100 * best_count / max(target_edges, 1) - 100, target_edges)
+        return best_w, best_count, True
+
+    # Even w_max doesn't reach the overshoot threshold — topology exhausted.
+    kern  = MPRWKernel(k=w_max, seed=seed, device=device)
+    data, _ = kern.materialize(g_full, mprw_triples, target_ntype)
+    count = data.edge_index.size(1)
+    log.warning(
+        "  [overshoot] topology exhausted at w=%d: edges=%d < threshold=%d "
+        "(%.1f%% of target). Will truncate to available.",
+        w_max, count, threshold, 100 * count / max(target_edges, 1),
+    )
+    return w_max, count, False
+
+
+def _truncate_to_target(
+    edge_index: torch.Tensor,
+    target_count: int,
+    n_nodes: int,
+    seed: int,
+) -> torch.Tensor:
+    """
+    Randomly drop undirected edge pairs until the COO size equals target_count.
+
+    Self-loops are always preserved.  Edges are sampled at the undirected-pair
+    level so the output remains symmetric.  Final count may be target_count or
+    target_count-1 if (target_count - n_self_loops) is odd.
+
+    Args:
+        edge_index:    [2, E] coalesced undirected edge_index with self-loops.
+        target_count:  Desired total number of COO entries.
+        n_nodes:       Number of nodes (for coalesce).
+        seed:          RNG seed for reproducibility.
+
+    Returns:
+        Coalesced edge_index with size(1) == target_count (or target_count-1).
+    """
+    import torch_geometric.utils as pyg_utils
+
+    if edge_index.size(1) <= target_count:
+        return edge_index
+
+    is_self  = edge_index[0] == edge_index[1]
+    self_ei  = edge_index[:, is_self]
+    real_ei  = edge_index[:, ~is_self]
+
+    n_self       = self_ei.size(1)
+    target_real  = target_count - n_self
+
+    if target_real <= 0:
+        return self_ei  # degenerate
+
+    if real_ei.size(1) <= target_real:
+        return edge_index
+
+    # real_ei is symmetric: each undirected edge (u,v) appears as (u,v) and (v,u).
+    # Sample pairs by keeping the src < dst half, then reconstructing both directions.
+    fwd_mask = real_ei[0] < real_ei[1]
+    fwd_ei   = real_ei[:, fwd_mask]  # canonical forward direction
+    n_pairs  = fwd_ei.size(1)
+    n_keep   = target_real // 2      # floor; result may be off by 1 if target_real is odd
+
+    rng      = torch.Generator()
+    rng.manual_seed(seed)
+    keep_idx = torch.randperm(n_pairs, generator=rng)[:n_keep]
+
+    kept     = fwd_ei[:, keep_idx]
+    both_dir = torch.cat([kept, kept.flip(0)], dim=1)
+    merged   = torch.cat([both_dir, self_ei], dim=1)
+    return pyg_utils.coalesce(merged, num_nodes=n_nodes)
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +453,11 @@ def main():
     parser.add_argument("--inf-timeout",     type=int,   default=None,
                         help="Timeout (s) for inference subprocesses only "
                              "(default: same as --timeout)")
+    parser.add_argument("--hash-seed",       type=int,   default=None,
+                        help="Override the hash_seed from partition.json for KMV "
+                             "sketching and MPRW walks. Use this to run inference-only "
+                             "replicates with different sketch seeds while keeping the "
+                             "same frozen weights and train/test partition.")
     args = parser.parse_args()
     # Resolve inference timeout: explicit --inf-timeout overrides --timeout
     args.inf_timeout = args.inf_timeout if args.inf_timeout is not None else args.timeout
@@ -495,7 +536,8 @@ def main():
     x_full      = g_full[target_ntype].x     # feature matrix [N_target, D]
     in_dim      = x_full.size(1)
 
-    kmv_seed    = part.get("hash_seed", 0)   # exp1_partition.py key
+    kmv_seed    = (args.hash_seed if args.hash_seed is not None
+                   else part.get("hash_seed", 0))   # --hash-seed overrides partition.json
     device      = torch.device("cpu")   # inference always on CPU for fair timing
     cka_calc    = LinearCKA(device=device)
 
@@ -886,12 +928,12 @@ def main():
 
         target_edges = kmv_edges_by_k.get(k)
         if target_edges is None:
-            calibrated_w, calibrated_edge_count, calib_converged = k, None, False
+            calibrated_w, calibrated_edge_count, found_overshoot = k, None, False
             log.warning("  [MPRW k=%d] KMV edge count unavailable — using w=k", k)
         else:
-            log.info("  [MPRW k=%d] calibrating w to match KMV edge count %d ...",
+            log.info("  [MPRW k=%d] finding overshoot w for KMV edge count %d ...",
                      k, target_edges)
-            calibrated_w, calibrated_edge_count, calib_converged = _calibrate_mprw_w(
+            calibrated_w, calibrated_edge_count, found_overshoot = _find_overshoot_w(
                 g_full, mprw_triples, target_ntype,
                 target_edges=target_edges, seed=kmv_seed, device=device, log=log,
             )
@@ -943,10 +985,19 @@ def main():
             log.warning("  [MPRW k=%d] output file missing", k)
             continue
 
-        # Edge count from saved .pt (load is small — just int64 COO)
-        tmp_ei          = torch.load(mprw_out, weights_only=True)
-        mprw_edge_count = tmp_ei.size(1)
-        del tmp_ei
+        # Load, truncate to exactly target_edges, save back.
+        raw_ei = torch.load(mprw_out, weights_only=True)
+        if target_edges is not None and raw_ei.size(1) > target_edges:
+            truncated_ei = _truncate_to_target(
+                raw_ei, target_edges, n_target, seed=kmv_seed
+            )
+            torch.save(truncated_ei, mprw_out)
+            mprw_edge_count = truncated_ei.size(1)
+            log.info("  MPRW truncated: %d → %d edges (target=%d)",
+                     raw_ei.size(1), mprw_edge_count, target_edges)
+        else:
+            mprw_edge_count = raw_ei.size(1)
+        del raw_ei
 
         log.info("  MPRW done: edges=%d (w=%d)  mat_time=%.2fs  mat_ram=%s",
                  mprw_edge_count, calibrated_w, t_mprw_mat,
@@ -963,7 +1014,7 @@ def main():
                 log.warning("  [MPRW k=%d L=%d] weights not found — skipping", k, L)
                 continue
 
-            calib_flag = "" if calib_converged else "MPRW_CALIB_APPROX|"
+            calib_flag = "" if found_overshoot else "MPRW_TOPO_LIMIT|"
 
             if mprw_inf_cascade is not None:
                 log.warning("  [MPRW k=%d L=%d] skipping — cascaded from earlier L failure (%s)",
@@ -1033,8 +1084,8 @@ def main():
                 "Pred_Similarity":      pred_sim,
                 "Macro_F1":             _fmt(inf_res.get("inf_f1")),
                 "Dirichlet_Energy":     _fmt(inf_res.get("inf_de")),
-                "exact_status":         (exact_status_flag if calib_converged
-                                         else f"MPRW_CALIB_APPROX|{exact_status_flag}"),
+                "exact_status":         (exact_status_flag if found_overshoot
+                                         else f"MPRW_TOPO_LIMIT|{exact_status_flag}"),
             })
             csv_fh.flush()
 
