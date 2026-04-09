@@ -451,6 +451,12 @@ def main():
     with open(args.partition_json) as f:
         part = json.load(f)
 
+    # Seed from partition.json so exp3 is bit-for-bit reproducible with exp2
+    _master_seed = part.get("seed", 42)
+    torch.manual_seed(_master_seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
     cfg          = config.get_dataset_config(args.dataset)
     folder       = config.get_folder_name(args.dataset)
     data_dir     = os.path.join(project_root, folder)

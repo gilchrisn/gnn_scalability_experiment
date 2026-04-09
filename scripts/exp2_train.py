@@ -31,12 +31,14 @@ import gc
 import json
 import logging
 import os
+import random
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch_geometric.data import Data, HeteroData
@@ -335,9 +337,13 @@ def main():
     log.info("Exp2 | dataset=%s  metapath=%s  depth=%s  seed=%d",
              args.dataset, args.metapath, args.depth, args.seed)
 
+    random.seed(args.seed)
+    np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     g_full, info = DatasetFactory.get_data(cfg.source, cfg.dataset_name, cfg.target_node)
     target_ntype = cfg.target_node

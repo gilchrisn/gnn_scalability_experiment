@@ -89,6 +89,7 @@ for p in cfg.suggested_paths:
     python scripts/dummy_baseline.py "${DS}" \
         --strategies most_frequent prior mlp \
         --epochs 200 \
+        --seed "${SEED}" \
         --master-csv "results/${DS}/master_results.csv" \
     || log "WARNING: dummy_baseline failed for ${DS} (exit $?) — continuing"
 

@@ -19,9 +19,11 @@ Usage
 from __future__ import annotations
 
 import argparse
+import random
 import sys
 import os
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -101,8 +103,15 @@ def prior(labels, freq, tr, te, num_classes, trials=10, **_):
     return mean_f1
 
 
-def mlp(labels, features, tr, te, num_classes, epochs=200, hidden=64, **_):
+def mlp(labels, features, tr, te, num_classes, epochs=200, hidden=64, seed=42, **_):
     """Feature-only MLP — no graph edges at all."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     labeled = labels.sum(dim=1) > 0
@@ -168,6 +177,8 @@ def main():
                         help="Training epochs for the MLP baseline (default 200)")
     parser.add_argument("--hidden", type=int, default=64,
                         help="Hidden dim for the MLP (default 64, matches SAGE)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for MLP weight init (default 42)")
     parser.add_argument("--master-csv", type=str, default=None,
                         help="Append rows to master_results.csv using the exp3 schema")
     args = parser.parse_args()
@@ -180,7 +191,7 @@ def main():
         results[name] = STRATEGY_FNS[name](
             labels=labels, features=features, freq=freq,
             tr=tr, te=te, num_classes=num_classes,
-            trials=args.trials, epochs=args.epochs, hidden=args.hidden,
+            trials=args.trials, epochs=args.epochs, hidden=args.hidden, seed=args.seed,
         )
 
     print("=" * 50)
