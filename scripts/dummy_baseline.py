@@ -50,12 +50,13 @@ def _load(dataset: str):
     features   = info["features"]        # [N, D]
     num_classes = info["num_classes"]
 
-    assert labels.dim() == 2, (
-        f"Expected multi-label [N, C], got shape {labels.shape}. "
-        "Run on a single-label dataset? Adjust this script."
-    )
+    # Single-label [N] → one-hot [N, C] so downstream code is uniform
+    if labels.dim() == 1:
+        labels = torch.zeros(labels.size(0), num_classes).scatter_(
+            1, labels.long().unsqueeze(1), 1.0
+        )
 
-    # Restrict to labeled rows (at least one active genre)
+    # Restrict to labeled rows (at least one active class)
     labeled = labels.sum(dim=1) > 0
     tr = train_mask & labeled
     te = test_mask  & labeled

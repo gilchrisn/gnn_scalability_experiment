@@ -654,6 +654,13 @@ def main():
                 continue
             if (args.metapath, str(L), "Exact", "") in done_runs:
                 log.info("  [Exact L=%d] already in CSV — skipping", L)
+                # Still populate z paths from disk so KMV/MPRW can compute CKA
+                _z = str(scratch_dir / f"z_exact_L{L}.pt")
+                _layers = _z.replace(".pt", "_layers.pt")
+                if os.path.exists(_z):
+                    z_exact_by_L[L] = _z
+                if os.path.exists(_layers):
+                    layers_exact_by_L[L] = _layers
                 continue
 
             if exact_inf_cascade is not None:
