@@ -65,14 +65,14 @@ class SAGE(nn.Module):
         self.num_layers = num_layers
 
         if num_layers == 1:
-            self.layers.append(SAGEConv(in_feats, num_classes, normalize=True))
+            self.layers.append(SAGEConv(in_feats, num_classes))
         else:
-            self.layers.append(SAGEConv(in_feats, h_feats, normalize=True))
+            self.layers.append(SAGEConv(in_feats, h_feats))
             self.skip_projs.append(nn.Linear(in_feats, h_feats, bias=False))
             for _ in range(num_layers - 2):
-                self.layers.append(SAGEConv(h_feats, h_feats, normalize=True))
+                self.layers.append(SAGEConv(h_feats, h_feats))
                 self.skip_projs.append(nn.Linear(h_feats, h_feats, bias=False))
-            self.layers.append(SAGEConv(h_feats, num_classes, normalize=True))
+            self.layers.append(SAGEConv(h_feats, num_classes))
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         for i, layer in enumerate(self.layers):

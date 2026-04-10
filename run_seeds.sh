@@ -45,7 +45,7 @@ for DS in "${DATASETS[@]}"; do
     [[ -d "results/${DS}" ]] || continue
     mkdir -p "results_${BASE_SEED}/${DS}"
     # Copy everything except weights/ into the archive
-    rsync -a --exclude="weights/" "results/${DS}/" "results_${BASE_SEED}/${DS}/"
+    rsync -a --exclude="weights/" --exclude="inf_scratch/" "results/${DS}/" "results_${BASE_SEED}/${DS}/"
 done
 [[ -f "results/master_results.csv" ]] && cp "results/master_results.csv" "results_${BASE_SEED}/"
 log "Base results archived → results_${BASE_SEED}/"
@@ -57,12 +57,15 @@ for HASH_SEED in "${HASH_SEEDS[@]}"; do
     log ""
     log "=== STEP 2: Inference replicate (hash_seed=${HASH_SEED}) ==="
 
-    # Clear previous inference outputs but leave weights/ and partition.json intact.
+    # Clear previous inference outputs but leave weights/, partition.json, and
+    # inf_scratch/ intact.  inf_scratch holds z_exact_L*.pt — reused via done_runs
+    # or overwritten deterministically; no need to delete them.
     for DS in "${DATASETS[@]}"; do
         rm -f "results/${DS}/master_results.csv"
         rm -f "results/${DS}/run_exp3_"*.log
-        # Remove cached KMV/MPRW scratch files so exp3 rematerializes fresh.
-        rm -rf "results/${DS}/mprw_scratch"
+        # Clean actual MPRW work directory (mat_mprw_<k>.pt files)
+        FOLDER=$(python -c "from src.config import config; print(config.get_folder_name('${DS}'))")
+        rm -rf "${FOLDER}/mprw_work"
     done
     rm -f "results/master_results.csv"
 
@@ -106,12 +109,12 @@ for p in cfg.suggested_paths:
         fi
     done
 
-    # Archive this replicate's results (no weights)
+    # Archive this replicate's results (no weights, no inf_scratch .pt blobs)
     mkdir -p "results_${HASH_SEED}"
     for DS in "${DATASETS[@]}"; do
         [[ -d "results/${DS}" ]] || continue
         mkdir -p "results_${HASH_SEED}/${DS}"
-        rsync -a --exclude="weights/" "results/${DS}/" "results_${HASH_SEED}/${DS}/"
+        rsync -a --exclude="weights/" --exclude="inf_scratch/" "results/${DS}/" "results_${HASH_SEED}/${DS}/"
     done
     [[ -f "${MERGED}" ]] && cp "${MERGED}" "results_${HASH_SEED}/"
     log "Replicate archived → results_${HASH_SEED}/"
