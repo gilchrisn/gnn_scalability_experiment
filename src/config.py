@@ -157,9 +157,11 @@ class Config:
                 "user_to_business,business_to_user",           # UBU (Co-reviews)
                 "user_to_level,level_to_user"                  # ULU (Shared Level)
             ]),
-            'HNE_PubMed': DatasetConfig('HNE', 'PubMed', 'paper', [
-                "paper_to_author,author_to_paper", 
-                "paper_to_journal,journal_to_paper"
+            'HNE_PubMed': DatasetConfig('HNE', 'PubMed', 'disease', [
+                "disease_to_gene,gene_to_disease",
+                "disease_to_chemical,chemical_to_disease",
+                
+                "disease_to_species,species_to_disease",
             ]),
             'HNE_Freebase': DatasetConfig('HNE', 'Freebase', 'entity', [
                 "entity_to_relation,relation_to_entity",       # ERE

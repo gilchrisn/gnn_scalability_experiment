@@ -88,12 +88,16 @@ def _make_train_subgraph(g: HeteroData, part: dict, labels: torch.Tensor,
             g_sub[ntype][key] = val
 
     # Pivot type: slice to kept nodes, attach labels/masks
-    g_sub[pivot_ntype].num_nodes = keep_ids.size(0)
+    # NOTE: set num_nodes AFTER the copy loop — the loop's else-branch would
+    # otherwise overwrite it with the full-graph count via PyG's attribute dict.
     for key, val in g[pivot_ntype].items():
+        if key == 'num_nodes':
+            continue  # will be set explicitly below
         if isinstance(val, torch.Tensor) and val.size(0) == g[pivot_ntype].num_nodes:
             g_sub[pivot_ntype][key] = val[keep_ids]
         else:
             g_sub[pivot_ntype][key] = val
+    g_sub[pivot_ntype].num_nodes = keep_ids.size(0)
 
     # Attach labels / masks onto the (already sliced) target type
     g_sub[target_ntype].y          = labels[keep_ids] if target_ntype == pivot_ntype else labels
@@ -196,11 +200,12 @@ def _train(
         train_mask  = (g_homo.train_mask & (g_homo.y >= 0)).to(device)
         val_mask    = (g_homo.val_mask   & (g_homo.y >= 0)).to(device)
 
-    best_val   = float("inf")
-    best_state = None
-    conv_epoch = 1
-    wait       = 0
-    patience   = 15
+    best_val_f1  = -1.0
+    best_val_loss = float("inf")
+    best_state   = None
+    conv_epoch   = 1
+    wait         = 0
+    patience     = 30
     history: List[dict] = []
 
     for epoch in range(1, epochs + 1):
@@ -225,23 +230,29 @@ def _train(
                 val_loss = (F.cross_entropy(out_e[val_mask], labels[val_mask]).item()
                             if val_mask.sum() > 0 else float("nan"))
             train_f1 = _f1(out_e, labels, train_mask)
+            val_f1   = _f1(out_e, labels, val_mask)
 
         history.append({
             "epoch":      epoch,
             "train_loss": round(loss.item(), 6),
             "val_loss":   round(val_loss, 6) if val_loss == val_loss else "",
             "train_f1":   round(train_f1, 6),
+            "val_f1":     round(val_f1, 6),
         })
 
         if epoch % 10 == 0:
-            log.debug("  [L=%d ep %3d] loss=%.4f val=%.4f f1=%.4f",
-                      num_layers, epoch, loss.item(), val_loss, train_f1)
+            log.debug("  [L=%d ep %3d] loss=%.4f val=%.4f train_f1=%.4f val_f1=%.4f",
+                      num_layers, epoch, loss.item(), val_loss, train_f1, val_f1)
 
         if val_mask.sum() > 0:
-            if val_loss < best_val - 1e-4:
-                best_val   = val_loss
-                best_state = {k: v.clone() for k, v in model.state_dict().items()}
-                conv_epoch = epoch
+            # Save checkpoint at best val F1 (what we care about)
+            if val_f1 > best_val_f1 + 1e-4:
+                best_val_f1 = val_f1
+                best_state  = {k: v.clone() for k, v in model.state_dict().items()}
+                conv_epoch  = epoch
+            # Early-stop on val_loss (reliable signal training is still useful)
+            if val_loss < best_val_loss - 1e-4:
+                best_val_loss = val_loss
                 wait = 0
             else:
                 wait += 1
@@ -263,7 +274,7 @@ def _train(
 
 _LOG_FIELDS = [
     "dataset", "metapath", "L",
-    "epoch", "train_loss", "val_loss", "train_f1",
+    "epoch", "train_loss", "val_loss", "train_f1", "val_f1",
     "convergence_epoch", "t_train", "weights_path", "note",
 ]
 
@@ -433,12 +444,15 @@ def main():
                     "dataset": args.dataset, "metapath": args.metapath, "L": L,
                     "epoch": h["epoch"], "train_loss": h["train_loss"],
                     "val_loss": h["val_loss"], "train_f1": h["train_f1"],
+                    "val_f1": h.get("val_f1", ""),
                     "convergence_epoch": "", "t_train": "", "weights_path": "", "note": "",
                 })
+            done_h = history[conv_epoch - 1] if history else {}
             log_w.writerow({
                 "dataset": args.dataset, "metapath": args.metapath, "L": L,
                 "epoch": "DONE", "train_loss": "", "val_loss": "",
-                "train_f1": history[-1]["train_f1"] if history else "",
+                "train_f1": done_h.get("train_f1", ""),
+                "val_f1":   done_h.get("val_f1", ""),
                 "convergence_epoch": conv_epoch,
                 "t_train": round(t_train, 4),
                 "weights_path": weights_path,

@@ -134,7 +134,7 @@ class HNELoader(BaseGraphLoader):
     TYPE_MAPPINGS = {
         'DBLP': {0: 'author', 1: 'paper', 2: 'conf', 3: 'term'},
         'Yelp': {0: 'user', 1: 'business', 2: 'service', 3: 'level'},
-        'PubMed': {0: 'paper', 1: 'author', 2: 'journal', 3: 'keyword'},
+        'PubMed': {0: 'gene', 1: 'disease', 2: 'chemical', 3: 'species'},
         'Freebase': {0: 'entity', 1: 'type', 2: 'relation'}
     }
     
@@ -146,13 +146,14 @@ class HNELoader(BaseGraphLoader):
         
         g = self._load_nodes(data_dir, dataset_name)
         self._load_edges(data_dir, g)
+        self._load_labels(data_dir, g)
 
         GraphStandardizer.standardize(g)
-        
+
         features = self._ensure_features(g, target_ntype)
         labels, num_classes = self._extract_labels(g, target_ntype)
         train_mask, val_mask, test_mask = self._create_random_masks(g[target_ntype].num_nodes)
-        
+
         info = self.create_info_dict(g, target_ntype, features, labels, train_mask, val_mask, test_mask, num_classes)
         return g, info
 
@@ -173,6 +174,18 @@ class HNELoader(BaseGraphLoader):
             g[type_name].num_nodes = len(group)
             for glob, loc in zip(group['id'].values, range(len(group))):
                 self._global_to_local[glob] = (type_name, loc)
+            # Parse comma-separated features from the info column if present
+            if 'info' in group.columns:
+                sample = group['info'].dropna()
+                if len(sample) > 0 and isinstance(sample.iloc[0], str) and ',' in sample.iloc[0]:
+                    try:
+                        feats = torch.tensor(
+                            group['info'].apply(lambda s: list(map(float, s.split(',')))).tolist(),
+                            dtype=torch.float32
+                        )
+                        g[type_name].x = feats
+                    except (ValueError, AttributeError):
+                        pass
         return g
     
     def _load_edges(self, data_dir: str, g: tg_data.HeteroData) -> None:
@@ -197,6 +210,47 @@ class HNELoader(BaseGraphLoader):
                 torch.tensor(group['dst_idx'].values, dtype=torch.long)
             ], dim=0)
             g[src_type, rel_name, dst_type].edge_index = edge_index
+
+    def _load_labels(self, data_dir: str, g: tg_data.HeteroData) -> None:
+        """Parse label.dat and set g[type_name].y as multi-hot [N, C] or int64 [N]."""
+        label_file = os.path.join(data_dir, "label.dat")
+        if not os.path.exists(label_file):
+            return
+        df = pd.read_csv(label_file, sep='\t', header=None,
+                         names=['id', 'name', 'type', 'label'], usecols=[0, 2, 3])
+        for type_id, group in df.groupby('type'):
+            if type_id not in {t for (t, _) in self._global_to_local.values()}:
+                # resolve via global_to_local
+                pass
+            # map global IDs to local indices
+            local_rows = []
+            for glob_id, lbl in zip(group['id'].values, group['label'].values):
+                if glob_id in self._global_to_local:
+                    type_name, loc = self._global_to_local[glob_id]
+                    local_rows.append((type_name, loc, int(lbl)))
+            if not local_rows:
+                continue
+            type_name = local_rows[0][0]
+            n_nodes = g[type_name].num_nodes
+            classes = sorted({r[2] for r in local_rows})
+            class_to_idx = {c: i for i, c in enumerate(classes)}
+            # check if multi-label (same local idx appears with multiple classes)
+            from collections import defaultdict
+            node_labels: dict = defaultdict(set)
+            for _, loc, lbl in local_rows:
+                node_labels[loc].add(class_to_idx[lbl])
+            n_classes = len(classes)
+            if n_classes > 1 and any(len(v) > 1 for v in node_labels.values()):
+                # multi-hot
+                y = torch.zeros(n_nodes, n_classes, dtype=torch.float32)
+                for loc, lbls in node_labels.items():
+                    for c in lbls:
+                        y[loc, c] = 1.0
+            else:
+                y = torch.full((n_nodes,), -1, dtype=torch.long)
+                for loc, lbls in node_labels.items():
+                    y[loc] = next(iter(lbls))
+            g[type_name].y = y
 
 class OAGLoader(BaseGraphLoader):
     def load(self, dataset_name: str, target_ntype: str, root_dir: str) -> Tuple[tg_data.HeteroData, Dict[str, Any]]:

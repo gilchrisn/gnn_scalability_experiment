@@ -51,10 +51,14 @@ def _load(dataset: str):
     num_classes = info["num_classes"]
 
     # Single-label [N] → one-hot [N, C] so downstream code is uniform
+    # Mask out ignore-index nodes (label < 0) before scatter
     if labels.dim() == 1:
-        labels = torch.zeros(labels.size(0), num_classes).scatter_(
-            1, labels.long().unsqueeze(1), 1.0
+        valid = labels >= 0
+        one_hot = torch.zeros(labels.size(0), num_classes)
+        one_hot[valid] = one_hot[valid].scatter_(
+            1, labels[valid].long().unsqueeze(1), 1.0
         )
+        labels = one_hot
 
     # Restrict to labeled rows (at least one active class)
     labeled = labels.sum(dim=1) > 0

@@ -173,6 +173,8 @@ def _sage_spmm_forward(
             )
 
         if i < model.num_layers - 1:
+            if hasattr(model, 'skip_projs') and i < len(model.skip_projs):
+                x_out = x_out + model.skip_projs[i](x)
             x_out = F.relu(x_out)
         x = x_out
     return x
@@ -200,6 +202,8 @@ def _sage_spmm_layerwise(
             )
 
         if i < model.num_layers - 1:
+            if hasattr(model, 'skip_projs') and i < len(model.skip_projs):
+                x_out = x_out + model.skip_projs[i](x)
             x_out = F.relu(x_out)
         x = x_out
         intermediates.append(x.cpu().clone())

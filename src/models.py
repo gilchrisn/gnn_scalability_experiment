@@ -54,45 +54,34 @@ class GCN(nn.Module):
 
 class SAGE(nn.Module):
     """
-    GraphSAGE model.
+    GraphSAGE model with residual skip connections on hidden layers.
     Supports variable number of layers.
     """
-    
+
     def __init__(self, in_feats: int, h_feats: int, num_classes: int, num_layers: int = 2):
-        """
-        Args:
-            in_feats: Input feature dimension
-            h_feats: Hidden dimension
-            num_classes: Number of output classes
-            num_layers: Number of GNN layers (depth)
-        """
         super(SAGE, self).__init__()
         self.layers = nn.ModuleList()
+        self.skip_projs = nn.ModuleList()
         self.num_layers = num_layers
 
         if num_layers == 1:
             self.layers.append(SAGEConv(in_feats, num_classes))
         else:
-            # Input Layer
             self.layers.append(SAGEConv(in_feats, h_feats))
-            
-            # Hidden Layers
+            self.skip_projs.append(nn.Linear(in_feats, h_feats, bias=False))
             for _ in range(num_layers - 2):
                 self.layers.append(SAGEConv(h_feats, h_feats))
-            
-            # Output Layer
+                self.skip_projs.append(nn.Linear(h_feats, h_feats, bias=False))
             self.layers.append(SAGEConv(h_feats, num_classes))
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass.
-        Applies ReLU and Dropout to all but the last layer.
-        """
         for i, layer in enumerate(self.layers):
-            x = layer(x, edge_index)
+            h = layer(x, edge_index)
             if i < self.num_layers - 1:
-                x = F.relu(x)
-                x = F.dropout(x, p=0.5, training=self.training)
+                h = h + self.skip_projs[i](x)
+                h = F.relu(h)
+                h = F.dropout(h, p=0.5, training=self.training)
+            x = h
         return x
 
 
