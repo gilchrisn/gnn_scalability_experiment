@@ -214,7 +214,13 @@ class MPRWKernel:
         Returns:
             (new_current, new_alive)
         """
-        walker_counts  = counts[current]          # [n_walkers]
+        # Clamp dead walkers' positions to a valid index so tensor lookups don't
+        # go out of bounds.  Dead walkers carry node IDs from the previous edge
+        # type (e.g. paper IDs while counts is sized for authors).  They are
+        # gated out by new_alive before any result is produced.
+        safe_current   = current.clamp(0, counts.size(0) - 1)
+
+        walker_counts  = counts[safe_current]     # [n_walkers]
         dead_this_step = walker_counts == 0
         new_alive      = alive & ~dead_this_step
 
@@ -226,7 +232,7 @@ class MPRWKernel:
         safe_counts    = walker_counts.clamp(min=1)
         choice         = rand % safe_counts                    # [n_walkers]
 
-        walker_offsets = offsets[current]                      # [n_walkers]
+        walker_offsets = offsets[safe_current]                 # [n_walkers]
         # Dead walkers have offset pointing past the end of sorted_dst.
         # Zero them out — the resulting index is harmless because dead
         # walkers are excluded before the output is used.
