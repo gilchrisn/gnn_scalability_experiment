@@ -42,6 +42,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch_geometric.data import Data, HeteroData
+from torch_geometric.utils import dropout_edge
 
 current_dir  = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
@@ -211,7 +212,8 @@ def _train(
     for epoch in range(1, epochs + 1):
         model.train()
         opt.zero_grad()
-        out  = model(x, edge_index)
+        ei_train, _ = dropout_edge(edge_index, p=0.4, training=True)
+        out  = model(x, ei_train)
         if is_multilabel:
             loss = F.binary_cross_entropy_with_logits(out[train_mask], labels[train_mask])
         else:
