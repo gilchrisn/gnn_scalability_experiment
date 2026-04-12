@@ -31,17 +31,18 @@ strip_mprw() {
     local csv="$1"
     [[ -f "${csv}" ]] || return 0
     python - "${csv}" <<'PYEOF'
-import csv, sys, pathlib
+import csv, sys, os, pathlib
 p = pathlib.Path(sys.argv[1])
-rows = []
+tmp = str(p) + ".tmp"
 with open(p, newline="", encoding="utf-8") as f:
     reader = csv.DictReader(f)
     fields = reader.fieldnames
     rows = [r for r in reader if r.get("Method") != "MPRW"]
-with open(p, "w", newline="", encoding="utf-8") as f:
+with open(tmp, "w", newline="", encoding="utf-8") as f:
     w = csv.DictWriter(f, fieldnames=fields)
     w.writeheader()
     w.writerows(rows)
+os.replace(tmp, str(p))
 PYEOF
 }
 
