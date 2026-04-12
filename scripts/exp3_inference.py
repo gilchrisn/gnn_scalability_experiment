@@ -142,10 +142,18 @@ def _count_edges(filepath: str) -> int:
 
 
 def _graph_density(edge_count: Optional[int], n_nodes: int) -> str:
-    """Directed graph density: edges / (n * (n-1)). Returns '' if inputs are invalid."""
+    """Directed graph density of real edges, excluding artificial self-loops.
+
+    Both KMV (engine.py) and MPRW (mprw.py) unconditionally call
+    pyg_utils.add_self_loops at the end, guaranteeing exactly n_nodes
+    self-loops in every materialized graph.  Subtracting n_nodes from
+    edge_count recovers the true structural edge count, keeping density
+    strictly in [0, 1] with the standard directed-graph denominator n*(n-1).
+    Returns '' if inputs are invalid."""
     if edge_count is None or n_nodes <= 1:
         return ""
-    return f"{edge_count / (n_nodes * (n_nodes - 1)):.6e}"
+    real_edges = max(0, edge_count - n_nodes)
+    return f"{real_edges / (n_nodes * (n_nodes - 1)):.3e}"
 
 
 def _load_adj(engine: CppEngine, filepath: str, num_nodes: int, node_offset: int,
@@ -374,7 +382,7 @@ def _truncate_to_target(
 
 _FIELDS = [
     "Dataset", "MetaPath", "L", "Method", "k_value", "Density_Matched_w",
-    "Materialization_Time", "Inference_Time",
+    "Materialization_Time", "MPRW_Calibration_Time", "Inference_Time",
     "Mat_RAM_MB",   # subprocess-isolated materialization peak
     "Inf_RAM_MB",   # subprocess-isolated inference peak
     "Edge_Count", "Graph_Density",
@@ -463,6 +471,10 @@ def main():
                              "but skip GNN inference for Exact rows.  Saves ~460 GB of "
                              "tensor scratch on very large graphs.  KMV and MPRW still "
                              "run their full inference pipelines.")
+    parser.add_argument("--skip-exact", action="store_true",
+                        help="Skip the entire ExactD block (materialization + inference). "
+                             "Use when exact results are already present in the CSV and "
+                             "you only want to (re-)run KMV and MPRW sweeps.")
     args = parser.parse_args()
     # Resolve inference timeout: explicit --inf-timeout overrides --timeout
     args.inf_timeout = args.inf_timeout if args.inf_timeout is not None else args.timeout
@@ -632,137 +644,141 @@ def main():
     z_exact_by_L: dict      = {}   # L → z_path (for comparison)
     layers_exact_by_L: dict = {}   # L → layers_path
 
-    log.info("\n--- Running ExactD on full graph ---")
-    try:
-        t_exact_mat, exact_file = _run_exact(engine, folder, args.timeout)
-        exact_mat_mb     = engine.last_peak_mb   # C++ child peak (Linux /usr/bin/time -v)
-        exact_edge_count = _count_edges(exact_file)
-        log.info("  ExactD done: edges=%d  mat_time=%.2fs  mat_ram=%s",
-                 exact_edge_count, t_exact_mat,
-                 f"{exact_mat_mb:.0f}MB" if exact_mat_mb else "n/a (Windows)")
+    if args.skip_exact:
+        log.info("--skip-exact: skipping entire ExactD block (Exact results assumed in CSV).")
+    else:
+        log.info("\n--- Running ExactD on full graph ---")
+        try:
+            t_exact_mat, exact_file = _run_exact(engine, folder, args.timeout)
+            exact_mat_mb     = engine.last_peak_mb   # C++ child peak (Linux /usr/bin/time -v)
+            exact_edge_count = _count_edges(exact_file)
+            log.info("  ExactD done: edges=%d  mat_time=%.2fs  mat_ram=%s",
+                     exact_edge_count, t_exact_mat,
+                     f"{exact_mat_mb:.0f}MB" if exact_mat_mb else "n/a (Windows)")
 
-        if args.max_rss_gb is not None:
-            rss = _rss_gb()
-            if rss is not None and rss > args.max_rss_gb:
-                raise MemoryError(
-                    f"RSS guard: {rss:.1f} GB > {args.max_rss_gb:.1f} GB after ExactD")
+            if args.max_rss_gb is not None:
+                rss = _rss_gb()
+                if rss is not None and rss > args.max_rss_gb:
+                    raise MemoryError(
+                        f"RSS guard: {rss:.1f} GB > {args.max_rss_gb:.1f} GB after ExactD")
 
-        # L-cascade flag: if inference fails for one L on this materialized graph,
-        # it will fail for all larger L too (same adj_csr + features, similar peak RAM).
-        # Write cascade rows immediately so mat data is preserved.
-        exact_inf_cascade: Optional[str] = None  # set to status string on first failure
+            # L-cascade flag: if inference fails for one L on this materialized graph,
+            # it will fail for all larger L too (same adj_csr + features, similar peak RAM).
+            # Write cascade rows immediately so mat data is preserved.
+            exact_inf_cascade: Optional[str] = None  # set to status string on first failure
 
-        for L in args.depth:
-            weights_path = weights_dir / f"{mp_safe}_L{L}.pt"
-            if not weights_path.exists():
-                log.warning("  [Exact L=%d] weights not found — skipping", L)
-                continue
-            if (args.metapath, str(L), "Exact", "") in done_runs:
-                log.info("  [Exact L=%d] already in CSV — skipping", L)
-                # Still populate z paths from disk so KMV/MPRW can compute CKA
-                _z = str(scratch_dir / f"z_exact_L{L}.pt")
-                _layers = _z.replace(".pt", "_layers.pt")
-                if os.path.exists(_z):
-                    z_exact_by_L[L] = _z
-                if os.path.exists(_layers):
-                    layers_exact_by_L[L] = _layers
-                continue
+            for L in args.depth:
+                weights_path = weights_dir / f"{mp_safe}_L{L}.pt"
+                if not weights_path.exists():
+                    log.warning("  [Exact L=%d] weights not found — skipping", L)
+                    continue
+                if (args.metapath, str(L), "Exact", "") in done_runs:
+                    log.info("  [Exact L=%d] already in CSV — skipping", L)
+                    # Still populate z paths from disk so KMV/MPRW can compute CKA
+                    _z = str(scratch_dir / f"z_exact_L{L}.pt")
+                    _layers = _z.replace(".pt", "_layers.pt")
+                    if os.path.exists(_z):
+                        z_exact_by_L[L] = _z
+                    if os.path.exists(_layers):
+                        layers_exact_by_L[L] = _layers
+                    continue
 
-            if exact_inf_cascade is not None:
-                log.warning("  [Exact L=%d] skipping — cascaded from earlier L failure (%s)",
-                            L, exact_inf_cascade)
+                if exact_inf_cascade is not None:
+                    log.warning("  [Exact L=%d] skipping — cascaded from earlier L failure (%s)",
+                                L, exact_inf_cascade)
+                    csv_w.writerow({
+                        **{f: "" for f in _FIELDS},
+                        "Dataset": args.dataset, "MetaPath": args.metapath,
+                        "L": L, "Method": "Exact", "k_value": "",
+                        "Materialization_Time": _fmt(t_exact_mat),
+                        "Mat_RAM_MB": _fmt(exact_mat_mb, 1) if exact_mat_mb else "",
+                        "Edge_Count": exact_edge_count,
+                        "Graph_Density": _graph_density(exact_edge_count, n_target),
+                        "exact_status": f"INF_CASCADE({exact_inf_cascade})",
+                    })
+                    csv_fh.flush()
+                    continue
+
+                # --skip-exact-inference: record materialization stats only, skip GNN.
+                if args.skip_exact_inference:
+                    csv_w.writerow({
+                        **{f: "" for f in _FIELDS},
+                        "Dataset": args.dataset, "MetaPath": args.metapath,
+                        "L": L, "Method": "Exact", "k_value": "",
+                        "Materialization_Time": _fmt(t_exact_mat),
+                        "Mat_RAM_MB": _fmt(exact_mat_mb, 1) if exact_mat_mb else "",
+                        "Edge_Count": exact_edge_count,
+                        "Graph_Density": _graph_density(exact_edge_count, n_target),
+                        "exact_status": "MAT_ONLY",
+                    })
+                    csv_fh.flush()
+                    log.info("  [Exact L=%d] --skip-exact-inference: mat_time=%.2fs  edges=%d  mat_ram=%s",
+                             L, t_exact_mat, exact_edge_count,
+                             f"{exact_mat_mb:.0f}MB" if exact_mat_mb else "n/a")
+                    continue
+
+                inf_res, z_path, layers_path = _inf_subprocess(
+                    exact_file, "adj", "exact", L)
+                if inf_res is not None and inf_res.get("inf_failed"):
+                    status = ("INF_OOM"     if inf_res.get("inf_oom")
+                              else "INF_TIMEOUT" if inf_res.get("inf_timeout")
+                              else "INF_FAIL")
+                    log.warning("  [Exact L=%d] inference failed: %s — cascading remaining depths",
+                                L, status)
+                    exact_inf_cascade = status   # trigger cascade for remaining L
+                    csv_w.writerow({
+                        **{f: "" for f in _FIELDS},
+                        "Dataset": args.dataset, "MetaPath": args.metapath,
+                        "L": L, "Method": "Exact", "k_value": "",
+                        "Materialization_Time": _fmt(t_exact_mat),
+                        "Mat_RAM_MB": _fmt(exact_mat_mb, 1) if exact_mat_mb else "",
+                        "Edge_Count": exact_edge_count,
+                        "Graph_Density": _graph_density(exact_edge_count, n_target),
+                        "exact_status": status,
+                    })
+                    csv_fh.flush()
+                    continue
+
+                z_exact_by_L[L]      = z_path
+                layers_exact_by_L[L] = layers_path
+
+                cka_cols = {f"CKA_L{i+1}": "" for i in range(4)}
                 csv_w.writerow({
-                    **{f: "" for f in _FIELDS},
-                    "Dataset": args.dataset, "MetaPath": args.metapath,
-                    "L": L, "Method": "Exact", "k_value": "",
+                    "Dataset":              args.dataset,
+                    "MetaPath":             args.metapath,
+                    "L":                    L,
+                    "Method":               "Exact",
+                    "k_value":              "",
+                    "Density_Matched_w":    "",
                     "Materialization_Time": _fmt(t_exact_mat),
-                    "Mat_RAM_MB": _fmt(exact_mat_mb, 1) if exact_mat_mb else "",
-                    "Edge_Count": exact_edge_count,
-                    "Graph_Density": _graph_density(exact_edge_count, n_target),
-                    "exact_status": f"INF_CASCADE({exact_inf_cascade})",
+                    "MPRW_Calibration_Time": "",
+                    "Inference_Time":       _fmt(inf_res.get("inf_time")),
+                    "Mat_RAM_MB":           _fmt(exact_mat_mb, 1) if exact_mat_mb else "",
+                    "Inf_RAM_MB":           _fmt(inf_res.get("inf_peak_ram_mb"), 1),
+                    "Edge_Count":           exact_edge_count,
+                    "Graph_Density":        _graph_density(exact_edge_count, n_target),
+                    **cka_cols,
+                    "Pred_Similarity":      "",
+                    "Macro_F1":             _fmt(inf_res.get("inf_f1")),
+                    "Dirichlet_Energy":     _fmt(inf_res.get("inf_de")),
+                    "exact_status":         exact_status_flag,
                 })
                 csv_fh.flush()
-                continue
-
-            # --skip-exact-inference: record materialization stats only, skip GNN.
-            if args.skip_exact_inference:
-                csv_w.writerow({
-                    **{f: "" for f in _FIELDS},
-                    "Dataset": args.dataset, "MetaPath": args.metapath,
-                    "L": L, "Method": "Exact", "k_value": "",
-                    "Materialization_Time": _fmt(t_exact_mat),
-                    "Mat_RAM_MB": _fmt(exact_mat_mb, 1) if exact_mat_mb else "",
-                    "Edge_Count": exact_edge_count,
-                    "Graph_Density": _graph_density(exact_edge_count, n_target),
-                    "exact_status": "MAT_ONLY",
-                })
-                csv_fh.flush()
-                log.info("  [Exact L=%d] --skip-exact-inference: mat_time=%.2fs  edges=%d  mat_ram=%s",
-                         L, t_exact_mat, exact_edge_count,
+                log.info("  [Exact L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  inf_ram=%s  mat_ram=%s",
+                         L, inf_res.get("inf_f1", 0), inf_res.get("inf_de", 0),
+                         inf_res.get("inf_time", 0),
+                         f"{inf_res.get('inf_peak_ram_mb', 0):.0f}MB",
                          f"{exact_mat_mb:.0f}MB" if exact_mat_mb else "n/a")
-                continue
 
-            inf_res, z_path, layers_path = _inf_subprocess(
-                exact_file, "adj", "exact", L)
-            if inf_res is not None and inf_res.get("inf_failed"):
-                status = ("INF_OOM"     if inf_res.get("inf_oom")
-                          else "INF_TIMEOUT" if inf_res.get("inf_timeout")
-                          else "INF_FAIL")
-                log.warning("  [Exact L=%d] inference failed: %s — cascading remaining depths",
-                            L, status)
-                exact_inf_cascade = status   # trigger cascade for remaining L
-                csv_w.writerow({
-                    **{f: "" for f in _FIELDS},
-                    "Dataset": args.dataset, "MetaPath": args.metapath,
-                    "L": L, "Method": "Exact", "k_value": "",
-                    "Materialization_Time": _fmt(t_exact_mat),
-                    "Mat_RAM_MB": _fmt(exact_mat_mb, 1) if exact_mat_mb else "",
-                    "Edge_Count": exact_edge_count,
-                    "Graph_Density": _graph_density(exact_edge_count, n_target),
-                    "exact_status": status,
-                })
-                csv_fh.flush()
-                continue
+            log.info("  Exact done for all depths.  [parent RSS=%.0fMB]", _rss_mb())
 
-            z_exact_by_L[L]      = z_path
-            layers_exact_by_L[L] = layers_path
-
-            cka_cols = {f"CKA_L{i+1}": "" for i in range(4)}
-            csv_w.writerow({
-                "Dataset":              args.dataset,
-                "MetaPath":             args.metapath,
-                "L":                    L,
-                "Method":               "Exact",
-                "k_value":              "",
-                "Density_Matched_w":    "",
-                "Materialization_Time": _fmt(t_exact_mat),
-                "Inference_Time":       _fmt(inf_res.get("inf_time")),
-                "Mat_RAM_MB":           _fmt(exact_mat_mb, 1) if exact_mat_mb else "",
-                "Inf_RAM_MB":           _fmt(inf_res.get("inf_peak_ram_mb"), 1),
-                "Edge_Count":           exact_edge_count,
-                "Graph_Density":        _graph_density(exact_edge_count, n_target),
-                **cka_cols,
-                "Pred_Similarity":      "",
-                "Macro_F1":             _fmt(inf_res.get("inf_f1")),
-                "Dirichlet_Energy":     _fmt(inf_res.get("inf_de")),
-                "exact_status":         exact_status_flag,
-            })
-            csv_fh.flush()
-            log.info("  [Exact L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  inf_ram=%s  mat_ram=%s",
-                     L, inf_res.get("inf_f1", 0), inf_res.get("inf_de", 0),
-                     inf_res.get("inf_time", 0),
-                     f"{inf_res.get('inf_peak_ram_mb', 0):.0f}MB",
-                     f"{exact_mat_mb:.0f}MB" if exact_mat_mb else "n/a")
-
-        log.info("  Exact done for all depths.  [parent RSS=%.0fMB]", _rss_mb())
-
-    except MemoryError as e:
-        exact_status_flag = "MAT_OOM"
-        log.warning("  ExactD OOM: %s", e)
-    except RuntimeError as e:
-        exact_status_flag = ("MAT_TIMEOUT" if "timed out" in str(e)
-                             else f"MAT_ERR:{str(e)[:80]}")
-        log.warning("  ExactD error: %s", e)
+        except MemoryError as e:
+            exact_status_flag = "MAT_OOM"
+            log.warning("  ExactD OOM: %s", e)
+        except RuntimeError as e:
+            exact_status_flag = ("MAT_TIMEOUT" if "timed out" in str(e)
+                                 else f"MAT_ERR:{str(e)[:80]}")
+            log.warning("  ExactD error: %s", e)
 
     # ------------------------------------------------------------------
     # KMV sweep — materialization: C++ child peak. Inference: subprocess.
@@ -876,23 +892,24 @@ def main():
                      pred_sim or "n/a")
 
             csv_w.writerow({
-                "Dataset":              args.dataset,
-                "MetaPath":             args.metapath,
-                "L":                    L,
-                "Method":               "KMV",
-                "k_value":              k,
-                "Density_Matched_w":    "",
-                "Materialization_Time": _fmt(t_kmv_mat),
-                "Inference_Time":       _fmt(inf_res.get("inf_time")),
-                "Mat_RAM_MB":           _fmt(kmv_mat_mb, 1) if kmv_mat_mb else "",
-                "Inf_RAM_MB":           _fmt(inf_res.get("inf_peak_ram_mb"), 1),
-                "Edge_Count":           kmv_edge_count,
-                "Graph_Density":        _graph_density(kmv_edge_count, n_target),
+                "Dataset":               args.dataset,
+                "MetaPath":              args.metapath,
+                "L":                     L,
+                "Method":                "KMV",
+                "k_value":               k,
+                "Density_Matched_w":     "",
+                "Materialization_Time":  _fmt(t_kmv_mat),
+                "MPRW_Calibration_Time": "",
+                "Inference_Time":        _fmt(inf_res.get("inf_time")),
+                "Mat_RAM_MB":            _fmt(kmv_mat_mb, 1) if kmv_mat_mb else "",
+                "Inf_RAM_MB":            _fmt(inf_res.get("inf_peak_ram_mb"), 1),
+                "Edge_Count":            kmv_edge_count,
+                "Graph_Density":         _graph_density(kmv_edge_count, n_target),
                 **cka_cols,
-                "Pred_Similarity":      pred_sim,
-                "Macro_F1":             _fmt(inf_res.get("inf_f1")),
-                "Dirichlet_Energy":     _fmt(inf_res.get("inf_de")),
-                "exact_status":         exact_status_flag,
+                "Pred_Similarity":       pred_sim,
+                "Macro_F1":              _fmt(inf_res.get("inf_f1")),
+                "Dirichlet_Energy":      _fmt(inf_res.get("inf_de")),
+                "exact_status":          exact_status_flag,
             })
             csv_fh.flush()
 
@@ -953,9 +970,8 @@ def main():
                 csv_fh.flush()
                 continue
 
-        # Timer starts before calibration — that IS materialization cost.
-        t_mat_start = time.perf_counter()
-
+        # --- Calibration phase: binary search for density-matched walk count ---
+        t_calib_start = time.perf_counter()
         target_edges = kmv_edges_by_k.get(k)
         if target_edges is None:
             calibrated_w, calibrated_edge_count, found_overshoot = k, None, False
@@ -967,13 +983,18 @@ def main():
                 g_full, mprw_triples, target_ntype,
                 target_edges=target_edges, seed=kmv_seed, device=device, log=log,
             )
+        t_calib = time.perf_counter() - t_calib_start
+        log.info("  [MPRW k=%d] calibration done: w=%d  calib_time=%.2fs",
+                 k, calibrated_w, t_calib)
 
+        # --- Materialization phase: actual walk generation subprocess ---
         mprw_out = mprw_work_dir / f"mat_mprw_{k}.pt"
         mat_cmd  = [sys.executable, mprw_worker,
                     str(mprw_meta_file), str(mprw_out),
                     str(calibrated_w), str(kmv_seed)]
         log.info("  [MPRW] Materializing (w=%d) ...", calibrated_w)
 
+        t_mat_start = time.perf_counter()
         try:
             mat_res = subprocess.run(mat_cmd, check=True, capture_output=True,
                                      text=True, timeout=args.timeout)
@@ -983,6 +1004,8 @@ def main():
                 csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
                     "Dataset": args.dataset, "MetaPath": args.metapath,
                     "L": L, "Method": "MPRW", "k_value": k,
+                    "Density_Matched_w": calibrated_w,
+                    "MPRW_Calibration_Time": _fmt(t_calib),
                     "exact_status": "MPRW_TIMEOUT",
                 }))
             csv_fh.flush()
@@ -994,6 +1017,8 @@ def main():
                 csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
                     "Dataset": args.dataset, "MetaPath": args.metapath,
                     "L": L, "Method": "MPRW", "k_value": k,
+                    "Density_Matched_w": calibrated_w,
+                    "MPRW_Calibration_Time": _fmt(t_calib),
                     "exact_status": f"MPRW_ERR:{e.returncode}",
                 }))
             csv_fh.flush()
@@ -1055,6 +1080,7 @@ def main():
                     "L": L, "Method": "MPRW", "k_value": k,
                     "Density_Matched_w": calibrated_w,
                     "Materialization_Time": _fmt(t_mprw_mat),
+                    "MPRW_Calibration_Time": _fmt(t_calib),
                     "Mat_RAM_MB": _fmt(mprw_mat_mb, 1) if mprw_mat_mb is not None else "",
                     "Edge_Count": mprw_edge_count,
                     "Graph_Density": _graph_density(mprw_edge_count, n_target),
@@ -1078,6 +1104,7 @@ def main():
                     "L": L, "Method": "MPRW", "k_value": k,
                     "Density_Matched_w": calibrated_w,
                     "Materialization_Time": _fmt(t_mprw_mat),
+                    "MPRW_Calibration_Time": _fmt(t_calib),
                     "Mat_RAM_MB": _fmt(mprw_mat_mb, 1) if mprw_mat_mb is not None else "",
                     "Edge_Count": mprw_edge_count,
                     "Graph_Density": _graph_density(mprw_edge_count, n_target),
@@ -1090,32 +1117,33 @@ def main():
                 z_exact_by_L.get(L), layers_exact_by_L.get(L),
                 z_mprw_path, layers_mprw_path, L, f"MPRW k={k}")
 
-            log.info("  [MPRW k=%d L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  inf_ram=%s  mat_ram=%s  pred_sim=%s",
+            log.info("  [MPRW k=%d L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  inf_ram=%s  mat_ram=%s  calib=%.2fs  pred_sim=%s",
                      k, L, inf_res.get("inf_f1", 0), inf_res.get("inf_de", 0),
                      inf_res.get("inf_time", 0),
                      f"{inf_res.get('inf_peak_ram_mb', 0):.0f}MB",
                      f"{mprw_mat_mb:.0f}MB" if mprw_mat_mb is not None else "n/a",
-                     pred_sim or "n/a")
+                     t_calib, pred_sim or "n/a")
 
             csv_w.writerow({
-                "Dataset":              args.dataset,
-                "MetaPath":             args.metapath,
-                "L":                    L,
-                "Method":               "MPRW",
-                "k_value":              k,
-                "Density_Matched_w":    calibrated_w,
-                "Materialization_Time": _fmt(t_mprw_mat),
-                "Inference_Time":       _fmt(inf_res.get("inf_time")),
-                "Mat_RAM_MB":           _fmt(mprw_mat_mb, 1) if mprw_mat_mb is not None else "",
-                "Inf_RAM_MB":           _fmt(inf_res.get("inf_peak_ram_mb"), 1),
-                "Edge_Count":           mprw_edge_count,
-                "Graph_Density":        _graph_density(mprw_edge_count, n_target),
+                "Dataset":               args.dataset,
+                "MetaPath":              args.metapath,
+                "L":                     L,
+                "Method":                "MPRW",
+                "k_value":               k,
+                "Density_Matched_w":     calibrated_w,
+                "Materialization_Time":  _fmt(t_mprw_mat),
+                "MPRW_Calibration_Time": _fmt(t_calib),
+                "Inference_Time":        _fmt(inf_res.get("inf_time")),
+                "Mat_RAM_MB":            _fmt(mprw_mat_mb, 1) if mprw_mat_mb is not None else "",
+                "Inf_RAM_MB":            _fmt(inf_res.get("inf_peak_ram_mb"), 1),
+                "Edge_Count":            mprw_edge_count,
+                "Graph_Density":         _graph_density(mprw_edge_count, n_target),
                 **cka_cols,
-                "Pred_Similarity":      pred_sim,
-                "Macro_F1":             _fmt(inf_res.get("inf_f1")),
-                "Dirichlet_Energy":     _fmt(inf_res.get("inf_de")),
-                "exact_status":         (exact_status_flag if found_overshoot
-                                         else f"MPRW_TOPO_LIMIT|{exact_status_flag}"),
+                "Pred_Similarity":       pred_sim,
+                "Macro_F1":              _fmt(inf_res.get("inf_f1")),
+                "Dirichlet_Energy":      _fmt(inf_res.get("inf_de")),
+                "exact_status":          (exact_status_flag if found_overshoot
+                                          else f"MPRW_TOPO_LIMIT|{exact_status_flag}"),
             })
             csv_fh.flush()
 
