@@ -50,6 +50,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -94,6 +95,46 @@ def _rss_mb() -> float:
 def _rss_gb() -> Optional[float]:
     mb = _rss_mb()
     return mb / 1024 if mb else None
+
+
+class _PeakRSSMonitor:
+    """Background thread that polls RSS every `interval` seconds.
+
+    Use as a context manager around any block you want to profile:
+
+        with _PeakRSSMonitor() as mon:
+            do_work()
+        peak_delta_mb = mon.peak_delta_mb
+    """
+
+    def __init__(self, interval: float = 0.05):
+        self._interval = interval
+        self._baseline = 0.0
+        self._peak = 0.0
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+
+    def __enter__(self) -> "_PeakRSSMonitor":
+        self._baseline = _rss_mb()
+        self._peak = self._baseline
+        self._running = True
+        self._thread = threading.Thread(target=self._poll, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_) -> None:
+        self._running = False
+        if self._thread:
+            self._thread.join()
+
+    def _poll(self) -> None:
+        while self._running:
+            self._peak = max(self._peak, _rss_mb())
+            time.sleep(self._interval)
+
+    @property
+    def peak_delta_mb(self) -> float:
+        return max(0.0, self._peak - self._baseline)
 
 
 # ---------------------------------------------------------------------------
@@ -289,9 +330,10 @@ def _find_overshoot_w(
         nonlocal peak_rss_delta
         kern = MPRWKernel(k=w, seed=seed, device=device)
         t0 = time.perf_counter()
-        data, _ = kern.materialize(g_full, mprw_triples, target_ntype)
+        with _PeakRSSMonitor() as mon:
+            data, _ = kern.materialize(g_full, mprw_triples, target_ntype)
         t_run = time.perf_counter() - t0
-        peak_rss_delta = max(peak_rss_delta, _rss_mb() - baseline_rss)
+        peak_rss_delta = max(peak_rss_delta, mon.peak_delta_mb)
         return data.edge_index.size(1), data.edge_index, t_run
 
     # ── Phase 1: Exponential Bounding ──────────────────────────────────────
@@ -1011,12 +1053,13 @@ def main():
             # Fallback: no KMV reference — materialise w=k directly in-process.
             kern = MPRWKernel(k=k, seed=kmv_seed, device=device)
             t_walk_start = time.perf_counter()
-            data, _ = kern.materialize(g_full, mprw_triples, target_ntype)
+            with _PeakRSSMonitor() as mon:
+                data, _ = kern.materialize(g_full, mprw_triples, target_ntype)
             t_best_w_run = time.perf_counter() - t_walk_start
             best_edge_index: Optional[torch.Tensor] = data.edge_index
             found_overshoot = False
             calibrated_w = k
-            calib_peak_mb = max(0.0, _rss_mb() - overall_baseline_rss)
+            calib_peak_mb = mon.peak_delta_mb
             log.warning("  [MPRW k=%d] KMV edge count unavailable — using w=k", k)
         else:
             log.info("  [MPRW k=%d] calibrating w for KMV edge count %d ...",
@@ -1035,18 +1078,19 @@ def main():
         # Final_Walk_Time = simulated single best_w run + truncation step.
         mprw_out = mprw_work_dir / f"mat_mprw_{k}.pt"
         t_trunc_start = time.perf_counter()
-        if best_edge_index is not None and target_edges is not None \
-                and best_edge_index.size(1) > target_edges:
-            final_ei = _truncate_to_target(best_edge_index, target_edges, n_target,
-                                           seed=kmv_seed)
-            log.info("  MPRW truncated: %d → %d edges (target=%d)",
-                     best_edge_index.size(1), final_ei.size(1), target_edges)
-        else:
-            final_ei = best_edge_index
+        with _PeakRSSMonitor() as trunc_mon:
+            if best_edge_index is not None and target_edges is not None \
+                    and best_edge_index.size(1) > target_edges:
+                final_ei = _truncate_to_target(best_edge_index, target_edges, n_target,
+                                               seed=kmv_seed)
+                log.info("  MPRW truncated: %d → %d edges (target=%d)",
+                         best_edge_index.size(1), final_ei.size(1), target_edges)
+            else:
+                final_ei = best_edge_index
         t_trunc = time.perf_counter() - t_trunc_start
 
         # Peak_RAM: global max across all phases (Phase 1 transient overshoot included).
-        calib_peak_mb = max(calib_peak_mb, _rss_mb() - overall_baseline_rss)
+        calib_peak_mb = max(calib_peak_mb, trunc_mon.peak_delta_mb)
 
         # Final_Walk_Time per spec: time of the single best_w run + truncation.
         t_final_walk = t_best_w_run + t_trunc
