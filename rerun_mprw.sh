@@ -20,17 +20,29 @@ set -euo pipefail
 BASE_SEED=42
 HASH_SEEDS=(43 44 45 46)
 
-DATASETS=("HGB_ACM" "HGB_DBLP" "HGB_IMDB")
-DEPTHS="2 3 4"
+DATASETS=("HGB_ACM" "HGB_DBLP" "HGB_IMDB" "HNE_PubMed")
+DEPTHS="1 2 3 4"
 K_VALUES="2 4 8 16 32"
-MAX_RSS_GB=32
+MAX_RSS_GB=100
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 strip_mprw() {
     local csv="$1"
     [[ -f "${csv}" ]] || return 0
-    grep -v ",MPRW," "${csv}" > "${csv}.tmp" && mv "${csv}.tmp" "${csv}"
+    python - "${csv}" <<'PYEOF'
+import csv, sys, pathlib
+p = pathlib.Path(sys.argv[1])
+rows = []
+with open(p, newline="", encoding="utf-8") as f:
+    reader = csv.DictReader(f)
+    fields = reader.fieldnames
+    rows = [r for r in reader if r.get("Method") != "MPRW"]
+with open(p, "w", newline="", encoding="utf-8") as f:
+    w = csv.DictWriter(f, fieldnames=fields)
+    w.writeheader()
+    w.writerows(rows)
+PYEOF
 }
 
 run_exp3_for_seed() {
@@ -73,6 +85,7 @@ for p in cfg.suggested_paths:
                 --partition-json "${part_json}" \
                 --weights-dir "results/${DS}/weights" \
                 --max-rss-gb ${MAX_RSS_GB} \
+                --skip-exact \
                 ${hash_arg} \
             || log "WARNING: exp3 failed for ${DS}/${MP} (exit $?) — continuing"
 

@@ -251,8 +251,7 @@ def _pred_agreement(z_a: torch.Tensor, z_b: torch.Tensor,
 
 
 
-_MPRW_CALIB_MAX_ITERS = 15
-_MPRW_OVERSHOOT_FRAC  = 0.15   # target 15% overshoot before truncation
+_MPRW_CALIB_MAX_DOUBLINGS = 20   # Phase 1 safeguard: cap at 2^20 walks
 
 
 def _find_overshoot_w(
@@ -263,60 +262,84 @@ def _find_overshoot_w(
     seed: int,
     device: torch.device,
     log: logging.Logger,
-    overshoot_frac: float = _MPRW_OVERSHOOT_FRAC,
-    w_max: int = 2000,
-) -> Tuple[int, int, bool]:
+    baseline_rss: float = 0.0,
+) -> Tuple[int, Optional[torch.Tensor], bool, float, float]:
     """
-    Binary search for the minimum walk count w such that MPRW edge count
-    >= target_edges * (1 + overshoot_frac).
+    Three-phase MPRW calibration pipeline.
 
-    The caller is expected to truncate the materialized graph to exactly
-    target_edges afterwards.  This guarantees a deterministic edge-count
-    match regardless of walk-coverage variance.
+    Phase 1 — Exponential Bounding: doubles w from 1 until MPRW(w) >= target_edges,
+              establishing a tight [w_low, w_high] search interval without hardcoding w_max.
+    Phase 2 — Binary Search: finds the minimum w in [w_low, w_high] where
+              MPRW(w) >= target_edges; caches the edge_index at best_w to avoid
+              a redundant final re-run.
 
     Returns:
-        (w, actual_count, found_overshoot)
-        found_overshoot=False means even w_max can't reach the threshold
-        (topology exhausted); caller should truncate to min(count, target).
+        (best_w, best_edge_index, found_valid, calib_peak_ram_mb, best_w_run_time_s)
+        found_valid=False means topology is exhausted (Phase 1 safeguard hit);
+            caller should truncate to whatever is available.
+        calib_peak_ram_mb = global max RSS delta above baseline_rss across all
+            Phase 1 + Phase 2 MPRW runs — intentionally captures the Phase 1
+            overshoot peak which is the true hardware high-water mark.
+        best_w_run_time_s = wall time of the specific best_w run in Phase 2,
+            used by the caller to compute Final_Walk_Time = best_w_run + truncation.
     """
-    threshold = int(target_edges * (1 + overshoot_frac))
-    w_lo, w_hi = 1, w_max
-    best_w, best_count = w_max, 0
+    peak_rss_delta = 0.0
 
-    for i in range(_MPRW_CALIB_MAX_ITERS):
-        w_mid = (w_lo + w_hi) // 2
-        kern  = MPRWKernel(k=w_mid, seed=seed, device=device)
+    def _run(w: int) -> Tuple[int, torch.Tensor, float]:
+        nonlocal peak_rss_delta
+        kern = MPRWKernel(k=w, seed=seed, device=device)
+        t0 = time.perf_counter()
         data, _ = kern.materialize(g_full, mprw_triples, target_ntype)
-        count = data.edge_index.size(1)
+        t_run = time.perf_counter() - t0
+        peak_rss_delta = max(peak_rss_delta, _rss_mb() - baseline_rss)
+        return data.edge_index.size(1), data.edge_index, t_run
 
-        log.debug("  [overshoot iter %d] w=%d  edges=%d  threshold=%d",
-                  i + 1, w_mid, count, threshold)
+    # ── Phase 1: Exponential Bounding ──────────────────────────────────────
+    log.debug("  [calibration] Phase 1: exponential bounding")
+    w = 1
+    count, ei, _ = _run(w)
+    log.debug("  [exp-bound] w=%d  edges=%d  target=%d", w, count, target_edges)
 
-        if count >= threshold:
-            best_w, best_count = w_mid, count
-            w_hi = w_mid - 1   # try a smaller w that still overshoots
-        else:
-            w_lo = w_mid + 1
-
-        if w_lo > w_hi:
+    for _ in range(_MPRW_CALIB_MAX_DOUBLINGS):
+        if count >= target_edges:
             break
+        w = w * 2
+        count, ei, _ = _run(w)
+        log.debug("  [exp-bound] w=%d  edges=%d  target=%d", w, count, target_edges)
+    else:
+        # Topology exhausted: still below target after max doublings.
+        log.warning(
+            "  [calibration] topology exhausted at w=%d: edges=%d < target=%d",
+            w, count, target_edges,
+        )
+        return w, ei, False, peak_rss_delta, 0.0
 
-    if best_count >= threshold:
-        log.info("  [overshoot] w=%d  edges=%d  (+%.1f%% over target=%d)",
-                 best_w, best_count,
-                 100 * best_count / max(target_edges, 1) - 100, target_edges)
-        return best_w, best_count, True
+    w_high = w
+    w_low = max(1, w // 2)
 
-    # Even w_max doesn't reach the overshoot threshold — topology exhausted.
-    kern  = MPRWKernel(k=w_max, seed=seed, device=device)
-    data, _ = kern.materialize(g_full, mprw_triples, target_ntype)
-    count = data.edge_index.size(1)
-    log.warning(
-        "  [overshoot] topology exhausted at w=%d: edges=%d < threshold=%d "
-        "(%.1f%% of target). Will truncate to available.",
-        w_max, count, threshold, 100 * count / max(target_edges, 1),
-    )
-    return w_max, count, False
+    # ── Phase 2: Binary Search ──────────────────────────────────────────────
+    log.debug("  [calibration] Phase 2: binary search in [%d, %d]", w_low, w_high)
+    # Initialise with the Phase 1 upper-bound result as a safe fallback.
+    best_w: int = w_high
+    best_ei: torch.Tensor = ei
+    t_best_w_run: float = 0.0
+
+    while w_low <= w_high:
+        mid = (w_low + w_high) // 2
+        count, ei, t_run = _run(mid)
+        log.debug("  [bin-search] w=%d  edges=%d  target=%d", mid, count, target_edges)
+
+        if count >= target_edges:
+            best_w = mid
+            best_ei = ei
+            t_best_w_run = t_run
+            w_high = mid - 1   # try smaller w that still satisfies target
+        else:
+            w_low = mid + 1
+
+    log.info("  [calibration] best_w=%d  edges=%d  (target=%d)",
+             best_w, best_ei.size(1), target_edges)
+    return best_w, best_ei, True, peak_rss_delta, t_best_w_run
 
 
 def _truncate_to_target(
@@ -383,8 +406,9 @@ def _truncate_to_target(
 _FIELDS = [
     "Dataset", "MetaPath", "L", "Method", "k_value", "Density_Matched_w",
     "Materialization_Time", "MPRW_Calibration_Time", "Inference_Time",
-    "Mat_RAM_MB",   # subprocess-isolated materialization peak
-    "Inf_RAM_MB",   # subprocess-isolated inference peak
+    "Mat_RAM_MB",        # subprocess-isolated materialization peak
+    "Calib_RAM_MB",      # in-process peak across all calibration iterations
+    "Inf_RAM_MB",        # subprocess-isolated inference peak
     "Edge_Count", "Graph_Density",
     "CKA_L1", "CKA_L2", "CKA_L3", "CKA_L4",
     "Pred_Similarity", "Macro_F1", "Dirichlet_Energy", "exact_status",
@@ -970,93 +994,64 @@ def main():
                 csv_fh.flush()
                 continue
 
-        # --- Calibration phase: binary search for density-matched walk count ---
+        # --- Phase 1 (Exponential Bounding) + Phase 2 (Binary Search) ---
+        # Calibration_Time = wall clock for these two phases combined.
+        overall_baseline_rss = _rss_mb()
         t_calib_start = time.perf_counter()
         target_edges = kmv_edges_by_k.get(k)
         if target_edges is None:
-            calibrated_w, calibrated_edge_count, found_overshoot = k, None, False
+            # Fallback: no KMV reference — materialise w=k directly in-process.
+            kern = MPRWKernel(k=k, seed=kmv_seed, device=device)
+            t_walk_start = time.perf_counter()
+            data, _ = kern.materialize(g_full, mprw_triples, target_ntype)
+            t_best_w_run = time.perf_counter() - t_walk_start
+            best_edge_index: Optional[torch.Tensor] = data.edge_index
+            found_overshoot = False
+            calibrated_w = k
+            calib_peak_mb = max(0.0, _rss_mb() - overall_baseline_rss)
             log.warning("  [MPRW k=%d] KMV edge count unavailable — using w=k", k)
         else:
-            log.info("  [MPRW k=%d] finding overshoot w for KMV edge count %d ...",
+            log.info("  [MPRW k=%d] calibrating w for KMV edge count %d ...",
                      k, target_edges)
-            calibrated_w, calibrated_edge_count, found_overshoot = _find_overshoot_w(
-                g_full, mprw_triples, target_ntype,
-                target_edges=target_edges, seed=kmv_seed, device=device, log=log,
-            )
+            calibrated_w, best_edge_index, found_overshoot, calib_peak_mb, t_best_w_run = \
+                _find_overshoot_w(
+                    g_full, mprw_triples, target_ntype,
+                    target_edges=target_edges, seed=kmv_seed, device=device, log=log,
+                    baseline_rss=overall_baseline_rss,
+                )
         t_calib = time.perf_counter() - t_calib_start
-        log.info("  [MPRW k=%d] calibration done: w=%d  calib_time=%.2fs",
-                 k, calibrated_w, t_calib)
+        log.info("  [MPRW k=%d] calibration done: w=%d  calib_time=%.2fs  calib_ram=%.0fMB",
+                 k, calibrated_w, t_calib, calib_peak_mb)
 
-        # --- Materialization phase: actual walk generation subprocess ---
+        # --- Phase 3: Uniform Random Truncation (in-process, cached edge set) ---
+        # Final_Walk_Time = simulated single best_w run + truncation step.
         mprw_out = mprw_work_dir / f"mat_mprw_{k}.pt"
-        mat_cmd  = [sys.executable, mprw_worker,
-                    str(mprw_meta_file), str(mprw_out),
-                    str(calibrated_w), str(kmv_seed)]
-        log.info("  [MPRW] Materializing (w=%d) ...", calibrated_w)
-
-        t_mat_start = time.perf_counter()
-        try:
-            mat_res = subprocess.run(mat_cmd, check=True, capture_output=True,
-                                     text=True, timeout=args.timeout)
-        except subprocess.TimeoutExpired:
-            log.warning("  [MPRW k=%d] materialization timed out", k)
-            for L in args.depth:
-                csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
-                    "Dataset": args.dataset, "MetaPath": args.metapath,
-                    "L": L, "Method": "MPRW", "k_value": k,
-                    "Density_Matched_w": calibrated_w,
-                    "MPRW_Calibration_Time": _fmt(t_calib),
-                    "exact_status": "MPRW_TIMEOUT",
-                }))
-            csv_fh.flush()
-            continue
-        except subprocess.CalledProcessError as e:
-            log.warning("  [MPRW k=%d] materialization failed (exit %d):\n%s",
-                        k, e.returncode, e.stderr[-400:])
-            for L in args.depth:
-                csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
-                    "Dataset": args.dataset, "MetaPath": args.metapath,
-                    "L": L, "Method": "MPRW", "k_value": k,
-                    "Density_Matched_w": calibrated_w,
-                    "MPRW_Calibration_Time": _fmt(t_calib),
-                    "exact_status": f"MPRW_ERR:{e.returncode}",
-                }))
-            csv_fh.flush()
-            continue
-
-        t_mprw_mat = time.perf_counter() - t_mat_start
-
-        # Parse peak_ram_mb from worker stdout (true high-water mark above baseline)
-        mprw_mat_mb: Optional[float] = None
-        for line in mat_res.stdout.split("\n"):
-            if line.strip().lower().startswith("peak_ram_mb:"):
-                try:
-                    mprw_mat_mb = float(line.split(":", 1)[1].strip())
-                except ValueError:
-                    pass
-                break
-
-        if not mprw_out.exists():
-            log.warning("  [MPRW k=%d] output file missing", k)
-            continue
-
-        # Load, truncate to exactly target_edges, save back.
-        raw_ei = torch.load(mprw_out, weights_only=True)
-        if target_edges is not None and raw_ei.size(1) > target_edges:
-            truncated_ei = _truncate_to_target(
-                raw_ei, target_edges, n_target, seed=kmv_seed
-            )
-            torch.save(truncated_ei, mprw_out)
-            mprw_edge_count = truncated_ei.size(1)
+        t_trunc_start = time.perf_counter()
+        if best_edge_index is not None and target_edges is not None \
+                and best_edge_index.size(1) > target_edges:
+            final_ei = _truncate_to_target(best_edge_index, target_edges, n_target,
+                                           seed=kmv_seed)
             log.info("  MPRW truncated: %d → %d edges (target=%d)",
-                     raw_ei.size(1), mprw_edge_count, target_edges)
+                     best_edge_index.size(1), final_ei.size(1), target_edges)
         else:
-            mprw_edge_count = raw_ei.size(1)
-        del raw_ei
+            final_ei = best_edge_index
+        t_trunc = time.perf_counter() - t_trunc_start
 
-        log.info("  MPRW done: edges=%d (w=%d)  mat_time=%.2fs  mat_ram=%s",
-                 mprw_edge_count, calibrated_w, t_mprw_mat,
-                 f"{mprw_mat_mb:.0f}MB" if mprw_mat_mb is not None else "n/a")
+        # Peak_RAM: global max across all phases (Phase 1 transient overshoot included).
+        calib_peak_mb = max(calib_peak_mb, _rss_mb() - overall_baseline_rss)
+
+        # Final_Walk_Time per spec: time of the single best_w run + truncation.
+        t_final_walk = t_best_w_run + t_trunc
+
+        if final_ei is not None:
+            torch.save(final_ei, mprw_out)
+            mprw_edge_count = final_ei.size(1)
+        else:
+            mprw_edge_count = 0
+        del best_edge_index, final_ei
+
+        log.info("  MPRW done: edges=%d (w=%d)  final_walk_time=%.2fs  calib_time=%.2fs  peak_ram=%.0fMB",
+                 mprw_edge_count, calibrated_w, t_final_walk, t_calib, calib_peak_mb)
 
         mprw_inf_cascade: Optional[str] = None  # L-cascade flag for this k
 
@@ -1079,9 +1074,10 @@ def main():
                     "Dataset": args.dataset, "MetaPath": args.metapath,
                     "L": L, "Method": "MPRW", "k_value": k,
                     "Density_Matched_w": calibrated_w,
-                    "Materialization_Time": _fmt(t_mprw_mat),
+                    "Materialization_Time": _fmt(t_final_walk),
                     "MPRW_Calibration_Time": _fmt(t_calib),
-                    "Mat_RAM_MB": _fmt(mprw_mat_mb, 1) if mprw_mat_mb is not None else "",
+                    "Mat_RAM_MB": "",
+                    "Calib_RAM_MB": _fmt(calib_peak_mb, 1),
                     "Edge_Count": mprw_edge_count,
                     "Graph_Density": _graph_density(mprw_edge_count, n_target),
                     "exact_status": f"{calib_flag}INF_CASCADE({mprw_inf_cascade})",
@@ -1103,9 +1099,10 @@ def main():
                     "Dataset": args.dataset, "MetaPath": args.metapath,
                     "L": L, "Method": "MPRW", "k_value": k,
                     "Density_Matched_w": calibrated_w,
-                    "Materialization_Time": _fmt(t_mprw_mat),
+                    "Materialization_Time": _fmt(t_final_walk),
                     "MPRW_Calibration_Time": _fmt(t_calib),
-                    "Mat_RAM_MB": _fmt(mprw_mat_mb, 1) if mprw_mat_mb is not None else "",
+                    "Mat_RAM_MB": "",
+                    "Calib_RAM_MB": _fmt(calib_peak_mb, 1),
                     "Edge_Count": mprw_edge_count,
                     "Graph_Density": _graph_density(mprw_edge_count, n_target),
                     "exact_status": f"{calib_flag}{status}",
@@ -1117,12 +1114,11 @@ def main():
                 z_exact_by_L.get(L), layers_exact_by_L.get(L),
                 z_mprw_path, layers_mprw_path, L, f"MPRW k={k}")
 
-            log.info("  [MPRW k=%d L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  inf_ram=%s  mat_ram=%s  calib=%.2fs  pred_sim=%s",
+            log.info("  [MPRW k=%d L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  inf_ram=%s  peak_ram=%.0fMB  calib=%.2fs  pred_sim=%s",
                      k, L, inf_res.get("inf_f1", 0), inf_res.get("inf_de", 0),
                      inf_res.get("inf_time", 0),
                      f"{inf_res.get('inf_peak_ram_mb', 0):.0f}MB",
-                     f"{mprw_mat_mb:.0f}MB" if mprw_mat_mb is not None else "n/a",
-                     t_calib, pred_sim or "n/a")
+                     calib_peak_mb, t_calib, pred_sim or "n/a")
 
             csv_w.writerow({
                 "Dataset":               args.dataset,
@@ -1131,10 +1127,11 @@ def main():
                 "Method":                "MPRW",
                 "k_value":               k,
                 "Density_Matched_w":     calibrated_w,
-                "Materialization_Time":  _fmt(t_mprw_mat),
+                "Materialization_Time":  _fmt(t_final_walk),
                 "MPRW_Calibration_Time": _fmt(t_calib),
                 "Inference_Time":        _fmt(inf_res.get("inf_time")),
-                "Mat_RAM_MB":            _fmt(mprw_mat_mb, 1) if mprw_mat_mb is not None else "",
+                "Mat_RAM_MB":            "",
+                "Calib_RAM_MB":          _fmt(calib_peak_mb, 1),
                 "Inf_RAM_MB":            _fmt(inf_res.get("inf_peak_ram_mb"), 1),
                 "Edge_Count":            mprw_edge_count,
                 "Graph_Density":         _graph_density(mprw_edge_count, n_target),

@@ -13,6 +13,8 @@
 #   bash run_large_kmv_mprw.sh
 
 set -euo pipefail
+source .venv/bin/activate
+export PYTHONUTF8=1
 
 # ---------------------------------------------------------------------------
 # Config
