@@ -29,9 +29,13 @@ MAX_RSS_GB=100
 
 DATASETS=("OGB_MAG" "OAG_CS")
 
-# Fixed metapaths — one per dataset (confirmed densest)
+# Fixed metapaths and target types — hardcoded to avoid importing torch_geometric
 MP_OGB_MAG="cites,rev_cites"
 MP_OAG_CS="PP_cite,rev_PP_cite"
+TARGET_OGB_MAG="paper"
+TARGET_OAG_CS="paper"
+FOLDER_OGB_MAG="OGB_MAG"
+FOLDER_OAG_CS="OAG_CS"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
@@ -44,11 +48,9 @@ for DS in "${DATASETS[@]}"; do
     PART_JSON="results/${DS}/partition.json"
     mkdir -p "results/${DS}"
 
-    if   [[ "${DS}" == "OGB_MAG" ]]; then MP="${MP_OGB_MAG}"
-    elif [[ "${DS}" == "OAG_CS"  ]]; then MP="${MP_OAG_CS}"
+    if   [[ "${DS}" == "OGB_MAG" ]]; then MP="${MP_OGB_MAG}"; TARGET_TYPE="${TARGET_OGB_MAG}"
+    elif [[ "${DS}" == "OAG_CS"  ]]; then MP="${MP_OAG_CS}";  TARGET_TYPE="${TARGET_OAG_CS}"
     fi
-
-    TARGET_TYPE=$(python -c "from src.config import config; print(config.get_dataset_config('${DS}').target_node)")
 
     log "=== EXP1: ${DS} ==="
     python scripts/exp1_partition.py \
@@ -104,7 +106,9 @@ for HASH_SEED in "${HASH_SEEDS[@]}"; do
     for DS in "${DATASETS[@]}"; do
         rm -f "results/${DS}/master_results.csv"
         rm -f "results/${DS}/run_exp3_"*.log
-        FOLDER=$(python -c "from src.config import config; print(config.get_folder_name('${DS}'))")
+        if   [[ "${DS}" == "OGB_MAG" ]]; then FOLDER="${FOLDER_OGB_MAG}"
+        elif [[ "${DS}" == "OAG_CS"  ]]; then FOLDER="${FOLDER_OAG_CS}"
+        fi
         rm -rf "${FOLDER}/mprw_work"
     done
     rm -f "results/master_results.csv"
@@ -117,6 +121,7 @@ for HASH_SEED in "${HASH_SEEDS[@]}"; do
         fi
 
         log "--- EXP3: ${DS}  metapath=${MP}  hash_seed=${HASH_SEED} ---"
+
         python scripts/exp3_inference.py "${DS}" \
             --metapath "${MP}" \
             --depth ${DEPTHS} \
