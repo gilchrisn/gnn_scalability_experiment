@@ -27,6 +27,34 @@ MAX_RSS_GB=100
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
+# Migrate any CSV that is missing columns added since the archive was written.
+migrate_csv() {
+    local csv="$1"
+    [[ -f "${csv}" ]] || return 0
+    python - "${csv}" <<'PYEOF'
+import csv, os, sys, pathlib
+MISSING = ["MPRW_Calibration_Time", "Calib_RAM_MB"]
+p = pathlib.Path(sys.argv[1])
+with open(p, newline="", encoding="utf-8") as f:
+    reader = csv.DictReader(f)
+    fields = list(reader.fieldnames or [])
+    rows = list(reader)
+added = [c for c in MISSING if c not in fields]
+if not added:
+    sys.exit(0)
+for col in reversed(added):
+    idx = fields.index("Inference_Time")
+    fields.insert(idx, col)
+tmp = str(p) + ".tmp"
+with open(tmp, "w", newline="", encoding="utf-8") as f:
+    w = csv.DictWriter(f, fieldnames=fields)
+    w.writeheader()
+    w.writerows(rows)
+os.replace(tmp, str(p))
+print(f"  migrated {p}  (+{added})")
+PYEOF
+}
+
 strip_mprw() {
     local csv="$1"
     [[ -f "${csv}" ]] || return 0
@@ -59,7 +87,8 @@ run_exp3_for_seed() {
 
         [[ -f "${part_json}" ]] || { log "WARNING: ${part_json} missing — skipping ${DS}"; continue; }
 
-        # Strip MPRW rows from the archive copy
+        # Migrate schema then strip MPRW rows from the archive copy
+        migrate_csv "${archive_csv}"
         strip_mprw "${archive_csv}"
 
         # Put the stripped CSV into the working dir so exp3 skips KMV/Exact
