@@ -3,12 +3,10 @@
 # KMV + MPRW inference sweep for OGB_MAG and OAG_CS across 5 seeds.
 #
 # Assumes:
-#   - partition.json already exists  (exp1 already run)
-#   - frozen weights already exist   (exp2 already run)
-#   - Exact rows already in CSV      (exact results already recorded)
+#   - Exact rows already in CSV  (exact results already recorded)
 #
-# Step 1 (base seed 42): exp3 KMV+MPRW only, archives to results_42/.
-# Step 2 (×4):           exp3 with --hash-seed, archives to results_<seed>/.
+# Step 1 (base seed 42): exp1 partition → exp2 weight init (0 epochs) → exp3 KMV+MPRW.
+# Step 2 (×4):           exp3 with --hash-seed only (partition + weights reused).
 #
 # --skip-exact is used on every run — ExactD is never re-materialized.
 #
@@ -25,6 +23,7 @@ set -uo pipefail
 BASE_SEED=42
 HASH_SEEDS=(43 44 45 46)   # 4 extra seeds → 5 total replicates
 
+TRAIN_FRAC=0.4
 EPOCHS=0           # 0 = init weights without training (saves time on large graphs)
 DEPTHS="1 2 3 4"
 K_VALUES="2 4 8 16 32"
@@ -59,11 +58,6 @@ run_exp3_all() {
 
     for DS in "${DATASETS[@]}"; do
         PART_JSON="results/${DS}/partition.json"
-        [[ -f "${PART_JSON}" ]] || {
-            log "ERROR: partition.json missing for ${DS} — run exp1_partition.py first"
-            exit 1
-        }
-
         MP=$(metapath_for "${DS}")
         local SEED_LABEL="${HASH_SEED:-base}"
         log "--- DS=${DS}  metapath=${MP}  seed=${SEED_LABEL} ---"
@@ -141,14 +135,22 @@ log "========================================"
 log "STEP 1: Base run (seed=${BASE_SEED})"
 log "========================================"
 
+# Exp 1: partition (idempotent — overwrites partition.json with same seed).
+for DS in "${DATASETS[@]}"; do
+    TARGET_TYPE=$(python -c "from src.config import config; print(config.get_dataset_config('${DS}').target_node)")
+    log "--- EXP1: ${DS}  target=${TARGET_TYPE}  train_frac=${TRAIN_FRAC} ---"
+    python scripts/exp1_partition.py \
+        --dataset "${DS}" \
+        --target-type "${TARGET_TYPE}" \
+        --train-frac "${TRAIN_FRAC}" \
+        --seed "${BASE_SEED}" \
+    || { log "ERROR: exp1 failed for ${DS} (exit $?)"; exit 1; }
+done
+
 # Exp 2: initialize weights (--epochs 0 skips training loop, just saves θ_init).
 # exp2 is idempotent — it checks training_log.csv and skips already-done (mp, L) pairs.
 for DS in "${DATASETS[@]}"; do
     PART_JSON="results/${DS}/partition.json"
-    [[ -f "${PART_JSON}" ]] || {
-        log "ERROR: partition.json missing for ${DS} — run exp1_partition.py first"
-        exit 1
-    }
     MP=$(metapath_for "${DS}")
 
     # Skip if weights already exist for all depths.
