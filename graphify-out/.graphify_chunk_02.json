@@ -1,0 +1,1477 @@
+{
+  "nodes": [
+    {
+      "id": "effect_global_legend_d",
+      "label": "Legend: GloD / PerD / PerD+ Methods",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/effect-global/legend-d.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "effect_global_legend_h",
+      "label": "Legend: GloH / PerH / PerH+ Methods",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/effect-global/legend-h.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "effect_d_pubmed_varying_r",
+      "label": "Effect of lambda (R) on Degree Centrality F1 - PubMed",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/effect-global/effect-d-pubmed-varying-R.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "effect_h_acm_varying_k",
+      "label": "Effect of k on H-Index Centrality F1 - ACM",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-K.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "effect_h_acm_varying_r",
+      "label": "Effect of lambda (R) on H-Index Centrality F1 - ACM",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-R.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "effect_h_dblp_varying_k",
+      "label": "Effect of k on H-Index Centrality F1 - DBLP",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/effect-global/effect-h-dblp-varying-K.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "effect_h_dblp_varying_r",
+      "label": "Effect of lambda (R) on H-Index Centrality F1 - DBLP",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/effect-global/effect-h-dblp-varying-R.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "effect_h_freebase_varying_k",
+      "label": "Effect of k on H-Index Centrality F1 - Freebase",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/effect-global/effect-h-freebase-varying-K.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "effect_h_freebase_varying_r",
+      "label": "Effect of lambda (R) on H-Index Centrality F1 - Freebase",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/effect-global/effect-h-freebase-varying-R.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "effect_h_imdb_varying_k",
+      "label": "Effect of k on H-Index Centrality F1/Accuracy - IMDB",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/effect-global/effect-h-imdb-varying-K.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "effect_h_imdb_varying_r",
+      "label": "Effect of lambda (R) on H-Index Centrality F1/Accuracy - IMDB",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/effect-global/effect-h-imdb-varying-R.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "effect_h_pubmed_varying_k",
+      "label": "Effect of k on H-Index Centrality F1 - PubMed",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/effect-global/effect-h-pubmed-varying-K.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "effect_h_pubmed_varying_r",
+      "label": "Effect of lambda (R) on H-Index Centrality F1 - PubMed",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/effect-global/effect-h-pubmed-varying-R.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "epsilon_legend",
+      "label": "Legend: Epsilon Error for GloD/PerD/PerD+ and GloH/PerH/PerH+",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/epsilon/epsilon_legend.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "epsilon_acm",
+      "label": "Epsilon Approximation Error vs k - ACM",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/epsilon/epsilon_acm.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "epsilon_dblp",
+      "label": "Epsilon Approximation Error vs k - DBLP",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/epsilon/epsilon_dblp.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "epsilon_freebase",
+      "label": "Epsilon Approximation Error vs k - Freebase",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/epsilon/epsilon_freebase.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "epsilon_imdb",
+      "label": "Epsilon Approximation Error vs k - IMDB",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/epsilon/epsilon_imdb.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "epsilon_pubmed",
+      "label": "Epsilon Approximation Error vs k - PubMed",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/epsilon/epsilon_pubmed.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "hgnn_plot1a_memory_stacked",
+      "label": "Peak Memory Footprint: Exact vs KMV HGNN (L=2, k=32)",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/hgnn/plot1a_memory_stacked.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "hgnn_plot1b_time_stacked",
+      "label": "End-to-End Execution Time: Exact vs KMV HGNN (L=2, k=32)",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/hgnn/plot1b_time_stacked.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "hgnn_plot1c_preprocessing_latency",
+      "label": "Preprocessing Latency: KMV vs MPRW (k=32)",
+      "file_type": "figure",
+      "source_file": "springer/figure/exp/hgnn/plot1c_preprocessing_latency.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "method_glod",
+      "label": "GloD: Global KMV Approximate Degree Centrality",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/effect-global/legend-d.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "method_perd",
+      "label": "PerD: Personalized KMV Degree Centrality",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/effect-global/legend-d.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "method_perd_plus",
+      "label": "PerD+: Personalized KMV Degree Centrality (enhanced)",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/effect-global/legend-d.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "method_gloh",
+      "label": "GloH: Global KMV Approximate H-Index Centrality",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/effect-global/legend-h.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "method_perh",
+      "label": "PerH: Personalized KMV H-Index Centrality",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/effect-global/legend-h.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "method_perh_plus",
+      "label": "PerH+: Personalized KMV H-Index Centrality (enhanced)",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/effect-global/legend-h.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "method_kmv",
+      "label": "KMV: K-Minimum Values MinHash Sketching",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/hgnn/plot1a_memory_stacked.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "method_exact",
+      "label": "Exact: Exact Hub-Query Centrality Computation",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/hgnn/plot1a_memory_stacked.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "method_mprw",
+      "label": "MPRW: Metapath Random Walk Graph Generation",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/hgnn/plot1c_preprocessing_latency.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "dataset_acm",
+      "label": "ACM Heterogeneous Graph Dataset",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-K.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "dataset_dblp",
+      "label": "DBLP Heterogeneous Graph Dataset",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/effect-global/effect-h-dblp-varying-K.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "dataset_freebase",
+      "label": "Freebase Heterogeneous Graph Dataset",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/effect-global/effect-h-freebase-varying-K.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "dataset_imdb",
+      "label": "IMDB Heterogeneous Graph Dataset",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/effect-global/effect-h-imdb-varying-K.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "dataset_pubmed",
+      "label": "PubMed Heterogeneous Graph Dataset",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/effect-global/effect-h-pubmed-varying-K.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "param_k",
+      "label": "Parameter k: KMV Sketch Size",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-K.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "param_lambda",
+      "label": "Parameter lambda (R): KMV Approximation Threshold",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-R.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "metric_f1_accuracy",
+      "label": "F1 / Accuracy: Centrality Approximation Quality Metric",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/effect-global/effect-h-imdb-varying-K.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "metric_epsilon",
+      "label": "Epsilon: Relative Approximation Error of KMV Centrality",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/epsilon/epsilon_legend.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "finding_f1_robust_to_k",
+      "label": "Finding: F1/Accuracy is robust to k >= 4 across all datasets",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-K.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "finding_f1_robust_to_lambda",
+      "label": "Finding: F1/Accuracy is robust to lambda across all datasets",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-R.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "finding_epsilon_decreases_with_k",
+      "label": "Finding: Epsilon error decreases as k increases; H-index has lower error than Degree",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/epsilon/epsilon_dblp.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "finding_kmv_lower_memory",
+      "label": "Finding: KMV uses significantly less peak RAM than Exact during materialization",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/hgnn/plot1a_memory_stacked.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "finding_kmv_faster_than_exact",
+      "label": "Finding: KMV end-to-end execution is much faster than Exact across all datasets",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/hgnn/plot1b_time_stacked.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "finding_kmv_faster_than_mprw",
+      "label": "Finding: KMV preprocessing is much faster than MPRW across all datasets",
+      "file_type": "concept",
+      "source_file": "springer/figure/exp/hgnn/plot1c_preprocessing_latency.pdf",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    }
+  ],
+  "edges": [
+    {
+      "source": "effect_global_legend_d",
+      "target": "method_glod",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/legend-d.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_global_legend_d",
+      "target": "method_perd",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/legend-d.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_global_legend_d",
+      "target": "method_perd_plus",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/legend-d.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_global_legend_h",
+      "target": "method_gloh",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/legend-h.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_global_legend_h",
+      "target": "method_perh",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/legend-h.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_global_legend_h",
+      "target": "method_perh_plus",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/legend-h.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_d_pubmed_varying_r",
+      "target": "dataset_pubmed",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-d-pubmed-varying-R.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_d_pubmed_varying_r",
+      "target": "param_lambda",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-d-pubmed-varying-R.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_d_pubmed_varying_r",
+      "target": "method_glod",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-d-pubmed-varying-R.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_d_pubmed_varying_r",
+      "target": "method_perd",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-d-pubmed-varying-R.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_d_pubmed_varying_r",
+      "target": "method_perd_plus",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-d-pubmed-varying-R.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_d_pubmed_varying_r",
+      "target": "finding_f1_robust_to_lambda",
+      "relation": "demonstrates",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/effect-global/effect-d-pubmed-varying-R.pdf",
+      "source_location": null,
+      "weight": 0.9
+    },
+    {
+      "source": "effect_h_acm_varying_k",
+      "target": "dataset_acm",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-K.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_acm_varying_k",
+      "target": "param_k",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-K.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_acm_varying_k",
+      "target": "method_gloh",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-K.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_acm_varying_k",
+      "target": "method_perh",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-K.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_acm_varying_k",
+      "target": "method_perh_plus",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-K.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_acm_varying_k",
+      "target": "finding_f1_robust_to_k",
+      "relation": "demonstrates",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-K.pdf",
+      "source_location": null,
+      "weight": 0.9
+    },
+    {
+      "source": "effect_h_acm_varying_r",
+      "target": "dataset_acm",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-R.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_acm_varying_r",
+      "target": "param_lambda",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-R.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_acm_varying_r",
+      "target": "finding_f1_robust_to_lambda",
+      "relation": "demonstrates",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-R.pdf",
+      "source_location": null,
+      "weight": 0.9
+    },
+    {
+      "source": "effect_h_dblp_varying_k",
+      "target": "dataset_dblp",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-dblp-varying-K.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_dblp_varying_k",
+      "target": "param_k",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-dblp-varying-K.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_dblp_varying_k",
+      "target": "finding_f1_robust_to_k",
+      "relation": "demonstrates",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/effect-global/effect-h-dblp-varying-K.pdf",
+      "source_location": null,
+      "weight": 0.9
+    },
+    {
+      "source": "effect_h_dblp_varying_r",
+      "target": "dataset_dblp",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-dblp-varying-R.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_dblp_varying_r",
+      "target": "param_lambda",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-dblp-varying-R.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_dblp_varying_r",
+      "target": "finding_f1_robust_to_lambda",
+      "relation": "demonstrates",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/effect-global/effect-h-dblp-varying-R.pdf",
+      "source_location": null,
+      "weight": 0.9
+    },
+    {
+      "source": "effect_h_freebase_varying_k",
+      "target": "dataset_freebase",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-freebase-varying-K.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_freebase_varying_k",
+      "target": "param_k",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-freebase-varying-K.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_freebase_varying_k",
+      "target": "finding_f1_robust_to_k",
+      "relation": "demonstrates",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/effect-global/effect-h-freebase-varying-K.pdf",
+      "source_location": null,
+      "weight": 0.9
+    },
+    {
+      "source": "effect_h_freebase_varying_r",
+      "target": "dataset_freebase",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-freebase-varying-R.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_freebase_varying_r",
+      "target": "param_lambda",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-freebase-varying-R.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_freebase_varying_r",
+      "target": "finding_f1_robust_to_lambda",
+      "relation": "demonstrates",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/effect-global/effect-h-freebase-varying-R.pdf",
+      "source_location": null,
+      "weight": 0.9
+    },
+    {
+      "source": "effect_h_imdb_varying_k",
+      "target": "dataset_imdb",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-imdb-varying-K.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_imdb_varying_k",
+      "target": "param_k",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-imdb-varying-K.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_imdb_varying_k",
+      "target": "metric_f1_accuracy",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-imdb-varying-K.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_imdb_varying_k",
+      "target": "finding_f1_robust_to_k",
+      "relation": "demonstrates",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/effect-global/effect-h-imdb-varying-K.pdf",
+      "source_location": null,
+      "weight": 0.9
+    },
+    {
+      "source": "effect_h_imdb_varying_r",
+      "target": "dataset_imdb",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-imdb-varying-R.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_imdb_varying_r",
+      "target": "param_lambda",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-imdb-varying-R.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_imdb_varying_r",
+      "target": "metric_f1_accuracy",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-imdb-varying-R.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_imdb_varying_r",
+      "target": "finding_f1_robust_to_lambda",
+      "relation": "demonstrates",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/effect-global/effect-h-imdb-varying-R.pdf",
+      "source_location": null,
+      "weight": 0.9
+    },
+    {
+      "source": "effect_h_pubmed_varying_k",
+      "target": "dataset_pubmed",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-pubmed-varying-K.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_pubmed_varying_k",
+      "target": "param_k",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-pubmed-varying-K.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_pubmed_varying_k",
+      "target": "finding_f1_robust_to_k",
+      "relation": "demonstrates",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/effect-global/effect-h-pubmed-varying-K.pdf",
+      "source_location": null,
+      "weight": 0.9
+    },
+    {
+      "source": "effect_h_pubmed_varying_r",
+      "target": "dataset_pubmed",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-pubmed-varying-R.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_pubmed_varying_r",
+      "target": "param_lambda",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/effect-global/effect-h-pubmed-varying-R.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "effect_h_pubmed_varying_r",
+      "target": "finding_f1_robust_to_lambda",
+      "relation": "demonstrates",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/effect-global/effect-h-pubmed-varying-R.pdf",
+      "source_location": null,
+      "weight": 0.9
+    },
+    {
+      "source": "epsilon_legend",
+      "target": "method_glod",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/epsilon/epsilon_legend.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "epsilon_legend",
+      "target": "method_gloh",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/epsilon/epsilon_legend.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "epsilon_acm",
+      "target": "dataset_acm",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/epsilon/epsilon_acm.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "epsilon_acm",
+      "target": "metric_epsilon",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/epsilon/epsilon_acm.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "epsilon_acm",
+      "target": "param_k",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/epsilon/epsilon_acm.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "epsilon_acm",
+      "target": "finding_epsilon_decreases_with_k",
+      "relation": "demonstrates",
+      "confidence": "INFERRED",
+      "confidence_score": 0.85,
+      "source_file": "springer/figure/exp/epsilon/epsilon_acm.pdf",
+      "source_location": null,
+      "weight": 0.85
+    },
+    {
+      "source": "epsilon_dblp",
+      "target": "dataset_dblp",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/epsilon/epsilon_dblp.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "epsilon_dblp",
+      "target": "metric_epsilon",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/epsilon/epsilon_dblp.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "epsilon_dblp",
+      "target": "finding_epsilon_decreases_with_k",
+      "relation": "demonstrates",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/epsilon/epsilon_dblp.pdf",
+      "source_location": null,
+      "weight": 0.9
+    },
+    {
+      "source": "epsilon_freebase",
+      "target": "dataset_freebase",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/epsilon/epsilon_freebase.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "epsilon_freebase",
+      "target": "metric_epsilon",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/epsilon/epsilon_freebase.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "epsilon_freebase",
+      "target": "finding_epsilon_decreases_with_k",
+      "relation": "demonstrates",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/epsilon/epsilon_freebase.pdf",
+      "source_location": null,
+      "weight": 0.9
+    },
+    {
+      "source": "epsilon_imdb",
+      "target": "dataset_imdb",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/epsilon/epsilon_imdb.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "epsilon_imdb",
+      "target": "metric_epsilon",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/epsilon/epsilon_imdb.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "epsilon_imdb",
+      "target": "finding_epsilon_decreases_with_k",
+      "relation": "demonstrates",
+      "confidence": "INFERRED",
+      "confidence_score": 0.85,
+      "source_file": "springer/figure/exp/epsilon/epsilon_imdb.pdf",
+      "source_location": null,
+      "weight": 0.85
+    },
+    {
+      "source": "epsilon_pubmed",
+      "target": "dataset_pubmed",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/epsilon/epsilon_pubmed.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "epsilon_pubmed",
+      "target": "metric_epsilon",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/epsilon/epsilon_pubmed.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "epsilon_pubmed",
+      "target": "finding_epsilon_decreases_with_k",
+      "relation": "demonstrates",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/epsilon/epsilon_pubmed.pdf",
+      "source_location": null,
+      "weight": 0.9
+    },
+    {
+      "source": "hgnn_plot1a_memory_stacked",
+      "target": "method_kmv",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1a_memory_stacked.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1a_memory_stacked",
+      "target": "method_exact",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1a_memory_stacked.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1a_memory_stacked",
+      "target": "dataset_acm",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1a_memory_stacked.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1a_memory_stacked",
+      "target": "dataset_dblp",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1a_memory_stacked.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1a_memory_stacked",
+      "target": "dataset_imdb",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1a_memory_stacked.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1a_memory_stacked",
+      "target": "dataset_pubmed",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1a_memory_stacked.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1a_memory_stacked",
+      "target": "finding_kmv_lower_memory",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1a_memory_stacked.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1b_time_stacked",
+      "target": "method_kmv",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1b_time_stacked.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1b_time_stacked",
+      "target": "method_exact",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1b_time_stacked.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1b_time_stacked",
+      "target": "dataset_acm",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1b_time_stacked.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1b_time_stacked",
+      "target": "dataset_dblp",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1b_time_stacked.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1b_time_stacked",
+      "target": "dataset_imdb",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1b_time_stacked.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1b_time_stacked",
+      "target": "dataset_pubmed",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1b_time_stacked.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1b_time_stacked",
+      "target": "finding_kmv_faster_than_exact",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1b_time_stacked.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1c_preprocessing_latency",
+      "target": "method_kmv",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1c_preprocessing_latency.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1c_preprocessing_latency",
+      "target": "method_mprw",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1c_preprocessing_latency.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1c_preprocessing_latency",
+      "target": "dataset_acm",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1c_preprocessing_latency.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1c_preprocessing_latency",
+      "target": "dataset_dblp",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1c_preprocessing_latency.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1c_preprocessing_latency",
+      "target": "dataset_imdb",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1c_preprocessing_latency.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1c_preprocessing_latency",
+      "target": "dataset_pubmed",
+      "relation": "shows_result_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1c_preprocessing_latency.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "hgnn_plot1c_preprocessing_latency",
+      "target": "finding_kmv_faster_than_mprw",
+      "relation": "demonstrates",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "springer/figure/exp/hgnn/plot1c_preprocessing_latency.pdf",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "method_kmv",
+      "target": "method_glod",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/effect-global/legend-d.pdf",
+      "source_location": null,
+      "weight": 0.9
+    },
+    {
+      "source": "method_kmv",
+      "target": "method_gloh",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/effect-global/legend-h.pdf",
+      "source_location": null,
+      "weight": 0.9
+    },
+    {
+      "source": "finding_kmv_lower_memory",
+      "target": "finding_kmv_faster_than_exact",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "springer/figure/exp/hgnn/plot1a_memory_stacked.pdf",
+      "source_location": null,
+      "weight": 0.8
+    }
+  ],
+  "hyperedges": [
+    {
+      "id": "effect_global_h_k_sweep_all_datasets",
+      "label": "H-Index F1 vs k Sweep Across All Datasets (ACM, DBLP, Freebase, IMDB, PubMed)",
+      "nodes": [
+        "effect_h_acm_varying_k",
+        "effect_h_dblp_varying_k",
+        "effect_h_freebase_varying_k",
+        "effect_h_imdb_varying_k",
+        "effect_h_pubmed_varying_k",
+        "param_k",
+        "finding_f1_robust_to_k"
+      ],
+      "relation": "participate_in",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-K.pdf"
+    },
+    {
+      "id": "effect_global_h_r_sweep_all_datasets",
+      "label": "H-Index F1 vs Lambda Sweep Across All Datasets (ACM, DBLP, Freebase, IMDB, PubMed)",
+      "nodes": [
+        "effect_h_acm_varying_r",
+        "effect_h_dblp_varying_r",
+        "effect_h_freebase_varying_r",
+        "effect_h_imdb_varying_r",
+        "effect_h_pubmed_varying_r",
+        "param_lambda",
+        "finding_f1_robust_to_lambda"
+      ],
+      "relation": "participate_in",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/effect-global/effect-h-acm-varying-R.pdf"
+    },
+    {
+      "id": "epsilon_k_sweep_all_datasets",
+      "label": "Epsilon Error vs k Across All Datasets (ACM, DBLP, Freebase, IMDB, PubMed)",
+      "nodes": [
+        "epsilon_acm",
+        "epsilon_dblp",
+        "epsilon_freebase",
+        "epsilon_imdb",
+        "epsilon_pubmed",
+        "param_k",
+        "metric_epsilon",
+        "finding_epsilon_decreases_with_k"
+      ],
+      "relation": "participate_in",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/epsilon/epsilon_dblp.pdf"
+    },
+    {
+      "id": "hgnn_scalability_comparison",
+      "label": "HGNN Scalability: Memory, Time, and Preprocessing Comparison (Exact vs KMV vs MPRW)",
+      "nodes": [
+        "hgnn_plot1a_memory_stacked",
+        "hgnn_plot1b_time_stacked",
+        "hgnn_plot1c_preprocessing_latency",
+        "method_kmv",
+        "method_exact",
+        "method_mprw",
+        "finding_kmv_lower_memory",
+        "finding_kmv_faster_than_exact",
+        "finding_kmv_faster_than_mprw"
+      ],
+      "relation": "participate_in",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "springer/figure/exp/hgnn/plot1a_memory_stacked.pdf"
+    }
+  ],
+  "input_tokens": 0,
+  "output_tokens": 0
+}

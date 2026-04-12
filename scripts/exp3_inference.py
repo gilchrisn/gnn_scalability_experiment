@@ -458,6 +458,11 @@ def main():
                              "sketching and MPRW walks. Use this to run inference-only "
                              "replicates with different sketch seeds while keeping the "
                              "same frozen weights and train/test partition.")
+    parser.add_argument("--skip-exact-inference", action="store_true",
+                        help="Run ExactD materialization (records time/edge count/RAM) "
+                             "but skip GNN inference for Exact rows.  Saves ~460 GB of "
+                             "tensor scratch on very large graphs.  KMV and MPRW still "
+                             "run their full inference pipelines.")
     args = parser.parse_args()
     # Resolve inference timeout: explicit --inf-timeout overrides --timeout
     args.inf_timeout = args.inf_timeout if args.inf_timeout is not None else args.timeout
@@ -677,6 +682,24 @@ def main():
                     "exact_status": f"INF_CASCADE({exact_inf_cascade})",
                 })
                 csv_fh.flush()
+                continue
+
+            # --skip-exact-inference: record materialization stats only, skip GNN.
+            if args.skip_exact_inference:
+                csv_w.writerow({
+                    **{f: "" for f in _FIELDS},
+                    "Dataset": args.dataset, "MetaPath": args.metapath,
+                    "L": L, "Method": "Exact", "k_value": "",
+                    "Materialization_Time": _fmt(t_exact_mat),
+                    "Mat_RAM_MB": _fmt(exact_mat_mb, 1) if exact_mat_mb else "",
+                    "Edge_Count": exact_edge_count,
+                    "Graph_Density": _graph_density(exact_edge_count, n_target),
+                    "exact_status": "MAT_ONLY",
+                })
+                csv_fh.flush()
+                log.info("  [Exact L=%d] --skip-exact-inference: mat_time=%.2fs  edges=%d  mat_ram=%s",
+                         L, t_exact_mat, exact_edge_count,
+                         f"{exact_mat_mb:.0f}MB" if exact_mat_mb else "n/a")
                 continue
 
             inf_res, z_path, layers_path = _inf_subprocess(
