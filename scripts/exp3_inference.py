@@ -52,6 +52,7 @@ import subprocess
 import sys
 import threading
 import time
+import tracemalloc
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -296,14 +297,13 @@ _MPRW_CALIB_MAX_DOUBLINGS = 20   # Phase 1 safeguard: cap at 2^20 walks
 
 
 def _find_overshoot_w(
-    g_full: "HeteroData",
-    mprw_triples: list,
-    target_ntype: str,
+    meta_file: str,
+    work_dir: Path,
+    worker_script: str,
     target_edges: int,
     seed: int,
-    device: torch.device,
     log: logging.Logger,
-    baseline_rss: float = 0.0,
+    timeout: Optional[float] = None,
 ) -> Tuple[int, Optional[torch.Tensor], bool, float, float]:
     """
     Three-phase MPRW calibration pipeline.
@@ -314,27 +314,39 @@ def _find_overshoot_w(
               MPRW(w) >= target_edges; caches the edge_index at best_w to avoid
               a redundant final re-run.
 
+    Each iteration runs via mprw_worker.py subprocess so peak_ram_mb is measured
+    via resource.getrusage in a fresh process — same method as KMV C++ measurement.
+    Peak_RAM = max across all Phase 1 + Phase 2 iterations (Phase 1 overshoot
+    is structurally the largest and is captured here).
+
     Returns:
         (best_w, best_edge_index, found_valid, calib_peak_ram_mb, best_w_run_time_s)
-        found_valid=False means topology is exhausted (Phase 1 safeguard hit);
-            caller should truncate to whatever is available.
-        calib_peak_ram_mb = global max RSS delta above baseline_rss across all
-            Phase 1 + Phase 2 MPRW runs — intentionally captures the Phase 1
-            overshoot peak which is the true hardware high-water mark.
-        best_w_run_time_s = wall time of the specific best_w run in Phase 2,
-            used by the caller to compute Final_Walk_Time = best_w_run + truncation.
+        found_valid=False means topology is exhausted (Phase 1 safeguard hit).
+        best_w_run_time_s = wall time of the specific best_w run (for Final_Walk_Time).
     """
-    peak_rss_delta = 0.0
+    peak_ram_mb = 0.0
 
     def _run(w: int) -> Tuple[int, torch.Tensor, float]:
-        nonlocal peak_rss_delta
-        kern = MPRWKernel(k=w, seed=seed, device=device)
+        nonlocal peak_ram_mb
+        tmp_out = str(work_dir / f"_calib_{w}.pt")
+        cmd = [sys.executable, worker_script, meta_file, tmp_out, str(w), str(seed)]
         t0 = time.perf_counter()
-        with _PeakRSSMonitor() as mon:
-            data, _ = kern.materialize(g_full, mprw_triples, target_ntype)
+        res = subprocess.run(cmd, check=True, capture_output=True, text=True,
+                             timeout=timeout)
         t_run = time.perf_counter() - t0
-        peak_rss_delta = max(peak_rss_delta, mon.peak_delta_mb)
-        return data.edge_index.size(1), data.edge_index, t_run
+        ei = torch.load(tmp_out, weights_only=True)
+        try:
+            os.remove(tmp_out)
+        except OSError:
+            pass
+        for line in res.stdout.split("\n"):
+            if line.strip().lower().startswith("peak_ram_mb:"):
+                try:
+                    peak_ram_mb = max(peak_ram_mb, float(line.split(":", 1)[1]))
+                except ValueError:
+                    pass
+                break
+        return ei.size(1), ei, t_run
 
     # ── Phase 1: Exponential Bounding ──────────────────────────────────────
     log.debug("  [calibration] Phase 1: exponential bounding")
@@ -354,7 +366,7 @@ def _find_overshoot_w(
             "  [calibration] topology exhausted at w=%d: edges=%d < target=%d",
             w, count, target_edges,
         )
-        return w, ei, False, peak_rss_delta, 0.0
+        return w, ei, False, peak_ram_mb, 0.0
 
     w_high = w
     w_low = max(1, w // 2)
@@ -381,7 +393,7 @@ def _find_overshoot_w(
 
     log.info("  [calibration] best_w=%d  edges=%d  (target=%d)",
              best_w, best_ei.size(1), target_edges)
-    return best_w, best_ei, True, peak_rss_delta, t_best_w_run
+    return best_w, best_ei, True, peak_ram_mb, t_best_w_run
 
 
 def _truncate_to_target(
@@ -1050,25 +1062,38 @@ def main():
         t_calib_start = time.perf_counter()
         target_edges = kmv_edges_by_k.get(k)
         if target_edges is None:
-            # Fallback: no KMV reference — materialise w=k directly in-process.
-            kern = MPRWKernel(k=k, seed=kmv_seed, device=device)
+            # Fallback: no KMV reference — run w=k via worker for consistent RAM measurement.
+            tmp_out = str(mprw_work_dir / f"_calib_{k}.pt")
+            cmd = [sys.executable, mprw_worker, str(mprw_meta_file), tmp_out,
+                   str(k), str(kmv_seed)]
             t_walk_start = time.perf_counter()
-            with _PeakRSSMonitor() as mon:
-                data, _ = kern.materialize(g_full, mprw_triples, target_ntype)
+            res = subprocess.run(cmd, check=True, capture_output=True, text=True,
+                                 timeout=args.timeout)
             t_best_w_run = time.perf_counter() - t_walk_start
-            best_edge_index: Optional[torch.Tensor] = data.edge_index
+            best_edge_index: Optional[torch.Tensor] = torch.load(tmp_out, weights_only=True)
+            try:
+                os.remove(tmp_out)
+            except OSError:
+                pass
+            calib_peak_mb = 0.0
+            for line in res.stdout.split("\n"):
+                if line.strip().lower().startswith("peak_ram_mb:"):
+                    try:
+                        calib_peak_mb = float(line.split(":", 1)[1])
+                    except ValueError:
+                        pass
+                    break
             found_overshoot = False
             calibrated_w = k
-            calib_peak_mb = mon.peak_delta_mb
             log.warning("  [MPRW k=%d] KMV edge count unavailable — using w=k", k)
         else:
             log.info("  [MPRW k=%d] calibrating w for KMV edge count %d ...",
                      k, target_edges)
             calibrated_w, best_edge_index, found_overshoot, calib_peak_mb, t_best_w_run = \
                 _find_overshoot_w(
-                    g_full, mprw_triples, target_ntype,
-                    target_edges=target_edges, seed=kmv_seed, device=device, log=log,
-                    baseline_rss=overall_baseline_rss,
+                    str(mprw_meta_file), mprw_work_dir, mprw_worker,
+                    target_edges=target_edges, seed=kmv_seed, log=log,
+                    timeout=args.timeout,
                 )
         t_calib = time.perf_counter() - t_calib_start
         log.info("  [MPRW k=%d] calibration done: w=%d  calib_time=%.2fs  calib_ram=%.0fMB",
@@ -1078,19 +1103,15 @@ def main():
         # Final_Walk_Time = simulated single best_w run + truncation step.
         mprw_out = mprw_work_dir / f"mat_mprw_{k}.pt"
         t_trunc_start = time.perf_counter()
-        with _PeakRSSMonitor() as trunc_mon:
-            if best_edge_index is not None and target_edges is not None \
-                    and best_edge_index.size(1) > target_edges:
-                final_ei = _truncate_to_target(best_edge_index, target_edges, n_target,
-                                               seed=kmv_seed)
-                log.info("  MPRW truncated: %d → %d edges (target=%d)",
-                         best_edge_index.size(1), final_ei.size(1), target_edges)
-            else:
-                final_ei = best_edge_index
+        if best_edge_index is not None and target_edges is not None \
+                and best_edge_index.size(1) > target_edges:
+            final_ei = _truncate_to_target(best_edge_index, target_edges, n_target,
+                                           seed=kmv_seed)
+            log.info("  MPRW truncated: %d → %d edges (target=%d)",
+                     best_edge_index.size(1), final_ei.size(1), target_edges)
+        else:
+            final_ei = best_edge_index
         t_trunc = time.perf_counter() - t_trunc_start
-
-        # Peak_RAM: global max across all phases (Phase 1 transient overshoot included).
-        calib_peak_mb = max(calib_peak_mb, trunc_mon.peak_delta_mb)
 
         # Final_Walk_Time per spec: time of the single best_w run + truncation.
         t_final_walk = t_best_w_run + t_trunc
