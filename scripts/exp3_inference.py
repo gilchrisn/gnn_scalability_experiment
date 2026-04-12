@@ -670,6 +670,14 @@ def main():
 
     if args.skip_exact:
         log.info("--skip-exact: skipping entire ExactD block (Exact results assumed in CSV).")
+        # Still populate z_exact_by_L from scratch so KMV/MPRW can compute CKA.
+        for L in args.depth:
+            _z      = str(scratch_dir / f"z_exact_L{L}.pt")
+            _layers = _z.replace(".pt", "_layers.pt")
+            if os.path.exists(_z):
+                z_exact_by_L[L] = _z
+            if os.path.exists(_layers):
+                layers_exact_by_L[L] = _layers
     else:
         log.info("\n--- Running ExactD on full graph ---")
         try:
