@@ -233,7 +233,7 @@ def collect_stats(
     # ------------------------------------------------------------------
     print("[1/4] Loading graph …")
     t0 = time.time()
-    g = DatasetFactory.load(dataset_key)
+    g, _ = DatasetFactory.get_data(cfg.source, cfg.dataset_name, cfg.target_node)
     print(f"      loaded in {time.time()-t0:.1f}s")
 
     target_type = cfg.target_node
