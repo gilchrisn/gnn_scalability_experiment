@@ -1,59 +1,56 @@
 """
 scripts/table5_stats.py — HGNN Evaluation Graph Statistics (Springer Table 5)
 
-For each dataset, finds the densest metapath (by raw HG edge count |E*|),
-then runs the C++ `materialize` and `sketch` commands to collect:
+Runs over ALL configured metapaths per dataset and collects:
 
-  |V|      — target node count
-  |E*|     — matching graph edges (unique raw HG edges along metapath)
-  |Eexact| — exact relational graph edges (output of `materialize`)
-  |Ekmv|   — KMV-reconstructed edges at k=32 (output of `sketch k=32`)
+  |V|       — target node count
+  |E*|      — matching graph edges (sparse matmul over metapath hops)
+  |Eexact|  — exact relational graph edges (C++ `materialize` output)
+  |Ekmv|    — KMV-reconstructed edges at k=32 (C++ `sketch` output)
   rho_exact — exact graph density = |Eexact| / (|V| * (|V| - 1))
 
-The "densest" metapath is the one with the largest |E*| (proxy: unique raw HG
-edges along the metapath, computed directly from the PyG graph without any C++
-calls).  Pass --metapath to override per dataset.
+One CSV row per (dataset, metapath).
 
 Usage
 -----
-    # All 6 paper datasets, default k=32, 10-min C++ timeout
+    # All metapaths for all 6 paper datasets
     python scripts/table5_stats.py
 
     # Specific datasets only
-    python scripts/table5_stats.py --datasets HGB_DBLP HGB_ACM OGB_MAG
+    python scripts/table5_stats.py --datasets HGB_DBLP HGB_ACM
 
-    # Override metapath for one dataset
+    # Single metapath override (skips the rest)
     python scripts/table5_stats.py --datasets HGB_DBLP \\
         --metapath "author_to_paper,paper_to_author"
 
-    # Skip C++ calls (PyG stats only — no Eexact/Ekmv)
+    # PyG stats only — no C++ calls
     python scripts/table5_stats.py --skip-cpp
 
-    # Custom k and timeout
+    # Custom k and per-command timeout
     python scripts/table5_stats.py --k 32 --timeout 1800
 
 Output
 ------
-  results/table5/table5_stats.csv  (one row per dataset)
+  results/table5/table5_stats.csv  (one row per dataset × metapath)
   results/table5/table5_stats.txt  (human-readable table)
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
+import io
 import os
 import subprocess
 import sys
 import time
 import types as _types
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
-# Graceful torch_sparse stub (for import-only environments)
 if "torch_sparse" not in sys.modules:
     try:
         import torch_sparse  # noqa: F401
@@ -66,10 +63,6 @@ from src.data import DatasetFactory
 from src.bridge import PyGToCppAdapter
 from scripts.bench_utils import compile_rule_for_cpp
 
-# ---------------------------------------------------------------------------
-# Datasets for Table 5 (in paper order)
-# ---------------------------------------------------------------------------
-
 TABLE5_DATASETS: List[str] = [
     "HGB_IMDB",
     "HNE_PubMed",
@@ -80,43 +73,54 @@ TABLE5_DATASETS: List[str] = [
 ]
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Core helpers
 # ---------------------------------------------------------------------------
 
 
-def _e_star_from_pyg(metapath_str: str, g_hetero) -> int:
-    """Compute |E*|: total unique raw HG edges along the metapath.
+def _e_star_from_pyg(metapath_str: str, g_hetero, max_nodes: int = 50_000) -> Optional[int]:
+    """Matching graph edges via sparse matmul: A_0 @ A_1 @ ... @ A_{n-1}.
 
-    Each unique edge type in the metapath is counted exactly once, regardless
-    of how many times it appears in the path string.  This gives the size of
-    the matching graph G* (the HIN subgraph induced by the metapath edge types).
+    Binarises after each hop to count unique (src, dst) pairs.
+    Returns None when any node dimension exceeds `max_nodes` (OOM guard).
     """
+    import numpy as np
+    import scipy.sparse as sp
     from src.utils import SchemaMatcher
 
     hops = [h.strip() for h in metapath_str.split(",")]
-    seen: set = set()
-    total = 0
+    mats = []
     for rel_str in hops:
         try:
             et = SchemaMatcher.match(rel_str, g_hetero)
-            if et not in seen:
-                seen.add(et)
-                total += g_hetero[et].num_edges
         except Exception as exc:
-            print(f"  [warn] Could not resolve edge type '{rel_str}': {exc}")
-    return total
+            print(f"    [warn] cannot resolve '{rel_str}': {exc}")
+            return None
+
+        src_type, _, dst_type = et
+        n_src = g_hetero[src_type].num_nodes
+        n_dst = g_hetero[dst_type].num_nodes
+        if n_src > max_nodes or n_dst > max_nodes:
+            print(f"    [skip E*] {src_type}({n_src:,}) or {dst_type}({n_dst:,}) > {max_nodes:,}")
+            return None
+
+        ei = g_hetero[et].edge_index.numpy()
+        data = np.ones(ei.shape[1], dtype=np.float32)
+        mats.append(sp.csr_matrix((data, (ei[0], ei[1])), shape=(n_src, n_dst)))
+
+    result = mats[0]
+    for mat in mats[1:]:
+        result = result.dot(mat)
+        result = result.astype(bool).astype(np.float32)  # binarise
+
+    return int(result.nnz)
 
 
 def _count_adj_edges(filepath: str) -> int:
-    """Count directed edges in a C++ adjacency-list file.
-
-    Format (one node per line):  <node_id> <nbr1> <nbr2> ...
-    Edge count = sum of (len(parts) - 1) over all non-empty lines.
-    """
-    total = 0
+    """Count directed edges in a C++ adjacency-list file (node_id nbr1 nbr2 ...)."""
     if not os.path.exists(filepath):
         return 0
-    with open(filepath, "r") as fh:
+    total = 0
+    with open(filepath) as fh:
         for line in fh:
             parts = line.split()
             if len(parts) > 1:
@@ -124,101 +128,64 @@ def _count_adj_edges(filepath: str) -> int:
     return total
 
 
-def _run_materialize(
-    binary: str,
-    data_dir: str,
-    rule_file: str,
-    output_file: str,
-    timeout: int,
-) -> Optional[int]:
-    """Run `materialize` and return the edge count (or None on failure)."""
+def _run_materialize(binary: str, data_dir: str, rule_file: str,
+                     output_file: str, timeout: int) -> Optional[int]:
     cmd = [binary, "materialize", data_dir, rule_file, output_file]
-    print(f"  > {' '.join(cmd)}")
+    print(f"    > materialize …")
     try:
-        subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        print(f"  [timeout] materialize timed out after {timeout}s")
+        print(f"    [timeout] materialize timed out after {timeout}s")
         return None
     except subprocess.CalledProcessError as exc:
-        print(f"  [error] materialize exited {exc.returncode}")
+        print(f"    [error] materialize exited {exc.returncode}")
         if exc.stderr:
-            print(f"  STDERR: {exc.stderr.strip()[:300]}")
+            print(f"    STDERR: {exc.stderr.strip()[:300]}")
         return None
-
     n = _count_adj_edges(output_file)
-    print(f"  |Eexact| = {n:,}")
+    print(f"    |Eexact| = {n:,}")
     return n
 
 
-def _run_sketch(
-    binary: str,
-    data_dir: str,
-    rule_file: str,
-    output_base: str,
-    k: int,
-    timeout: int,
-) -> Optional[int]:
-    """Run `sketch k=<k>` and return the edge count (or None on failure).
-
-    The binary writes to `<output_base>_0` (for L=1).
-    """
+def _run_sketch(binary: str, data_dir: str, rule_file: str,
+                output_base: str, k: int, timeout: int) -> Optional[int]:
     cmd = [binary, "sketch", data_dir, rule_file, output_base, str(k), "1", str(k)]
-    print(f"  > {' '.join(cmd)}")
+    print(f"    > sketch k={k} …")
     try:
-        subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        print(f"  [timeout] sketch timed out after {timeout}s")
+        print(f"    [timeout] sketch timed out after {timeout}s")
         return None
     except subprocess.CalledProcessError as exc:
-        print(f"  [error] sketch exited {exc.returncode}")
+        print(f"    [error] sketch exited {exc.returncode}")
         if exc.stderr:
-            print(f"  STDERR: {exc.stderr.strip()[:300]}")
+            print(f"    STDERR: {exc.stderr.strip()[:300]}")
         return None
-
-    actual_output = output_base + "_0"
-    n = _count_adj_edges(actual_output)
-    print(f"  |Ekmv| (k={k}) = {n:,}")
+    n = _count_adj_edges(output_base + "_0")
+    print(f"    |Ekmv| (k={k}) = {n:,}")
     return n
 
 
 def _density(e_exact: Optional[int], n_nodes: int) -> str:
-    """Directed graph density: |Eexact| / (|V| * (|V| - 1)).
-
-    Self-loops are added by downstream code (n_nodes of them), so subtract
-    them before computing density.  Returns '' if inputs are invalid.
-    """
     if e_exact is None or n_nodes <= 1:
         return ""
-    real_edges = max(0, e_exact - n_nodes)  # strip self-loops
-    denom = n_nodes * (n_nodes - 1)
-    return f"{real_edges / denom:.3e}"
+    real_edges = max(0, e_exact - n_nodes)   # strip self-loops added by engine
+    return f"{real_edges / (n_nodes * (n_nodes - 1)):.3e}"
 
 
 # ---------------------------------------------------------------------------
-# Stage + collect stats for one dataset
+# Per-dataset collector
 # ---------------------------------------------------------------------------
 
 
-def collect_stats(
+def collect_dataset(
     dataset_key: str,
-    metapath_override: Optional[str],
+    metapath_filter: Optional[str],
     k: int,
     timeout: int,
     skip_cpp: bool,
-) -> Dict:
-    """Load graph, pick densest metapath, run C++, return stats dict."""
+) -> List[Dict]:
+    """Return one row dict per metapath for this dataset."""
 
     cfg = config.get_dataset_config(dataset_key)
     folder_name = config.get_folder_name(dataset_key)
@@ -228,94 +195,78 @@ def collect_stats(
     print(f"Dataset: {dataset_key}  (folder: {folder_name})")
     print(f"{'='*60}")
 
-    # ------------------------------------------------------------------
-    # Load graph
-    # ------------------------------------------------------------------
-    print("[1/4] Loading graph …")
+    # Load graph (once per dataset)
+    print("[1] Loading graph …")
     t0 = time.time()
     g, _ = DatasetFactory.get_data(cfg.source, cfg.dataset_name, cfg.target_node)
-    print(f"      loaded in {time.time()-t0:.1f}s")
+    print(f"    loaded in {time.time()-t0:.1f}s")
 
-    target_type = cfg.target_node
-    n_v = g[target_type].num_nodes
-    print(f"      |V| ({target_type}) = {n_v:,}")
+    n_v = g[cfg.target_node].num_nodes
+    print(f"    |V| ({cfg.target_node}) = {n_v:,}")
 
+    # Decide which metapaths to run
     metapaths = cfg.suggested_paths
     if not metapaths:
-        print("  [skip] no metapaths configured")
-        return {"dataset": dataset_key, "error": "no metapaths"}
+        print("    [skip] no metapaths configured")
+        return [{"Dataset": dataset_key, "error": "no metapaths configured"}]
 
-    # ------------------------------------------------------------------
-    # Pick densest metapath (by |E*| proxy from PyG)
-    # ------------------------------------------------------------------
-    print("[2/4] Selecting densest metapath …")
-    if metapath_override:
-        best_mp = metapath_override
-        best_e_star = _e_star_from_pyg(best_mp, g)
-        print(f"      (override) {best_mp}  |E*|={best_e_star:,}")
-    else:
-        best_mp: str = metapaths[0]
-        best_e_star: int = 0
-        for mp in metapaths:
-            e_star = _e_star_from_pyg(mp, g)
-            print(f"      {mp}  |E*|={e_star:,}")
-            if e_star > best_e_star:
-                best_e_star = e_star
-                best_mp = mp
-        print(f"  --> densest: {best_mp}  |E*|={best_e_star:,}")
+    if metapath_filter:
+        if metapath_filter not in metapaths:
+            print(f"    [warn] --metapath not in config list; running it anyway")
+        metapaths = [metapath_filter]
 
-    # ------------------------------------------------------------------
-    # Stage C++ files (skip if already present)
-    # ------------------------------------------------------------------
-    print("[3/4] Staging C++ files …")
+    # Stage C++ files once (shared across all metapaths)
+    print("[2] Staging C++ files …")
     meta_dat = os.path.join(data_dir, "meta.dat")
     if os.path.exists(meta_dat):
-        print("      (already staged — skipping write)")
+        print("    (already staged — skipping)")
     else:
-        adapter = PyGToCppAdapter(data_dir)
-        adapter.convert(g)
-        print("      staging complete")
+        PyGToCppAdapter(data_dir).convert(g)
+        print("    staging complete")
 
-    compile_rule_for_cpp(best_mp, g, data_dir, folder_name)
+    binary = config.CPP_EXECUTABLE
+    rows: List[Dict] = []
 
-    # ------------------------------------------------------------------
-    # Run C++ commands
-    # ------------------------------------------------------------------
-    e_exact: Optional[int] = None
-    e_kmv: Optional[int] = None
+    for i, mp in enumerate(metapaths, 1):
+        print(f"\n  [{i}/{len(metapaths)}] {mp}")
 
-    if not skip_cpp:
-        print("[4/4] Running C++ commands …")
-        binary = config.CPP_EXECUTABLE
-        rule_file = os.path.join(data_dir, f"cod-rules_{folder_name}.limit")
+        # |E*| via sparse matmul
+        e_star = _e_star_from_pyg(mp, g)
+        e_star_str = f"{e_star:,}" if e_star is not None else "n/a"
+        print(f"    |E*| = {e_star_str}")
 
-        # materialize → |Eexact|
-        mat_out = os.path.join(data_dir, "table5_exact.adj")
-        e_exact = _run_materialize(binary, data_dir, rule_file, mat_out, timeout)
+        e_exact: Optional[int] = None
+        e_kmv: Optional[int] = None
 
-        # sketch → |Ekmv|
-        sketch_base = os.path.join(data_dir, "table5_sketch")
-        e_kmv = _run_sketch(binary, data_dir, rule_file, sketch_base, k, timeout)
-    else:
-        print("[4/4] Skipping C++ (--skip-cpp)")
+        if not skip_cpp:
+            # Compile rule for this metapath
+            compile_rule_for_cpp(mp, g, data_dir, folder_name)
+            rule_file = os.path.join(data_dir, f"cod-rules_{folder_name}.limit")
 
-    rho = _density(e_exact, n_v)
-    e_kmv_bound = n_v * k  # theoretical max
+            # Use metapath index to avoid output file collisions
+            safe_idx = str(i)
+            mat_out = os.path.join(data_dir, f"table5_exact_{safe_idx}.adj")
+            sketch_base = os.path.join(data_dir, f"table5_sketch_{safe_idx}")
 
-    return {
-        "Dataset": dataset_key,
-        "MetaPath": best_mp,
-        "|V|": n_v,
-        "|E*|": best_e_star,
-        "|Eexact|": "" if e_exact is None else e_exact,
-        "|Ekmv|": "" if e_kmv is None else e_kmv,
-        "|V|*k_bound": e_kmv_bound,
-        "rho_exact": rho,
-    }
+            e_exact = _run_materialize(binary, data_dir, rule_file, mat_out, timeout)
+            e_kmv = _run_sketch(binary, data_dir, rule_file, sketch_base, k, timeout)
+
+        rows.append({
+            "Dataset":   dataset_key,
+            "MetaPath":  mp,
+            "|V|":       n_v,
+            "|E*|":      "" if e_star is None else e_star,
+            "|Eexact|":  "" if e_exact is None else e_exact,
+            "|Ekmv|":    "" if e_kmv is None else e_kmv,
+            "|V|*k":     n_v * k,
+            "rho_exact": _density(e_exact, n_v),
+        })
+
+    return rows
 
 
 # ---------------------------------------------------------------------------
-# Pretty-print table
+# Pretty-print
 # ---------------------------------------------------------------------------
 
 
@@ -324,8 +275,7 @@ def _print_table(rows: List[Dict]) -> None:
     widths = {c: max(len(c), max((len(str(r.get(c, ""))) for r in rows), default=0))
               for c in cols}
     sep = "  ".join("-" * widths[c] for c in cols)
-    hdr = "  ".join(c.ljust(widths[c]) for c in cols)
-    print("\n" + hdr)
+    print("\n" + "  ".join(c.ljust(widths[c]) for c in cols))
     print(sep)
     for r in rows:
         print("  ".join(str(r.get(c, "")).ljust(widths[c]) for c in cols))
@@ -340,88 +290,77 @@ def _print_table(rows: List[Dict]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Collect Table 5 graph statistics.")
     parser.add_argument(
-        "--datasets",
-        nargs="+",
-        default=TABLE5_DATASETS,
-        metavar="DATASET",
+        "--datasets", nargs="+", default=TABLE5_DATASETS, metavar="DATASET",
         help="Dataset keys to process (default: all 6 paper datasets)",
     )
     parser.add_argument(
-        "--metapath",
-        default=None,
-        help="Override metapath (applied to every dataset — useful for single-dataset runs)",
+        "--metapath", default=None,
+        help="Run only this metapath for every specified dataset (skips all others)",
     )
     parser.add_argument(
-        "--k",
-        type=int,
-        default=32,
-        help="KMV sketch width k (default: 32)",
+        "--k", type=int, default=32,
+        help="KMV sketch width (default: 32)",
     )
     parser.add_argument(
-        "--timeout",
-        type=int,
-        default=600,
+        "--timeout", type=int, default=600,
         help="Per-command C++ timeout in seconds (default: 600)",
     )
     parser.add_argument(
-        "--skip-cpp",
-        action="store_true",
-        help="Skip C++ calls; only report |V| and |E*| from PyG",
+        "--skip-cpp", action="store_true",
+        help="Skip C++ materialize/sketch; report only |V| and |E*| from PyG",
     )
     parser.add_argument(
-        "--out-dir",
-        default=os.path.join(project_root, "results", "table5"),
-        help="Output directory for CSV and text table",
+        "--out-dir", default=os.path.join(project_root, "results", "table5"),
+        help="Output directory",
     )
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    rows: List[Dict] = []
+    all_rows: List[Dict] = []
     for ds_key in args.datasets:
         try:
-            row = collect_stats(
+            rows = collect_dataset(
                 dataset_key=ds_key,
-                metapath_override=args.metapath,
+                metapath_filter=args.metapath,
                 k=args.k,
                 timeout=args.timeout,
                 skip_cpp=args.skip_cpp,
             )
         except Exception as exc:
+            import traceback
             print(f"[ERROR] {ds_key}: {exc}")
-            row = {"Dataset": ds_key, "error": str(exc)}
-        rows.append(row)
+            traceback.print_exc()
+            rows = [{"Dataset": ds_key, "error": str(exc)}]
+        all_rows.extend(rows)
 
-    # Print human-readable table
-    valid_rows = [r for r in rows if "error" not in r]
+    valid_rows = [r for r in all_rows if "error" not in r]
+
     if valid_rows:
         _print_table(valid_rows)
 
-    # Write CSV
-    csv_path = os.path.join(args.out_dir, "table5_stats.csv")
-    all_keys = list({k for r in rows for k in r.keys()})
-    ordered_keys = [
-        "Dataset", "MetaPath", "|V|", "|E*|", "|Eexact|", "|Ekmv|",
-        "|V|*k_bound", "rho_exact", "error",
-    ]
+    # CSV
+    ordered_keys = ["Dataset", "MetaPath", "|V|", "|E*|", "|Eexact|", "|Ekmv|",
+                    "|V|*k", "rho_exact", "error"]
+    all_keys = list({k for r in all_rows for k in r})
     fieldnames = [k for k in ordered_keys if k in all_keys] + \
                  [k for k in all_keys if k not in ordered_keys]
 
+    csv_path = os.path.join(args.out_dir, "table5_stats.csv")
     with open(csv_path, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(rows)
-    print(f"CSV saved → {csv_path}")
+        writer.writerows(all_rows)
+    print(f"CSV → {csv_path}")
 
-    # Write text table
+    # TXT
     txt_path = os.path.join(args.out_dir, "table5_stats.txt")
-    import io, contextlib
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         _print_table(valid_rows)
     with open(txt_path, "w") as fh:
         fh.write(buf.getvalue())
-    print(f"TXT saved → {txt_path}")
+    print(f"TXT → {txt_path}")
 
 
 if __name__ == "__main__":
