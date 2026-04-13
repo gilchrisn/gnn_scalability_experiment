@@ -1187,11 +1187,12 @@ def main():
                 z_exact_by_L.get(L), layers_exact_by_L.get(L),
                 z_mprw_path, layers_mprw_path, L, f"MPRW k={k}")
 
-            log.info("  [MPRW k=%d L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  inf_ram=%s  peak_ram=%.0fMB  calib=%.2fs  pred_sim=%s",
+            log.info("  [MPRW k=%d L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  inf_ram=%s  peak_ram=%.0fMB  calib=%.2fs  pred_sim=%s  inf_res_keys=%s",
                      k, L, inf_res.get("inf_f1", 0), inf_res.get("inf_de", 0),
                      inf_res.get("inf_time", 0),
                      f"{inf_res.get('inf_peak_ram_mb', 0):.0f}MB",
-                     calib_peak_mb, t_calib, pred_sim or "n/a")
+                     calib_peak_mb, t_calib, pred_sim or "n/a",
+                     sorted(inf_res.keys()))
 
             csv_w.writerow({
                 "Dataset":               args.dataset,
