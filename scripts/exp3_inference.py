@@ -553,6 +553,10 @@ def main():
                         help="Skip the entire ExactD block (materialization + inference). "
                              "Use when exact results are already present in the CSV and "
                              "you only want to (re-)run KMV and MPRW sweeps.")
+    parser.add_argument("--kmv-mat-only", action="store_true",
+                        help="Run KMV materialization only (no KMV inference rows). "
+                             "This still computes KMV edge counts used for "
+                             "density-matched MPRW calibration.")
     args = parser.parse_args()
     # Resolve inference timeout: explicit --inf-timeout overrides --timeout
     args.inf_timeout = args.inf_timeout if args.inf_timeout is not None else args.timeout
@@ -879,13 +883,14 @@ def main():
             if rss is not None and rss > args.max_rss_gb:
                 log.warning("  [KMV k=%d] RSS guard: %.1f GB > %.1f GB — skipping",
                             k, rss, args.max_rss_gb)
-                for L in args.depth:
-                    csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
-                        "Dataset": args.dataset, "MetaPath": args.metapath,
-                        "L": L, "Method": "KMV", "k_value": k,
-                        "exact_status": f"RSS_OOM({rss:.0f}GB)",
-                    }))
-                csv_fh.flush()
+                if not args.kmv_mat_only:
+                    for L in args.depth:
+                        csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
+                            "Dataset": args.dataset, "MetaPath": args.metapath,
+                            "L": L, "Method": "KMV", "k_value": k,
+                            "exact_status": f"RSS_OOM({rss:.0f}GB)",
+                        }))
+                    csv_fh.flush()
                 continue
 
         try:
@@ -898,23 +903,29 @@ def main():
                      f"{kmv_mat_mb:.0f}MB" if kmv_mat_mb else "n/a (Windows)")
         except MemoryError as e:
             log.warning("  [KMV k=%d] OOM: %s", k, e)
-            for L in args.depth:
-                csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
-                    "Dataset": args.dataset, "MetaPath": args.metapath,
-                    "L": L, "Method": "KMV", "k_value": k,
-                    "exact_status": "KMV_OOM",
-                }))
-            csv_fh.flush()
+            if not args.kmv_mat_only:
+                for L in args.depth:
+                    csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
+                        "Dataset": args.dataset, "MetaPath": args.metapath,
+                        "L": L, "Method": "KMV", "k_value": k,
+                        "exact_status": "KMV_OOM",
+                    }))
+                csv_fh.flush()
             continue
         except RuntimeError as e:
             log.warning("  [KMV k=%d] error: %s", k, e)
-            for L in args.depth:
-                csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
-                    "Dataset": args.dataset, "MetaPath": args.metapath,
-                    "L": L, "Method": "KMV", "k_value": k,
-                    "exact_status": f"KMV_ERR:{str(e)[:60]}",
-                }))
-            csv_fh.flush()
+            if not args.kmv_mat_only:
+                for L in args.depth:
+                    csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
+                        "Dataset": args.dataset, "MetaPath": args.metapath,
+                        "L": L, "Method": "KMV", "k_value": k,
+                        "exact_status": f"KMV_ERR:{str(e)[:60]}",
+                    }))
+                csv_fh.flush()
+            continue
+
+        if args.kmv_mat_only:
+            log.info("  [KMV k=%d] --kmv-mat-only: skipping KMV inference rows", k)
             continue
 
         kmv_inf_cascade: Optional[str] = None  # L-cascade flag for this k

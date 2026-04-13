@@ -4,7 +4,7 @@
 - `src/` contains the production Python code: `commands/` (CLI actions), `kernels/` (exact/KMV/MPRW materialization), `bridge/` (C++/AnyBURL adapters), `data/`, `backend/`, `analysis/`, and model modules.
 - `scripts/` contains experiment pipelines (`exp1_partition.py` to `exp5_degree_bin_eval.py`) and paper/extension runners.
 - `tests/` contains `pytest` suites (currently focused on MPRW kernel behavior).
-- `HUB/` contains C++ sources for graph materialization; `make` builds `bin/graph_prep`.
+- `HUB/` contains C++ sources for graph materialization; `make` builds `bin/graph_prep`./co
 - Runtime artifacts belong in ignored folders such as `results/`, `figures/`, `output/`, and dataset directories.
 
 ## Build, Test, and Development Commands
