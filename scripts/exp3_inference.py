@@ -557,6 +557,12 @@ def main():
                         help="Run KMV materialization only (no KMV inference rows). "
                              "This still computes KMV edge counts used for "
                              "density-matched MPRW calibration.")
+    parser.add_argument("--mprw-fixed-w", type=int, default=None,
+                        help="Use a fixed MPRW walk budget w for every k (no "
+                             "calibration/truncation). Useful for seed sweeps "
+                             "after a one-time external calibration.")
+    parser.add_argument("--skip-mprw", action="store_true",
+                        help="Skip the entire MPRW sweep.")
     args = parser.parse_args()
     # Resolve inference timeout: explicit --inf-timeout overrides --timeout
     args.inf_timeout = args.inf_timeout if args.inf_timeout is not None else args.timeout
@@ -1010,6 +1016,12 @@ def main():
             })
             csv_fh.flush()
 
+    if args.skip_mprw:
+        log.info("--skip-mprw: skipping MPRW sweep.")
+        csv_fh.close()
+        log.info("\nDone. Results -> %s", csv_path)
+        return
+
     # ------------------------------------------------------------------
     # MPRW sweep — materialization: mprw_worker net_ram_mb. Inference: subprocess.
     # ------------------------------------------------------------------
@@ -1067,16 +1079,15 @@ def main():
                 csv_fh.flush()
                 continue
 
-        # --- Phase 1 (Exponential Bounding) + Phase 2 (Binary Search) ---
-        # Calibration_Time = wall clock for these two phases combined.
-        overall_baseline_rss = _rss_mb()
-        t_calib_start = time.perf_counter()
+        # --- Calibration / fixed-w selection ---
+        # If --mprw-fixed-w is set, run one worker call with that exact w and
+        # skip the density-matching calibration + truncation logic.
         target_edges = kmv_edges_by_k.get(k)
-        if target_edges is None:
-            # Fallback: no KMV reference — run w=k via worker for consistent RAM measurement.
-            tmp_out = str(mprw_work_dir / f"_calib_{k}.pt")
+        if args.mprw_fixed_w is not None:
+            calibrated_w = max(1, int(args.mprw_fixed_w))
+            tmp_out = str(mprw_work_dir / f"_fixed_{k}.pt")
             cmd = [sys.executable, mprw_worker, str(mprw_meta_file), tmp_out,
-                   str(k), str(kmv_seed)]
+                   str(calibrated_w), str(kmv_seed)]
             t_walk_start = time.perf_counter()
             res = subprocess.run(cmd, check=True, capture_output=True, text=True,
                                  timeout=args.timeout)
@@ -1094,35 +1105,69 @@ def main():
                     except ValueError:
                         pass
                     break
-            found_overshoot = False
-            calibrated_w = k
-            log.warning("  [MPRW k=%d] KMV edge count unavailable — using w=k", k)
+            found_overshoot = True
+            t_calib = 0.0
+            log.info("  [MPRW k=%d] using fixed w=%d (no calibration/truncation)",
+                     k, calibrated_w)
         else:
-            log.info("  [MPRW k=%d] calibrating w for KMV edge count %d ...",
-                     k, target_edges)
-            calibrated_w, best_edge_index, found_overshoot, calib_peak_mb, t_best_w_run = \
-                _find_overshoot_w(
-                    str(mprw_meta_file), mprw_work_dir, mprw_worker,
-                    target_edges=target_edges, seed=kmv_seed, log=log,
-                    timeout=args.timeout,
-                )
-        t_calib = time.perf_counter() - t_calib_start
-        log.info("  [MPRW k=%d] calibration done: w=%d  calib_time=%.2fs  calib_ram=%.0fMB",
-                 k, calibrated_w, t_calib, calib_peak_mb)
+            # --- Phase 1 (Exponential Bounding) + Phase 2 (Binary Search) ---
+            # Calibration_Time = wall clock for these two phases combined.
+            t_calib_start = time.perf_counter()
+            if target_edges is None:
+                # Fallback: no KMV reference — run w=k via worker for consistent RAM measurement.
+                tmp_out = str(mprw_work_dir / f"_calib_{k}.pt")
+                cmd = [sys.executable, mprw_worker, str(mprw_meta_file), tmp_out,
+                       str(k), str(kmv_seed)]
+                t_walk_start = time.perf_counter()
+                res = subprocess.run(cmd, check=True, capture_output=True, text=True,
+                                     timeout=args.timeout)
+                t_best_w_run = time.perf_counter() - t_walk_start
+                best_edge_index = torch.load(tmp_out, weights_only=True)
+                try:
+                    os.remove(tmp_out)
+                except OSError:
+                    pass
+                calib_peak_mb = 0.0
+                for line in res.stdout.split("\n"):
+                    if line.strip().lower().startswith("peak_ram_mb:"):
+                        try:
+                            calib_peak_mb = float(line.split(":", 1)[1])
+                        except ValueError:
+                            pass
+                        break
+                found_overshoot = False
+                calibrated_w = k
+                log.warning("  [MPRW k=%d] KMV edge count unavailable — using w=k", k)
+            else:
+                log.info("  [MPRW k=%d] calibrating w for KMV edge count %d ...",
+                         k, target_edges)
+                calibrated_w, best_edge_index, found_overshoot, calib_peak_mb, t_best_w_run = \
+                    _find_overshoot_w(
+                        str(mprw_meta_file), mprw_work_dir, mprw_worker,
+                        target_edges=target_edges, seed=kmv_seed, log=log,
+                        timeout=args.timeout,
+                    )
+            t_calib = time.perf_counter() - t_calib_start
+            log.info("  [MPRW k=%d] calibration done: w=%d  calib_time=%.2fs  calib_ram=%.0fMB",
+                     k, calibrated_w, t_calib, calib_peak_mb)
 
-        # --- Phase 3: Uniform Random Truncation (in-process, cached edge set) ---
-        # Final_Walk_Time = simulated single best_w run + truncation step.
+        # --- Build final MPRW graph ---
+        # Default path keeps old behavior: truncate to KMV edge count.
         mprw_out = mprw_work_dir / f"mat_mprw_{k}.pt"
-        t_trunc_start = time.perf_counter()
-        if best_edge_index is not None and target_edges is not None \
-                and best_edge_index.size(1) > target_edges:
-            final_ei = _truncate_to_target(best_edge_index, target_edges, n_target,
-                                           seed=kmv_seed)
-            log.info("  MPRW truncated: %d → %d edges (target=%d)",
-                     best_edge_index.size(1), final_ei.size(1), target_edges)
-        else:
+        if args.mprw_fixed_w is not None:
             final_ei = best_edge_index
-        t_trunc = time.perf_counter() - t_trunc_start
+            t_trunc = 0.0
+        else:
+            t_trunc_start = time.perf_counter()
+            if best_edge_index is not None and target_edges is not None \
+                    and best_edge_index.size(1) > target_edges:
+                final_ei = _truncate_to_target(best_edge_index, target_edges, n_target,
+                                               seed=kmv_seed)
+                log.info("  MPRW truncated: %d → %d edges (target=%d)",
+                         best_edge_index.size(1), final_ei.size(1), target_edges)
+            else:
+                final_ei = best_edge_index
+            t_trunc = time.perf_counter() - t_trunc_start
 
         # Final_Walk_Time per spec: time of the single best_w run + truncation.
         t_final_walk = t_best_w_run + t_trunc
@@ -1136,6 +1181,8 @@ def main():
 
         log.info("  MPRW done: edges=%d (w=%d)  final_walk_time=%.2fs  calib_time=%.2fs  peak_ram=%.0fMB",
                  mprw_edge_count, calibrated_w, t_final_walk, t_calib, calib_peak_mb)
+        if target_edges:
+            log.info("  MPRW/KMV edge ratio: %.3f", mprw_edge_count / target_edges)
 
         mprw_inf_cascade: Optional[str] = None  # L-cascade flag for this k
 
