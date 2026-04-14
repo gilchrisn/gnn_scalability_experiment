@@ -97,8 +97,14 @@ JOBS: list[DatasetJob] = [
 # Subprocess runner
 # ---------------------------------------------------------------------------
 
+_DRY_RUN = False
+
+
 def _run(cmd: list[str], label: str) -> int:
     log.info("\n%s\n$ %s", "=" * 78, " ".join(cmd))
+    if _DRY_RUN:
+        log.info("[%s] DRY-RUN (not executed)", label)
+        return 0
     t0 = time.perf_counter()
     rc = subprocess.run(cmd, text=True).returncode
     dt = time.perf_counter() - t0
@@ -136,9 +142,14 @@ def main() -> int:
                     help="Pass --max-rss-gb to exp3 (OOM guard)")
     ap.add_argument("--continue-on-error", action="store_true",
                     help="Keep going to the next dataset if a pipeline run fails")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Print each subprocess command without executing it")
     ap.add_argument("--out-figures",  default="figures",
                     help="Directory for multi-dataset figures (default: figures/)")
     args = ap.parse_args()
+
+    global _DRY_RUN
+    _DRY_RUN = args.dry_run
 
     logging.basicConfig(
         level=logging.INFO,
