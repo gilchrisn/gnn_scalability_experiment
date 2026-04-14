@@ -14,13 +14,12 @@ low-confidence edges and reduces graph density.
 
 Design notes
 ------------
-* Fully vectorised — all N_target × k walkers advance in parallel per hop.
-  No Python loop over individual nodes.
+* Two backends: a C++ PyTorch extension (PCG32, cache-local, zero inner-loop
+  allocation) and a pure-Python fallback (vectorised PyTorch ops).
+* The C++ backend is used automatically when ``mprw_cpp`` is importable.
+  Build it with ``python setup_mprw.py build_ext --inplace``.
 * CPU-only — intentionally mirrors exp3 inference which is also CPU-only for
   fair timing.
-* Memory: O(N_target × k) walker state + O(nnz of each edge type).
-* Walkers that reach a node with no forward neighbours (degree-0 dead-end)
-  are marked invalid and excluded from the output.
 
 Comparison to KMV
 -----------------
@@ -33,12 +32,39 @@ edge-count / RAM budget, making the comparison directly meaningful.
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import List, Optional, Tuple
 
 import torch
 import torch_geometric.utils as pyg_utils
 from torch_geometric.data import Data, HeteroData
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Try to import the C++ extension.  Falls back to pure Python if unavailable.
+# On Windows the torch lib dir must be on the DLL search path before the
+# import, otherwise the .pyd loads but its own DLL dependencies can't be
+# resolved (ImportError: DLL load failed).
+# ---------------------------------------------------------------------------
+import sys as _sys, os as _os
+if _sys.platform == "win32":
+    try:
+        import torch as _torch
+        _torch_lib = _os.path.join(_os.path.dirname(_torch.__file__), "lib")
+        if _os.path.isdir(_torch_lib):
+            _os.add_dll_directory(_torch_lib)
+    except Exception:
+        pass
+
+try:
+    import mprw_cpp as _cpp
+    _HAS_CPP = True
+    log.debug("MPRW C++ backend loaded successfully.")
+except ImportError:
+    _cpp = None  # type: ignore[assignment]
+    _HAS_CPP = False
 
 
 class MPRWKernel:
@@ -77,7 +103,15 @@ class MPRWKernel:
         """
         Analytical upper bound on peak tensor memory (MB) for one materialize() call.
 
-        Dominant allocations (all [N_target × k] tensors):
+        C++ backend
+        -----------
+        O(k) per target node (terminal_nodes buffer reused), plus output vectors
+        that grow with discovered edges.  Dominant cost: output vectors ~16 bytes
+        per directed edge × 2 (src+dst) + final coalesced tensor.
+
+        Python fallback
+        ---------------
+        All [N_target × k] tensors live simultaneously:
           source_ids, current          — int64, 8 bytes each
           alive                        — bool,  1 byte
           Per walk step (reused):
@@ -86,12 +120,24 @@ class MPRWKernel:
           _build_edge_index worst case:
             src, dst arrays            — int64, 8 bytes each            (×2)
 
-        Total = (2 + 0.125 + 6 + 2) × N × k × 8 bytes
-              ≈ 10 × N × k × 8 bytes  (conservative; walk-step tensors are reused)
+        Total ≈ 10 × N × k × 8 bytes  (conservative; walk-step tensors are reused)
 
         CSR tensors (sorted_dst, offsets, counts) scale with nnz, not N×k,
         and are built once and reused across k values in exp3 — excluded here.
         """
+        if _HAS_CPP and self.device == torch.device("cpu"):
+            # C++ path: k int64 terminal buffer + output vectors.
+            # Output is bounded by n_target * avg_degree * 16 bytes, but we
+            # can't know avg_degree a priori.  Use conservative estimate:
+            # assume every walk discovers a unique edge → n_target * k * 16 bytes
+            # for (src, dst) vectors, plus the final tensor copy.
+            bytes_total = (
+                self.k * 8                    # terminal_nodes buffer
+                + n_target * self.k * 16      # worst-case out_src + out_dst
+                + n_target * self.k * 16      # final tensor (memcpy)
+            )
+            return bytes_total / (1024 ** 2)
+
         bytes_per_walker = (
             8   # source_ids int64
             + 8   # current int64
@@ -127,8 +173,6 @@ class MPRWKernel:
             raise ValueError("metapath_triples is empty")
 
         n_target = g_hetero[target_ntype].num_nodes
-        rng = torch.Generator(device=self.device)
-        rng.manual_seed(self.seed)
 
         t0 = time.perf_counter()
 
@@ -140,6 +184,34 @@ class MPRWKernel:
                 ei = g_hetero[src_t, edge_name, dst_t].edge_index.to(self.device)
                 n_src = g_hetero[src_t].num_nodes
                 csr_cache[key] = self._build_csr(ei, n_src)
+
+        # ----- C++ fast path ------------------------------------------------
+        if _HAS_CPP and self.device == torch.device("cpu"):
+            # Build ordered CSR lists matching metapath hop order.
+            csr_off_list = []
+            csr_dst_list = []
+            for (src_t, edge_name, dst_t) in metapath_triples:
+                sorted_dst, offsets, _counts = csr_cache[(src_t, edge_name, dst_t)]
+                csr_off_list.append(offsets.contiguous())
+                csr_dst_list.append(sorted_dst.contiguous())
+
+            target_ids = torch.arange(n_target, dtype=torch.int64)
+
+            edge_index = _cpp.materialize_mprw(
+                target_ids,
+                csr_off_list,
+                csr_dst_list,
+                self.k,
+                self.min_visits,
+                self.seed,
+            )
+            elapsed = time.perf_counter() - t0
+            log.debug("MPRW C++ backend: %d edges in %.3fs", edge_index.size(1), elapsed)
+            return Data(edge_index=edge_index, num_nodes=n_target), elapsed
+
+        # ----- Python fallback ----------------------------------------------
+        rng = torch.Generator(device=self.device)
+        rng.manual_seed(self.seed)
 
         # Initialise walkers: each target node spawns k walkers.
         # source_ids: [n_target * k]  — constant, used at the end for edges.

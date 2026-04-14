@@ -1,36 +1,41 @@
 """
 exp4_visualize.py — Generate paper figures from master_results.csv files.
 
-Outputs (15 total)
-------------------
-Systems (Phase I)
+Outputs
+-------
+Systems (Exact vs KMV)
   plot1a  — Peak Memory Footprint         (stacked bar: Exact vs KMV, all datasets)
   plot1b  — End-to-End Execution Time     (stacked bar: Exact vs KMV, all datasets)
-  plot1c  — Preprocessing Latency         (bar: KMV vs MPRW, all datasets)
 
 Quality gate
   table1  — Information Gain Validation   (MLP F1 | Exact GNN F1 | Delta, all datasets)
 
-Fidelity — Pareto
-  plot2   — Cost-Quality Pareto Frontier  (x=Mat RAM, y=F1, k-sweep, all datasets)
+Fidelity — L-sweep (k fixed, MPRW density-matched)
+  plot3               — Dirichlet Energy vs Depth   (Exact / KMV / MPRW)
+  plot_l_sweep_suite  — 3-panel (Dirichlet / F1 / CKA) vs L
 
-Fidelity — L-sweep (k fixed)
-  plot3   — Dirichlet Energy vs Depth     (Exact / KMV / MPRW, all datasets)
-  plot_f1_vs_depth       — Macro-F1 vs Depth L
-  plot_cka_vs_depth      — Output CKA vs Depth L
-  plot_predsim_vs_depth  — Prediction Similarity vs Depth L
-
-Fidelity — k-sweep (L fixed)
-  plot_f1_vs_k           — Macro-F1 vs k
-  plot_cka_vs_k          — Output CKA vs k
-  plot_predsim_vs_k      — Prediction Similarity vs k
+Fidelity — k-sweep (L fixed, MPRW density-matched per k)
+  plot_k_sweep_suite  — 3-panel (F1 / CKA / PredSim) vs k
 
 Fidelity — within-model CKA trajectory
-  plot_cka_per_layer     — CKA at each GNN layer (L1..L_max) for fixed k
+  plot_cka_per_layer  — CKA at each GNN layer (L1..L_max) for fixed k
+
+KMV vs MPRW on common density axis
+  plot_quality_vs_density   — F1, CKA, PredSim vs edge count
+  plot_time_vs_density      — Materialization time vs edge count
+  plot_collision_plateau    — Cumulative edges vs w (coupon collector effect)
 
 Summary tables
   table2  — Downstream Integrity (Exact F1 | KMV F1+-std | MPRW F1+-std | PA%)
   app_a   — Appendix: Meta-Path Generalization (all metapaths)
+  master  — Exhaustive CSV with mean+-std across seeds
+
+MPRW methodology
+----------------
+MPRW runs as a w-sweep (w=1,2,4,...,512).  Each w is one independent
+`mprw_exec materialize` call.  For plots that compare MPRW to KMV at a
+fixed k, the MPRW w closest in edge count (density) to KMV at that k is
+selected automatically via _pick_mprw_w().
 
 Multi-seed loading
 ------------------
@@ -51,7 +56,7 @@ Usage
     python scripts/exp4_visualize.py --metapath "paper_to_author,author_to_paper"
     python scripts/exp4_visualize.py --k-fixed 32 --l-fixed 2
     python scripts/exp4_visualize.py --depth 1 2 3 4
-    python scripts/exp4_visualize.py --plot plot1a plot2 plot_cka_vs_k
+    python scripts/exp4_visualize.py --plot plot1a plot_quality_vs_density
     python scripts/exp4_visualize.py --table table1 table2
 """
 from __future__ import annotations
@@ -101,7 +106,7 @@ _HATCH_INF = "///"
 # ── Numeric columns ───────────────────────────────────────────────────────────
 
 _NUM_COLS = [
-    "L", "k_value", "Density_Matched_w",
+    "L", "k_value", "w_value",
     "Materialization_Time", "Inference_Time",
     "Mat_RAM_MB", "Inf_RAM_MB", "Edge_Count", "Graph_Density",
     "CKA_L1", "CKA_L2", "CKA_L3", "CKA_L4",
@@ -115,38 +120,59 @@ def _load_multiseed(transfer_dir: Path, datasets: list[str]) -> pd.DataFrame:
     """Scan transfer_dir/results_<seed>/<dataset>/master_results.csv.
 
     Adds a Seed column from the directory name.
+
+    Fallback (flat layout): if no results_<seed>/ dirs exist, loads
+    transfer_dir/<dataset>/master_results.csv directly.  The Seed column
+    must already be present in the CSV (written by exp3_inference.py).
     """
     transfer_dir = Path(transfer_dir)
     seed_dirs = sorted(
         d for d in transfer_dir.iterdir()
         if d.is_dir() and re.match(r"results_\d+", d.name)
     )
-    if not seed_dirs:
-        raise FileNotFoundError(
-            f"No results_<seed>/ directories found under {transfer_dir}"
-        )
 
     frames: list[pd.DataFrame] = []
-    for sd in seed_dirs:
-        seed_val = int(sd.name.split("_", 1)[1])
+
+    if not seed_dirs:
+        # Flat layout: results/<dataset>/master_results.csv
         for ds in datasets:
-            csv = sd / ds / "master_results.csv"
+            csv = transfer_dir / ds / "master_results.csv"
             if not csv.exists():
                 warnings.warn(f"[load] Missing: {csv}")
                 continue
             df = pd.read_csv(csv, dtype=str)
-            df["_DS"]  = ds
-            df["Seed"] = seed_val
+            df["Dataset"] = ds
             frames.append(df)
-
-    if not frames:
-        raise FileNotFoundError(
-            f"No master_results.csv found in {transfer_dir} for: {datasets}"
-        )
+        if not frames:
+            raise FileNotFoundError(
+                f"No master_results.csv found under {transfer_dir} for: {datasets}"
+            )
+    else:
+        for sd in seed_dirs:
+            seed_val = int(sd.name.split("_", 1)[1])
+            for ds in datasets:
+                csv = sd / ds / "master_results.csv"
+                if not csv.exists():
+                    warnings.warn(f"[load] Missing: {csv}")
+                    continue
+                df = pd.read_csv(csv, dtype=str)
+                df["_DS"]  = ds
+                df["Seed"] = seed_val
+                frames.append(df)
+        if not frames:
+            raise FileNotFoundError(
+                f"No master_results.csv found in {transfer_dir} for: {datasets}"
+            )
+        # Merge _DS → Dataset for the multi-seed path
+        combined = pd.concat(frames, ignore_index=True)
+        combined["Dataset"] = combined["_DS"]
+        combined.drop(columns=["_DS"], inplace=True)
+        frames = [combined]
 
     df = pd.concat(frames, ignore_index=True)
-    df["Dataset"] = df["_DS"]
-    df.drop(columns=["_DS"], inplace=True)
+    if "_DS" in df.columns:
+        df["Dataset"] = df["_DS"]
+        df.drop(columns=["_DS"], inplace=True)
 
     for c in _NUM_COLS:
         if c in df.columns:
@@ -154,6 +180,10 @@ def _load_multiseed(transfer_dir: Path, datasets: list[str]) -> pd.DataFrame:
     df["Seed"]    = pd.to_numeric(df["Seed"],    errors="coerce").astype("Int64")
     df["L"]       = pd.to_numeric(df["L"],       errors="coerce").astype("Int64")
     df["k_value"] = pd.to_numeric(df["k_value"], errors="coerce").astype("Int64")
+    if "w_value" in df.columns:
+        df["w_value"] = pd.to_numeric(df["w_value"], errors="coerce").astype("Int64")
+    else:
+        df["w_value"] = pd.array([pd.NA] * len(df), dtype="Int64")
     return df
 
 
@@ -555,9 +585,7 @@ def plot3(df, datasets, out_dir, prefer_mp, k_fixed, depths):
                              & (df["L"] == L) & (df["Method"] == "KMV")
                              & (df["k_value"] == k_fixed)]
                 elif method == "MPRW":
-                    sub = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp)
-                             & (df["L"] == L) & (df["Method"] == "MPRW")
-                             & (df["k_value"] == k_fixed)]
+                    sub = _mprw_sub_for_k(df, ds, mp, L, k_fixed)
                 else:
                     sub = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp)
                              & (df["L"] == L) & (df["Method"] == "Exact")]
@@ -635,17 +663,29 @@ def plot_k_sweep_suite(df, datasets, out_dir, prefer_mp, L_fixed):
                     ax.axhline(ev, color=_C["Exact"], linestyle="--",
                                linewidth=1.8, alpha=0.85, label="Exact")
 
-            # KMV and MPRW k-sweep
-            for method in ("KMV", "MPRW"):
-                xs, ys, errs = [], [], []
-                for k in all_k:
-                    msub = base[(base["Method"] == method) & (base["k_value"] == k)]
-                    m, s = metric_fn(msub, L_fixed)
-                    if not np.isnan(m):
-                        xs.append(int(k)); ys.append(m); errs.append(s)
-                if xs:
-                    lbl = f"KMV" if method == "KMV" else "MPRW"
-                    _line_with_band(ax, xs, ys, errs, _C[method], _M[method], "-", lbl)
+            # KMV k-sweep
+            kmv_xs, kmv_ys, kmv_errs = [], [], []
+            for k in all_k:
+                ksub = base[(base["Method"] == "KMV") & (base["k_value"] == k)]
+                m, s = metric_fn(ksub, L_fixed)
+                if not np.isnan(m):
+                    kmv_xs.append(int(k)); kmv_ys.append(m); kmv_errs.append(s)
+            if kmv_xs:
+                _line_with_band(ax, kmv_xs, kmv_ys, kmv_errs,
+                                _C["KMV"], _M["KMV"], "-", "KMV")
+
+            # MPRW: density-matched to each KMV k
+            mprw_xs, mprw_ys, mprw_errs = [], [], []
+            for k in all_k:
+                msub = _mprw_sub_for_k(df, ds, mp, L_fixed, int(k))
+                if msub.empty:
+                    continue
+                m, s = metric_fn(msub, L_fixed)
+                if not np.isnan(m):
+                    mprw_xs.append(int(k)); mprw_ys.append(m); mprw_errs.append(s)
+            if mprw_xs:
+                _line_with_band(ax, mprw_xs, mprw_ys, mprw_errs,
+                                _C["MPRW"], _M["MPRW"], "-", "MPRW")
 
             if row == 1:      # CKA panel: fix y-range
                 ax.set_ylim(0.0, 1.10)
@@ -719,9 +759,7 @@ def plot_l_sweep_suite(df, datasets, out_dir, prefer_mp, k_fixed, depths):
                                  & (df["L"] == L) & (df["Method"] == "KMV")
                                  & (df["k_value"] == k_fixed)]
                     elif method == "MPRW":
-                        sub = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp)
-                                 & (df["L"] == L) & (df["Method"] == "MPRW")
-                                 & (df["k_value"] == k_fixed)]
+                        sub = _mprw_sub_for_k(df, ds, mp, L, k_fixed)
                     else:
                         sub = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp)
                                  & (df["L"] == L) & (df["Method"] == "Exact")]
@@ -796,12 +834,12 @@ def plot_cka_per_layer(df, datasets, out_dir, prefer_mp, k_fixed,
             ("KMV",  f"KMV (k={k_fixed})", "-"),
             ("MPRW", "MPRW",               "-"),
         ]:
-            sub = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp)
-                     & (df["L"] == L_for_trajectory) & (df["Method"] == method)]
             if method == "KMV":
-                sub = sub[sub["k_value"] == k_fixed]
-            elif method == "MPRW":
-                sub = sub[sub["k_value"] == k_fixed]
+                sub = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp)
+                         & (df["L"] == L_for_trajectory) & (df["Method"] == "KMV")
+                         & (df["k_value"] == k_fixed)]
+            else:  # MPRW — density-matched to KMV at k_fixed
+                sub = _mprw_sub_for_k(df, ds, mp, L_for_trajectory, k_fixed)
 
             xs, ys, errs = [], [], []
             for i, col in enumerate(layer_cols, start=1):
@@ -831,6 +869,219 @@ def plot_cka_per_layer(df, datasets, out_dir, prefer_mp, k_fixed,
     _save(fig, out_dir / "plot_cka_per_layer.pdf")
 
 
+# ── MPRW w-matching helper ──────────────────────────────────────────────────
+
+def _pick_mprw_w(df: pd.DataFrame, ds: str, mp: str, L: int,
+                 k_target: int) -> Optional[int]:
+    """Find the MPRW w_value whose mean Edge_Count is closest to KMV at k_target."""
+    kmv_sub = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp) & (df["L"] == L)
+                 & (df["Method"] == "KMV") & (df["k_value"] == k_target)]
+    kmv_ec, _ = _ms(kmv_sub, "Edge_Count")
+    if np.isnan(kmv_ec):
+        return None
+    mprw_sub = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp) & (df["L"] == L)
+                  & (df["Method"] == "MPRW")]
+    if mprw_sub.empty:
+        return None
+    best_w, best_diff = None, float("inf")
+    for w in mprw_sub["w_value"].dropna().unique():
+        wsub = mprw_sub[mprw_sub["w_value"] == w]
+        ec, _ = _ms(wsub, "Edge_Count")
+        if np.isnan(ec):
+            continue
+        diff = abs(ec - kmv_ec)
+        if diff < best_diff:
+            best_diff = diff
+            best_w = int(w)
+    return best_w
+
+
+def _mprw_sub_for_k(df: pd.DataFrame, ds: str, mp: str, L: int,
+                    k_target: int) -> pd.DataFrame:
+    """Return MPRW rows at the w closest in density to KMV at k_target."""
+    w = _pick_mprw_w(df, ds, mp, L, k_target)
+    if w is None:
+        return pd.DataFrame()
+    return df[(df["Dataset"] == ds) & (df["MetaPath"] == mp) & (df["L"] == L)
+              & (df["Method"] == "MPRW") & (df["w_value"] == w)]
+
+
+# ── New density-axis plots ──────────────────────────────────────────────────
+
+def plot_quality_vs_density(df, datasets, out_dir, prefer_mp, L_fixed):
+    """Quality metrics (F1, CKA, PredSim) vs edge count (density).
+
+    KMV dots at each k, MPRW dots at each w, on a common density x-axis.
+    """
+    print(f"\n[plot_quality_vs_density] 3-panel quality vs density (L={L_fixed})")
+    n = len(datasets)
+    fig, axes = plt.subplots(3, n, figsize=(4.5 * n, 10.5), squeeze=False)
+    ylabels = ["Macro-F1", f"CKA (L{L_fixed})", "Prediction Agreement"]
+
+    for col, ds in enumerate(datasets):
+        mp = _pick_mp(df, ds, prefer_mp, L_ref=L_fixed)
+        base = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp) & (df["L"] == L_fixed)]
+
+        for row, (metric, ylabel) in enumerate(zip(
+            ["Macro_F1", f"CKA_L{L_fixed}", "Pred_Similarity"],
+            ylabels,
+        )):
+            ax = axes[row][col]
+
+            # Exact reference line
+            esub = base[base["Method"] == "Exact"]
+            if not esub.empty:
+                ev, _ = _ms(esub, metric)
+                if not np.isnan(ev):
+                    ax.axhline(ev, color=_C["Exact"], linestyle="--",
+                               linewidth=1.8, alpha=0.85, label="Exact")
+
+            # KMV: one point per k
+            kmv_base = base[base["Method"] == "KMV"].dropna(subset=["k_value"])
+            for k in sorted(kmv_base["k_value"].dropna().unique()):
+                ksub = kmv_base[kmv_base["k_value"] == k]
+                ec, _ = _ms(ksub, "Edge_Count")
+                m, s = _ms(ksub, metric)
+                if np.isnan(ec) or np.isnan(m):
+                    continue
+                ax.errorbar(ec, m, yerr=(s if s > 0 else None),
+                            fmt="o", color=_C["KMV"], markersize=6, capsize=3,
+                            label=f"KMV" if k == min(kmv_base["k_value"].dropna().unique()) else "_")
+                ax.annotate(f"k={int(k)}", (ec, m), fontsize=5.5,
+                            xytext=(4, 4), textcoords="offset points")
+
+            # MPRW: one point per w
+            mprw_base = base[base["Method"] == "MPRW"].dropna(subset=["w_value"])
+            for w in sorted(mprw_base["w_value"].dropna().unique()):
+                wsub = mprw_base[mprw_base["w_value"] == w]
+                ec, _ = _ms(wsub, "Edge_Count")
+                m, s = _ms(wsub, metric)
+                if np.isnan(ec) or np.isnan(m):
+                    continue
+                ax.errorbar(ec, m, yerr=(s if s > 0 else None),
+                            fmt="s", color=_C["MPRW"], markersize=5, capsize=3,
+                            label=f"MPRW" if w == min(mprw_base["w_value"].dropna().unique()) else "_")
+                ax.annotate(f"w={int(w)}", (ec, m), fontsize=5.5,
+                            xytext=(4, -8), textcoords="offset points")
+
+            ax.set_xscale("log")
+            ax.set_xlabel("Edge Count")
+            ax.set_ylabel(ylabel)
+            ax.legend(fontsize=7)
+            if row == 0:
+                ax.set_title(_label(ds), fontweight="bold")
+
+    fig.suptitle(f"Quality vs. Density  (L={L_fixed})", fontsize=13, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    _save(fig, out_dir / "plot_quality_vs_density.pdf")
+
+
+def plot_time_vs_density(df, datasets, out_dir, prefer_mp, L_fixed):
+    """Materialization time vs edge count. KMV dots and MPRW dots."""
+    print(f"\n[plot_time_vs_density] Time vs density (L={L_fixed})")
+    fig, axes = _make_grid(len(datasets))
+
+    for ax, ds in zip(axes, datasets):
+        mp = _pick_mp(df, ds, prefer_mp, L_ref=L_fixed)
+        base = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp) & (df["L"] == L_fixed)]
+
+        # KMV
+        kmv_base = base[base["Method"] == "KMV"].dropna(subset=["k_value"])
+        kxs, kys = [], []
+        for k in sorted(kmv_base["k_value"].dropna().unique()):
+            ksub = kmv_base[kmv_base["k_value"] == k]
+            ec, _ = _ms(ksub, "Edge_Count")
+            t, ts = _ms(ksub, "Materialization_Time")
+            if np.isnan(ec) or np.isnan(t):
+                continue
+            ax.errorbar(ec, t, yerr=(ts if ts > 0 else None),
+                        fmt="o", color=_C["KMV"], markersize=6, capsize=3,
+                        label="KMV" if not kxs else "_")
+            ax.annotate(f"k={int(k)}", (ec, t), fontsize=5.5,
+                        xytext=(4, 4), textcoords="offset points")
+            kxs.append(ec); kys.append(t)
+        if len(kxs) > 1:
+            order = sorted(range(len(kxs)), key=lambda i: kxs[i])
+            ax.plot([kxs[i] for i in order], [kys[i] for i in order],
+                    "-", color=_C["KMV"], alpha=0.3, linewidth=1.2)
+
+        # MPRW
+        mprw_base = base[base["Method"] == "MPRW"].dropna(subset=["w_value"])
+        mxs, mys = [], []
+        for w in sorted(mprw_base["w_value"].dropna().unique()):
+            wsub = mprw_base[mprw_base["w_value"] == w]
+            ec, _ = _ms(wsub, "Edge_Count")
+            t, ts = _ms(wsub, "Materialization_Time")
+            if np.isnan(ec) or np.isnan(t):
+                continue
+            ax.errorbar(ec, t, yerr=(ts if ts > 0 else None),
+                        fmt="s", color=_C["MPRW"], markersize=5, capsize=3,
+                        label="MPRW" if not mxs else "_")
+            ax.annotate(f"w={int(w)}", (ec, t), fontsize=5.5,
+                        xytext=(4, -8), textcoords="offset points")
+            mxs.append(ec); mys.append(t)
+        if len(mxs) > 1:
+            order = sorted(range(len(mxs)), key=lambda i: mxs[i])
+            ax.plot([mxs[i] for i in order], [mys[i] for i in order],
+                    "-", color=_C["MPRW"], alpha=0.3, linewidth=1.2)
+
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("Edge Count")
+        ax.set_ylabel("Materialization Time (s)")
+        ax.set_title(_label(ds))
+        ax.legend(fontsize=7)
+
+    fig.suptitle(f"Materialization Time vs. Density  (L={L_fixed})", fontsize=12)
+    fig.tight_layout()
+    _save(fig, out_dir / "plot_time_vs_density.pdf")
+
+
+def plot_collision_plateau(df, datasets, out_dir, prefer_mp, L_fixed):
+    """Walk efficiency: cumulative unique edges vs w, with KMV reference lines.
+
+    Shows diminishing returns as w increases — the coupon collector effect.
+    """
+    print(f"\n[plot_collision_plateau] Collision plateau (L={L_fixed})")
+    fig, axes = _make_grid(len(datasets))
+
+    for ax, ds in zip(axes, datasets):
+        mp = _pick_mp(df, ds, prefer_mp, L_ref=L_fixed)
+        base = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp) & (df["L"] == L_fixed)]
+
+        # MPRW: edges vs w
+        mprw_base = base[base["Method"] == "MPRW"].dropna(subset=["w_value"])
+        ws, edges = [], []
+        for w in sorted(mprw_base["w_value"].dropna().unique()):
+            wsub = mprw_base[mprw_base["w_value"] == w]
+            ec, _ = _ms(wsub, "Edge_Count")
+            if not np.isnan(ec):
+                ws.append(int(w)); edges.append(ec)
+        if ws:
+            ax.plot(ws, edges, "s-", color=_C["MPRW"], linewidth=2,
+                    markersize=6, label="MPRW cumulative edges")
+
+        # KMV reference lines: horizontal lines at each k's edge count
+        kmv_base = base[base["Method"] == "KMV"].dropna(subset=["k_value"])
+        for k in sorted(kmv_base["k_value"].dropna().unique()):
+            ksub = kmv_base[kmv_base["k_value"] == k]
+            ec, _ = _ms(ksub, "Edge_Count")
+            if not np.isnan(ec):
+                ax.axhline(ec, color=_C["KMV"], linestyle=":", alpha=0.6, linewidth=1.2)
+                ax.text(max(ws) * 1.05 if ws else 1, ec, f"KMV k={int(k)}",
+                        fontsize=6, color=_C["KMV"], va="center")
+
+        ax.set_xscale("log", base=2)
+        ax.set_xlabel("Walks per node (w)")
+        ax.set_ylabel("Total Unique Edges")
+        ax.set_title(_label(ds))
+        ax.legend(fontsize=7, loc="lower right")
+
+    fig.suptitle(f"Walk Efficiency / Collision Plateau  (L={L_fixed})", fontsize=12)
+    fig.tight_layout()
+    _save(fig, out_dir / "plot_collision_plateau.pdf")
+
+
 # ── Table 2: Downstream Integrity ────────────────────────────────────────────
 
 def table2_integrity(df, datasets, out_dir, L_fixed, k_fixed):
@@ -842,7 +1093,10 @@ def table2_integrity(df, datasets, out_dir, L_fixed, k_fixed):
         exact_f1, _ = _ms(base[base["Method"] == "Exact"], "Macro_F1")
 
         for method in ("KMV", "MPRW"):
-            msub = base[(base["Method"] == method) & (base["k_value"] == k_fixed)]
+            if method == "KMV":
+                msub = base[(base["Method"] == "KMV") & (base["k_value"] == k_fixed)]
+            else:
+                msub = _mprw_sub_for_k(df, ds, mp, L_fixed, k_fixed)
             if msub.empty:
                 continue
             f1_m, f1_s = _ms(msub, "Macro_F1")
@@ -980,7 +1234,7 @@ def table_master_numbers(df, datasets, out_dir, depths, k_values):
                 if not esub.empty:
                     cka_col = f"CKA_L{L}"
                     row = {"Dataset": _label(ds), "MetaPath": mp, "Hops": hops,
-                           "L": L, "Method": "Exact", "k_value": ""}
+                           "L": L, "Method": "Exact", "k_value": "", "w_value": ""}
                     for col, out in [
                         ("Mat_RAM_MB",          "Mat_RAM_MB"),
                         ("Inf_RAM_MB",          "Inf_RAM_MB"),
@@ -1000,42 +1254,69 @@ def table_master_numbers(df, datasets, out_dir, depths, k_values):
                     row["CKA_final (std)"]  = ""
                     records.append(row)
 
-                # KMV and MPRW — per k
-                for method in ("KMV", "MPRW"):
-                    msub_all = base[base["Method"] == method]
-                    for k in sorted(msub_all["k_value"].dropna().unique()):
-                        if int(k) not in [int(kv) for kv in k_values]:
-                            continue
-                        msub = msub_all[msub_all["k_value"] == k]
-                        if msub.empty:
-                            continue
-                        cka_col = f"CKA_L{L}"
-                        row = {"Dataset": _label(ds), "MetaPath": mp, "Hops": hops,
-                               "L": L, "Method": method, "k_value": int(k)}
-                        for col, out in [
-                            ("Mat_RAM_MB",          "Mat_RAM_MB"),
-                            ("Inf_RAM_MB",          "Inf_RAM_MB"),
-                            ("Materialization_Time","Mat_Time"),
-                            ("Inference_Time",      "Inf_Time"),
-                            ("Macro_F1",            "Macro_F1"),
-                            ("Pred_Similarity",     "Pred_Sim"),
-                            ("Dirichlet_Energy",    "Dirichlet"),
-                        ]:
-                            m, s = _ms(msub, col)
-                            row[f"{out} (mean)"] = round(m, 6) if not np.isnan(m) else ""
-                            row[f"{out} (std)"]  = round(s, 6) if not np.isnan(m) else ""
-                        ec, _ = _ms(msub, "Edge_Count")
-                        row["Edge_Count"] = int(ec) if not np.isnan(ec) else ""
-                        cka_m, cka_s = _ms(msub, cka_col)
-                        row["CKA_final (mean)"] = round(cka_m, 6) if not np.isnan(cka_m) else ""
-                        row["CKA_final (std)"]  = round(cka_s, 6) if not np.isnan(cka_m) else ""
-                        records.append(row)
+                # KMV — per k
+                kmv_all = base[base["Method"] == "KMV"]
+                for k in sorted(kmv_all["k_value"].dropna().unique()):
+                    if int(k) not in [int(kv) for kv in k_values]:
+                        continue
+                    msub = kmv_all[kmv_all["k_value"] == k]
+                    if msub.empty:
+                        continue
+                    cka_col = f"CKA_L{L}"
+                    row = {"Dataset": _label(ds), "MetaPath": mp, "Hops": hops,
+                           "L": L, "Method": "KMV", "k_value": int(k), "w_value": ""}
+                    for col, out in [
+                        ("Mat_RAM_MB",          "Mat_RAM_MB"),
+                        ("Inf_RAM_MB",          "Inf_RAM_MB"),
+                        ("Materialization_Time","Mat_Time"),
+                        ("Inference_Time",      "Inf_Time"),
+                        ("Macro_F1",            "Macro_F1"),
+                        ("Pred_Similarity",     "Pred_Sim"),
+                        ("Dirichlet_Energy",    "Dirichlet"),
+                    ]:
+                        m, s = _ms(msub, col)
+                        row[f"{out} (mean)"] = round(m, 6) if not np.isnan(m) else ""
+                        row[f"{out} (std)"]  = round(s, 6) if not np.isnan(m) else ""
+                    ec, _ = _ms(msub, "Edge_Count")
+                    row["Edge_Count"] = int(ec) if not np.isnan(ec) else ""
+                    cka_m, cka_s = _ms(msub, cka_col)
+                    row["CKA_final (mean)"] = round(cka_m, 6) if not np.isnan(cka_m) else ""
+                    row["CKA_final (std)"]  = round(cka_s, 6) if not np.isnan(cka_m) else ""
+                    records.append(row)
+
+                # MPRW — per w
+                mprw_all = base[base["Method"] == "MPRW"]
+                for w in sorted(mprw_all["w_value"].dropna().unique()):
+                    msub = mprw_all[mprw_all["w_value"] == w]
+                    if msub.empty:
+                        continue
+                    cka_col = f"CKA_L{L}"
+                    row = {"Dataset": _label(ds), "MetaPath": mp, "Hops": hops,
+                           "L": L, "Method": "MPRW", "k_value": "", "w_value": int(w)}
+                    for col, out in [
+                        ("Mat_RAM_MB",          "Mat_RAM_MB"),
+                        ("Inf_RAM_MB",          "Inf_RAM_MB"),
+                        ("Materialization_Time","Mat_Time"),
+                        ("Inference_Time",      "Inf_Time"),
+                        ("Macro_F1",            "Macro_F1"),
+                        ("Pred_Similarity",     "Pred_Sim"),
+                        ("Dirichlet_Energy",    "Dirichlet"),
+                    ]:
+                        m, s = _ms(msub, col)
+                        row[f"{out} (mean)"] = round(m, 6) if not np.isnan(m) else ""
+                        row[f"{out} (std)"]  = round(s, 6) if not np.isnan(m) else ""
+                    ec, _ = _ms(msub, "Edge_Count")
+                    row["Edge_Count"] = int(ec) if not np.isnan(ec) else ""
+                    cka_m, cka_s = _ms(msub, cka_col)
+                    row["CKA_final (mean)"] = round(cka_m, 6) if not np.isnan(cka_m) else ""
+                    row["CKA_final (std)"]  = round(cka_s, 6) if not np.isnan(cka_m) else ""
+                    records.append(row)
 
     if not records:
         print("  [skip] No data"); return
 
     col_order = [
-        "Dataset", "MetaPath", "Hops", "L", "Method", "k_value", "Edge_Count",
+        "Dataset", "MetaPath", "Hops", "L", "Method", "k_value", "w_value", "Edge_Count",
         "Mat_RAM_MB (mean)", "Mat_RAM_MB (std)",
         "Inf_RAM_MB (mean)", "Inf_RAM_MB (std)",
         "Mat_Time (mean)",   "Mat_Time (std)",
@@ -1055,11 +1336,14 @@ def table_master_numbers(df, datasets, out_dir, depths, k_values):
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 _ALL_PLOTS  = [
-    "plot1a", "plot1b", "plot1c",
-    "plot2", "plot3",
+    "plot1a", "plot1b",
+    "plot3",
     "plot_k_sweep_suite",
     "plot_l_sweep_suite",
     "plot_cka_per_layer",
+    "plot_quality_vs_density",
+    "plot_time_vs_density",
+    "plot_collision_plateau",
 ]
 _ALL_TABLES = ["table1", "table2", "app_a", "master"]
 
@@ -1101,16 +1385,27 @@ def main():
     transfer_dir = Path(args.transfer_dir)
     out_dir      = Path(args.out_dir)
 
-    # Discover which datasets actually have data
+    # Discover which datasets actually have data.
+    # Supports two layouts:
+    #   Multi-seed: transfer_dir/results_<seed>/<dataset>/master_results.csv
+    #   Flat:       transfer_dir/<dataset>/master_results.csv
     seed_dirs = sorted(
         d for d in transfer_dir.iterdir()
         if d.is_dir() and re.match(r"results_\d+", d.name)
     ) if transfer_dir.exists() else []
 
-    datasets = [
-        d for d in args.datasets
-        if any((sd / d / "master_results.csv").exists() for sd in seed_dirs)
-    ]
+    if seed_dirs:
+        datasets = [
+            d for d in args.datasets
+            if any((sd / d / "master_results.csv").exists() for sd in seed_dirs)
+        ]
+    else:
+        # Flat layout fallback
+        datasets = [
+            d for d in args.datasets
+            if (transfer_dir / d / "master_results.csv").exists()
+        ]
+
     missing = [d for d in args.datasets if d not in datasets]
     if missing:
         warnings.warn(f"No results found for: {missing}; skipping")
@@ -1153,17 +1448,11 @@ def main():
         k_vals = sorted(df["k_value"].dropna().unique().tolist())
         table_master_numbers(df, datasets, out_dir, depths=args.depth, k_values=k_vals)
 
-    # Systems plots
+    # Systems plots (Exact vs KMV)
     if "plot1a" in plots:
         plot1a(df, datasets, out_dir, args.metapath, args.l_fixed, args.k_fixed)
     if "plot1b" in plots:
         plot1b(df, datasets, out_dir, args.metapath, args.l_fixed, args.k_fixed)
-    if "plot1c" in plots:
-        plot1c(df, datasets, out_dir, args.metapath, args.k_fixed)
-
-    # Pareto
-    if "plot2" in plots:
-        plot2(df, datasets, out_dir, args.metapath, args.l_fixed)
 
     # L-sweep (standalone Dirichlet + 3-panel suite)
     if "plot3" in plots:
@@ -1179,6 +1468,14 @@ def main():
     if "plot_cka_per_layer" in plots:
         plot_cka_per_layer(df, datasets, out_dir, args.metapath,
                            args.k_fixed, L_for_trajectory=args.cka_trajectory_l)
+
+    # Density-axis plots (KMV vs MPRW on common edge-count axis)
+    if "plot_quality_vs_density" in plots:
+        plot_quality_vs_density(df, datasets, out_dir, args.metapath, args.l_fixed)
+    if "plot_time_vs_density" in plots:
+        plot_time_vs_density(df, datasets, out_dir, args.metapath, args.l_fixed)
+    if "plot_collision_plateau" in plots:
+        plot_collision_plateau(df, datasets, out_dir, args.metapath, args.l_fixed)
 
     print(f"\nDone. {len(plots)} plots + {len(tables)} tables -> {out_dir}/")
 

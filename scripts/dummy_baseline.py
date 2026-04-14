@@ -207,7 +207,7 @@ def main():
     if args.master_csv:
         import csv as _csv
         _MASTER_FIELDS = [
-            "Dataset", "MetaPath", "L", "Method", "k_value", "Density_Matched_w",
+            "Dataset", "MetaPath", "L", "Method", "k_value", "w_value", "Seed",
             "Materialization_Time", "Inference_Time",
             "Mat_RAM_MB", "Inf_RAM_MB",
             "Edge_Count", "Graph_Density",

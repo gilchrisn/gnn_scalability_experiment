@@ -17,40 +17,28 @@ class LinearCKA:
     def __init__(self, device=None):
         self.device = device or torch.device('cpu')
 
-    def _centering(self, K):
-        """Centers the kernel matrix K (HKH)."""
-        n = K.shape[0]
-        unit = torch.ones([n, n], device=self.device)
-        I = torch.eye(n, device=self.device)
-        H = I - unit / n
-        return torch.matmul(torch.matmul(H, K), H)
-
     def calculate(self, X: torch.Tensor, Y: torch.Tensor) -> float:
         """
         Args:
             X: Embedding matrix A [N, D1]
             Y: Embedding matrix B [N, D2]
+
+        Uses the feature-space form of linear CKA:
+
+            HSIC(X, Y) = || X^T Y ||_F^2       (for mean-centered X, Y)
+            CKA(X, Y)  = HSIC(X,Y) / sqrt(HSIC(X,X) * HSIC(Y,Y))
+
+        Numerically identical to the Gram-matrix form HSIC(K_X, K_Y) =
+        tr(K_X_centered K_Y_centered), but O(N*D^2) instead of O(N^3) and
+        never materializes an N x N matrix.  For N=12k, D=64 this is a
+        ~1000x speed up and a ~1000x memory reduction vs. the n-by-n form.
         """
-        # Ensure centering of features first (optional but stable)
-        X = X - X.mean(dim=0, keepdim=True)
-        Y = Y - Y.mean(dim=0, keepdim=True)
+        X = X.to(self.device) - X.mean(dim=0, keepdim=True)
+        Y = Y.to(self.device) - Y.mean(dim=0, keepdim=True)
 
-        # Compute Gram Matrices
-        # Note: For N > 20k, this might be memory intensive. 
-        # We assume N = Test Set Size, which is usually manageable.
-        gram_x = torch.matmul(X, X.T)
-        gram_y = torch.matmul(Y, Y.T)
-
-        # Center Gram Matrices
-        gram_x_centered = self._centering(gram_x)
-        gram_y_centered = self._centering(gram_y)
-
-        # Compute HSIC (Hilbert-Schmidt Independence Criterion)
-        # HSIC(K, L) = tr(K_centered @ L_centered)
-        hsic_xy = torch.sum(gram_x_centered * gram_y_centered)
-        hsic_xx = torch.sum(gram_x_centered * gram_x_centered)
-        hsic_yy = torch.sum(gram_y_centered * gram_y_centered)
+        hsic_xy = (X.T @ Y).pow(2).sum()
+        hsic_xx = (X.T @ X).pow(2).sum()
+        hsic_yy = (Y.T @ Y).pow(2).sum()
 
         cka_score = hsic_xy / (torch.sqrt(hsic_xx) * torch.sqrt(hsic_yy))
-        
         return cka_score.item()

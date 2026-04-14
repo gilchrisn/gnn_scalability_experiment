@@ -71,8 +71,7 @@ class CppEngine(ExecutionEngine):
             if seed is not None:
                 inner_cmd.append(str(seed))
 
-        # Wrap with GNU time -v on Linux to capture child-process peak RSS.
-        # Falls back silently if the binary is unavailable (Windows, minimal containers).
+        # Wrap with GNU time -v to capture child-process peak RSS.
         time_bin = self._time_binary()
         cmd: List[str] = ([time_bin, "-v"] + inner_cmd) if time_bin else inner_cmd
 
@@ -83,7 +82,7 @@ class CppEngine(ExecutionEngine):
             res = subprocess.run(cmd, check=True, capture_output=True, text=True,
                                  timeout=timeout)
 
-            # Parse GNU time peak RSS from stderr (Linux only path).
+            # Parse GNU time peak RSS from stderr.
             # "Maximum resident set size (kbytes): 12345"
             m = re.search(r"Maximum resident set size \(kbytes\):\s+(\d+)", res.stderr)
             if m:
@@ -98,7 +97,7 @@ class CppEngine(ExecutionEngine):
                     except ValueError:
                         pass
 
-            # 2. Fallback to Total Pipeline Time (For Data Generation Mode like 'sketch')
+            # 2. Fallback to Total Pipeline Time
             return time.perf_counter() - start_fallback
 
         except subprocess.TimeoutExpired:
@@ -107,7 +106,7 @@ class CppEngine(ExecutionEngine):
                 "Increase --timeout or skip this metapath."
             ) from None
         except subprocess.CalledProcessError as e:
-            if "std::bad_alloc" in e.stderr:
+            if "std::bad_alloc" in (e.stderr or ""):
                 raise MemoryError("C++ backend exhausted available RAM.") from None
 
             print(f"\n    [C++] STDERR: {e.stderr}")

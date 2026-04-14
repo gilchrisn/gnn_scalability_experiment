@@ -3,22 +3,19 @@ mprw_worker.py — MPRW materialization subprocess.
 
 Memory measurement
 ------------------
-tracemalloc is started immediately before materialize() and stopped after.
-tracemalloc.clear_traces() resets the peak counter so the reported value is
-the true peak Python-level allocation during materialize() only, not
-accumulated from earlier setup (JSON loading, edge file reads, etc.).
-This captures all tensor constructions through Python's PyMem_Raw* layer
-regardless of whether new OS pages are faulted in — necessary because
-PyTorch's CPU caching allocator reuses pre-mapped pages, which makes
-RSS-delta approaches report 0 on small graphs.
+Peak RSS is measured by the parent process via /usr/bin/time -v (Linux/WSL),
+identical to how Exact and KMV C++ subprocesses are measured in engine.py.
+The worker itself only needs to emit algorithm time to stdout.
 
-Stdout lines (all parsed by exp3_inference.py)
------------------------------------------------
-    time: X.XXXXXX          — wall-clock seconds for materialize() only
-    peak_ram_mb: X.X        — peak tracemalloc allocation during materialize() (MB)
+Stdout lines (parsed by exp3_inference.py)
+------------------------------------------
+    time: X.XXXXXX   — perf_counter seconds for materialize() only
+                        (excludes JSON load and edge tensor reads;
+                        includes CSR build + walks, analogous to C++
+                        internal timer which excludes HeterGraph file load)
 
-Usage (internal — called by exp3_inference.py)
------------------------------------------------
+Usage (internal — called by exp3_inference.py via _run_mprw_subprocess)
+------------------------------------------------------------------------
     python scripts/mprw_worker.py <meta_json> <output_pt> <k> <seed>
 """
 from __future__ import annotations
@@ -26,36 +23,24 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
 
 # Project root on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
+
+# On Windows, PyTorch extension DLLs (mprw_cpp.pyd) can't find their
+# dependencies unless the torch lib dir is explicitly added to the DLL
+# search path.  Must happen before the mprw import below.
+if sys.platform == "win32":
+    _torch_lib = os.path.join(os.path.dirname(torch.__file__), "lib")
+    if os.path.isdir(_torch_lib):
+        os.add_dll_directory(_torch_lib)
+
 from torch_geometric.data import HeteroData
 
 from src.kernels.mprw import MPRWKernel
-
-
-def _subprocess_peak_rss_mb() -> float:
-    """OS high-water mark RSS for this process since start, in MB.
-
-    Uses resource.getrusage (Linux/macOS) — same metric as /usr/bin/time -v,
-    making MPRW memory comparable to C++ Exact/KMV measurements.
-    Falls back to psutil current RSS on Windows.
-    """
-    try:
-        import resource
-        kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        import platform
-        return kb / 1e6 if platform.system() == "Darwin" else kb / 1024.0
-    except ImportError:
-        pass
-    try:
-        import psutil
-        return psutil.Process(os.getpid()).memory_info().rss / 1e6
-    except Exception:
-        return 0.0
+from src.kernels.mprw import _HAS_CPP as _MPRW_CPP
 
 
 def main() -> None:
@@ -76,6 +61,7 @@ def main() -> None:
 
     # Reconstruct minimal HeteroData from pre-serialized edge files.
     # No features, no labels — only edge_index and num_nodes.
+    # (Graph load excluded from timer, same as C++ HeterGraph construction.)
     g = HeteroData()
     triples = []
 
@@ -90,21 +76,18 @@ def main() -> None:
         g[src_t, edge_name, dst_t].edge_index = ei
         triples.append((src_t, edge_name, dst_t))
 
+    print(f"backend: {'cpp' if _MPRW_CPP else 'python'}", file=sys.stderr)
+
     kernel = MPRWKernel(k=k, seed=seed, device=torch.device("cpu"))
-
     data, elapsed = kernel.materialize(g, triples, target_type)
-    # Peak RSS of this subprocess since start — captured immediately after
-    # materialize() so the high-water mark includes all walker-state tensors
-    # and intermediate allocations.  Comparable to /usr/bin/time -v for C++.
-    peak_ram_mb = _subprocess_peak_rss_mb()
+    # Peak RSS is captured by the parent via /usr/bin/time -v — no need to
+    # emit it here.  Only algorithm time goes to stdout.
 
-    # Write output edge_index
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     torch.save(data.edge_index, output_path)
 
-    # Emit parsed fields for exp3_inference.py
+    # Emit algorithm time — same stdout protocol as C++ binary's "time:" line.
     print(f"time: {elapsed:.6f}")
-    print(f"peak_ram_mb: {peak_ram_mb:.2f}")
 
 
 if __name__ == "__main__":

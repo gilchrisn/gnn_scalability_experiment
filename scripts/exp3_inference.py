@@ -1,29 +1,30 @@
 """
-Experiment 3 — Inference sweep: Exact vs KMV across k values.
+Experiment 3 — Inference sweep: Exact vs KMV (k-sweep) vs MPRW (w-sweep).
 
 Reads partition.json (from exp1_partition.py) and frozen weights
-(from exp2_train.py), then materializes the FULL graph with ExactD (once)
-and with KMV sketch at each k, runs the frozen SAGE model, and evaluates
-all metrics restricted to V_test nodes only.
+(from exp2_train.py), then materializes the FULL graph with ExactD (once),
+KMV sketch at each k, and MPRW at each w.  Runs the frozen SAGE model and
+evaluates all metrics restricted to V_test nodes only.
 
-The "test" set is derived from partition.json: all pivot nodes NOT in V_train.
-For temporal mode this is all nodes with year > cutoff; for random_nodes mode
-it is the (1 − train_frac) complement of the random permutation.
+MPRW runs as a **w-sweep** (w = 1, 2, 4, 8, ..., 512) where each w is one
+independent `mprw_exec materialize` call.  No calibration, no density
+matching.  Comparison against KMV uses edge count (density) as common axis.
 
 Output
 ------
   results/<dataset>/master_results.csv   (append)
-      One row per (metapath, L, Method, k_value).
-      Method="Exact"  — k-independent baseline (run once, written as k="")
-      Method="KMV"    — k-specific sketch
-      Method="MPRW"   — placeholder row (all metric cols empty)
+      One row per (metapath, L, Method, k_value/w_value, Seed).
+      Method="Exact"  — baseline (run once)
+      Method="KMV"    — k-specific sketch (k_value set)
+      Method="MPRW"   — w-specific walk budget (w_value set)
 
 CSV Schema
 ----------
-  Dataset, MetaPath, L, Method, k_value,
-  Materialization_Time, Inference_Time, Peak_RAM_MB, Edge_Count,
+  Dataset, MetaPath, L, Method, k_value, w_value, Seed,
+  Materialization_Time, Inference_Time,
+  Mat_RAM_MB, Inf_RAM_MB, Edge_Count, Graph_Density,
   CKA_L1, CKA_L2, CKA_L3, CKA_L4,
-  Pred_Similarity, Macro_F1, exact_status
+  Pred_Similarity, Macro_F1, Dirichlet_Energy, exact_status
 
 Usage
 -----
@@ -33,11 +34,11 @@ Usage
         --weights-dir results/HGB_DBLP/weights \\
         --partition-json results/HGB_DBLP/partition.json
 
-    python scripts/exp3_inference.py OGB_MAG \\
-        --metapath paper_to_author,author_to_paper \\
-        --depth 2 3 4 \\
-        --k-values 8 16 32 \\
-        --max-adj-mb 8000 --max-rss-gb 200 --timeout 3600
+    python scripts/exp3_inference.py HGB_ACM \\
+        --metapath paper_to_term,term_to_paper \\
+        --depth 2 \\
+        --k-values 2 4 8 16 32 64 \\
+        --w-values 1 2 4 8 16 32 64 128 256 512
 """
 from __future__ import annotations
 
@@ -70,7 +71,6 @@ from src.data import DatasetFactory
 from src.bridge import PyGToCppAdapter
 from src.bridge.engine import CppEngine
 from src.analysis.cka import LinearCKA
-from src.kernels.mprw import MPRWKernel, parse_metapath_triples
 from scripts.bench_utils import compile_rule_for_cpp, generate_qnodes, setup_global_res_dirs
 
 
@@ -152,6 +152,89 @@ def _make_test_mask(g_full: HeteroData, part: dict) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# MPRW subprocess helper — same measurement contract as CppEngine.run_command
+# ---------------------------------------------------------------------------
+
+def _win_to_wsl(path: str) -> str:
+    """Convert a Windows path (C:\\foo\\bar) to WSL path (/mnt/c/foo/bar)."""
+    p = os.path.abspath(path).replace("\\", "/")
+    if len(p) >= 2 and p[1] == ":":
+        drive = p[0].lower()
+        p = f"/mnt/{drive}{p[2:]}"
+    return p
+
+
+def _run_mprw_exec(
+    mprw_bin: str,
+    data_dir: str,
+    rule_file: str,
+    output_adj: str,
+    w: int,
+    seed: int,
+    timeout: int,
+) -> Tuple[float, float]:
+    """Run bin/mprw_exec materialize, mirroring CppEngine.run_command exactly.
+
+    Uses the same GNU time -v wrapping, the same stdout time: parsing, and
+    the same stderr RSS parsing as engine.py — apples-to-apples with Exact/KMV.
+
+    On Windows, the ELF binary is invoked via ``wsl`` with paths converted to
+    /mnt/... format.  GNU time -v is available inside WSL so peak RSS is measured.
+
+    Returns:
+        (algo_time_s, peak_ram_mb)
+        algo_time_s — time: value emitted by the C++ binary after graph load
+        peak_ram_mb — child process peak RSS in MB (0.0 if GNU time unavailable)
+    """
+    if sys.platform == "win32":
+        # ELF binary — must run under WSL; convert all paths
+        wsl_bin  = _win_to_wsl(mprw_bin)
+        wsl_data = _win_to_wsl(data_dir)
+        wsl_rule = _win_to_wsl(rule_file)
+        wsl_out  = _win_to_wsl(output_adj)
+        inner = f"/usr/bin/time -v {wsl_bin} materialize {wsl_data} {wsl_rule} {wsl_out} {w} {seed}"
+        cmd = ["wsl", "bash", "-c", inner]
+    else:
+        inner_cmd = [mprw_bin, "materialize",
+                     data_dir, rule_file, output_adj,
+                     str(w), str(seed)]
+        time_bin = "/usr/bin/time" if os.path.exists("/usr/bin/time") else None
+        cmd = ([time_bin, "-v"] + inner_cmd) if time_bin else inner_cmd
+
+    t_wall = time.perf_counter()
+    try:
+        res = subprocess.run(cmd, check=True, capture_output=True, text=True,
+                             timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"mprw_exec timed out after {timeout}s (w={w})")
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"mprw_exec failed (exit {e.returncode})\n"
+            f"stderr: {(e.stderr or '')[-400:]}"
+        )
+    wall_time = time.perf_counter() - t_wall
+
+    # Peak RSS from GNU time stderr (same regex as engine.py)
+    peak_ram_mb = 0.0
+    m = re.search(r"Maximum resident set size \(kbytes\):\s+(\d+)", res.stderr)
+    if m:
+        peak_ram_mb = int(m.group(1)) / 1024.0
+
+    # Algorithm time from binary stdout (same as Exact/KMV time: line)
+    algo_time = wall_time  # fallback if binary doesn't emit time:
+    for line in res.stdout.split("\n"):
+        if line.strip().lower().startswith("time:"):
+            try:
+                algo_time = float(line.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+            break
+
+    return algo_time, peak_ram_mb
+
+
+# ---------------------------------------------------------------------------
 # C++ materialization wrappers
 # ---------------------------------------------------------------------------
 
@@ -184,18 +267,17 @@ def _count_edges(filepath: str) -> int:
 
 
 def _graph_density(edge_count: Optional[int], n_nodes: int) -> str:
-    """Directed graph density of real edges, excluding artificial self-loops.
+    """Graph density from raw adjacency file edge count.
 
-    Both KMV (engine.py) and MPRW (mprw.py) unconditionally call
-    pyg_utils.add_self_loops at the end, guaranteeing exactly n_nodes
-    self-loops in every materialized graph.  Subtracting n_nodes from
-    edge_count recovers the true structural edge count, keeping density
-    strictly in [0, 1] with the standard directed-graph denominator n*(n-1).
+    edge_count is the sum of neighbor-list lengths from the raw .adj file
+    (each undirected edge counted from both endpoints).  Self-loops are NOT
+    present in the raw adj files for any method (Exact, KMV, MPRW) — they
+    are added later by PyG.  Density = edge_count / (n * (n-1)), which is
+    the fraction of possible directed edges present.
     Returns '' if inputs are invalid."""
     if edge_count is None or n_nodes <= 1:
         return ""
-    real_edges = max(0, edge_count - n_nodes)
-    return f"{real_edges / (n_nodes * (n_nodes - 1)):.3e}"
+    return f"{edge_count / (n_nodes * (n_nodes - 1)):.3e}"
 
 
 def _load_adj(engine: CppEngine, filepath: str, num_nodes: int, node_offset: int,
@@ -293,175 +375,14 @@ def _pred_agreement(z_a: torch.Tensor, z_b: torch.Tensor,
 
 
 
-_MPRW_CALIB_MAX_DOUBLINGS = 20   # Phase 1 safeguard: cap at 2^20 walks
-
-
-def _find_overshoot_w(
-    meta_file: str,
-    work_dir: Path,
-    worker_script: str,
-    target_edges: int,
-    seed: int,
-    log: logging.Logger,
-    timeout: Optional[float] = None,
-) -> Tuple[int, Optional[torch.Tensor], bool, float, float]:
-    """
-    Three-phase MPRW calibration pipeline.
-
-    Phase 1 — Exponential Bounding: doubles w from 1 until MPRW(w) >= target_edges,
-              establishing a tight [w_low, w_high] search interval without hardcoding w_max.
-    Phase 2 — Binary Search: finds the minimum w in [w_low, w_high] where
-              MPRW(w) >= target_edges; caches the edge_index at best_w to avoid
-              a redundant final re-run.
-
-    Each iteration runs via mprw_worker.py subprocess so peak_ram_mb is measured
-    via resource.getrusage in a fresh process — same method as KMV C++ measurement.
-    Peak_RAM = max across all Phase 1 + Phase 2 iterations (Phase 1 overshoot
-    is structurally the largest and is captured here).
-
-    Returns:
-        (best_w, best_edge_index, found_valid, calib_peak_ram_mb, best_w_run_time_s)
-        found_valid=False means topology is exhausted (Phase 1 safeguard hit).
-        best_w_run_time_s = wall time of the specific best_w run (for Final_Walk_Time).
-    """
-    peak_ram_mb = 0.0
-
-    def _run(w: int) -> Tuple[int, torch.Tensor, float]:
-        nonlocal peak_ram_mb
-        tmp_out = str(work_dir / f"_calib_{w}.pt")
-        cmd = [sys.executable, worker_script, meta_file, tmp_out, str(w), str(seed)]
-        t0 = time.perf_counter()
-        res = subprocess.run(cmd, check=True, capture_output=True, text=True,
-                             timeout=timeout)
-        t_run = time.perf_counter() - t0
-        ei = torch.load(tmp_out, weights_only=True)
-        try:
-            os.remove(tmp_out)
-        except OSError:
-            pass
-        for line in res.stdout.split("\n"):
-            if line.strip().lower().startswith("peak_ram_mb:"):
-                try:
-                    peak_ram_mb = max(peak_ram_mb, float(line.split(":", 1)[1]))
-                except ValueError:
-                    pass
-                break
-        return ei.size(1), ei, t_run
-
-    # ── Phase 1: Exponential Bounding ──────────────────────────────────────
-    log.debug("  [calibration] Phase 1: exponential bounding")
-    w = 1
-    count, ei, _ = _run(w)
-    log.debug("  [exp-bound] w=%d  edges=%d  target=%d", w, count, target_edges)
-
-    for _ in range(_MPRW_CALIB_MAX_DOUBLINGS):
-        if count >= target_edges:
-            break
-        w = w * 2
-        count, ei, _ = _run(w)
-        log.debug("  [exp-bound] w=%d  edges=%d  target=%d", w, count, target_edges)
-    else:
-        # Topology exhausted: still below target after max doublings.
-        log.warning(
-            "  [calibration] topology exhausted at w=%d: edges=%d < target=%d",
-            w, count, target_edges,
-        )
-        return w, ei, False, peak_ram_mb, 0.0
-
-    w_high = w
-    w_low = max(1, w // 2)
-
-    # ── Phase 2: Binary Search ──────────────────────────────────────────────
-    log.debug("  [calibration] Phase 2: binary search in [%d, %d]", w_low, w_high)
-    # Initialise with the Phase 1 upper-bound result as a safe fallback.
-    best_w: int = w_high
-    best_ei: torch.Tensor = ei
-    t_best_w_run: float = 0.0
-
-    while w_low <= w_high:
-        mid = (w_low + w_high) // 2
-        count, ei, t_run = _run(mid)
-        log.debug("  [bin-search] w=%d  edges=%d  target=%d", mid, count, target_edges)
-
-        if count >= target_edges:
-            best_w = mid
-            best_ei = ei
-            t_best_w_run = t_run
-            w_high = mid - 1   # try smaller w that still satisfies target
-        else:
-            w_low = mid + 1
-
-    log.info("  [calibration] best_w=%d  edges=%d  (target=%d)",
-             best_w, best_ei.size(1), target_edges)
-    return best_w, best_ei, True, peak_ram_mb, t_best_w_run
-
-
-def _truncate_to_target(
-    edge_index: torch.Tensor,
-    target_count: int,
-    n_nodes: int,
-    seed: int,
-) -> torch.Tensor:
-    """
-    Randomly drop undirected edge pairs until the COO size equals target_count.
-
-    Self-loops are always preserved.  Edges are sampled at the undirected-pair
-    level so the output remains symmetric.  Final count may be target_count or
-    target_count-1 if (target_count - n_self_loops) is odd.
-
-    Args:
-        edge_index:    [2, E] coalesced undirected edge_index with self-loops.
-        target_count:  Desired total number of COO entries.
-        n_nodes:       Number of nodes (for coalesce).
-        seed:          RNG seed for reproducibility.
-
-    Returns:
-        Coalesced edge_index with size(1) == target_count (or target_count-1).
-    """
-    import torch_geometric.utils as pyg_utils
-
-    if edge_index.size(1) <= target_count:
-        return edge_index
-
-    is_self  = edge_index[0] == edge_index[1]
-    self_ei  = edge_index[:, is_self]
-    real_ei  = edge_index[:, ~is_self]
-
-    n_self       = self_ei.size(1)
-    target_real  = target_count - n_self
-
-    if target_real <= 0:
-        return self_ei  # degenerate
-
-    if real_ei.size(1) <= target_real:
-        return edge_index
-
-    # real_ei is symmetric: each undirected edge (u,v) appears as (u,v) and (v,u).
-    # Sample pairs by keeping the src < dst half, then reconstructing both directions.
-    fwd_mask = real_ei[0] < real_ei[1]
-    fwd_ei   = real_ei[:, fwd_mask]  # canonical forward direction
-    n_pairs  = fwd_ei.size(1)
-    n_keep   = target_real // 2      # floor; result may be off by 1 if target_real is odd
-
-    rng      = torch.Generator()
-    rng.manual_seed(seed)
-    keep_idx = torch.randperm(n_pairs, generator=rng)[:n_keep]
-
-    kept     = fwd_ei[:, keep_idx]
-    both_dir = torch.cat([kept, kept.flip(0)], dim=1)
-    merged   = torch.cat([both_dir, self_ei], dim=1)
-    return pyg_utils.coalesce(merged, num_nodes=n_nodes)
-
-
 # ---------------------------------------------------------------------------
 # CSV
 # ---------------------------------------------------------------------------
 
 _FIELDS = [
-    "Dataset", "MetaPath", "L", "Method", "k_value", "Density_Matched_w",
-    "Materialization_Time", "MPRW_Calibration_Time", "Inference_Time",
+    "Dataset", "MetaPath", "L", "Method", "k_value", "w_value", "Seed",
+    "Materialization_Time", "Inference_Time",
     "Mat_RAM_MB",        # subprocess-isolated materialization peak
-    "Calib_RAM_MB",      # in-process peak across all calibration iterations
     "Inf_RAM_MB",        # subprocess-isolated inference peak
     "Edge_Count", "Graph_Density",
     "CKA_L1", "CKA_L2", "CKA_L3", "CKA_L4",
@@ -494,7 +415,7 @@ def _open_csv(path: Path) -> Tuple:
 
 
 def _done_runs(path: Path) -> set:
-    """Return set of (metapath, str(L), method, str(k)) already in CSV."""
+    """Return set of (metapath, L, method, k_value, w_value, seed) already in CSV."""
     done = set()
     if not path.exists():
         return done
@@ -503,7 +424,9 @@ def _done_runs(path: Path) -> set:
             done.add((row.get("MetaPath", ""),
                       row.get("L", ""),
                       row.get("Method", ""),
-                      row.get("k_value", "")))
+                      row.get("k_value", ""),
+                      row.get("w_value", ""),
+                      row.get("Seed", "0")))
     return done
 
 
@@ -553,16 +476,18 @@ def main():
                         help="Skip the entire ExactD block (materialization + inference). "
                              "Use when exact results are already present in the CSV and "
                              "you only want to (re-)run KMV and MPRW sweeps.")
-    parser.add_argument("--kmv-mat-only", action="store_true",
-                        help="Run KMV materialization only (no KMV inference rows). "
-                             "This still computes KMV edge counts used for "
-                             "density-matched MPRW calibration.")
-    parser.add_argument("--mprw-fixed-w", type=int, default=None,
-                        help="Use a fixed MPRW walk budget w for every k (no "
-                             "calibration/truncation). Useful for seed sweeps "
-                             "after a one-time external calibration.")
     parser.add_argument("--skip-mprw", action="store_true",
-                        help="Skip the entire MPRW sweep.")
+                        help="Skip the entire MPRW w-sweep.")
+    parser.add_argument("--skip-kmv", action="store_true",
+                        help="Skip the entire KMV sweep (still runs Exact and MPRW).")
+    parser.add_argument("--run-id", type=int, default=0,
+                        help="Replicate index written to the 'Seed' column. "
+                             "Use with --hash-seed for independent KMV/MPRW replicates. "
+                             "(default: 0)")
+    parser.add_argument("--w-values", type=int, nargs="+",
+                        default=[1, 2, 4, 8, 16, 32, 64, 128, 256, 512],
+                        help="MPRW walk-budget sweep values (default: 1 2 4 ... 512). "
+                             "Each w is one independent mprw_exec materialize call.")
     args = parser.parse_args()
     # Resolve inference timeout: explicit --inf-timeout overrides --timeout
     args.inf_timeout = args.inf_timeout if args.inf_timeout is not None else args.timeout
@@ -650,8 +575,11 @@ def main():
     # CSV setup
     # ------------------------------------------------------------------
     csv_fh, csv_w = _open_csv(csv_path)
-    done_runs     = _done_runs(csv_path)
-    mp_safe       = args.metapath.replace(",", "_").replace("/", "_")
+    # Auto-inject Seed into every row so callers never forget it.
+    _orig_writerow   = csv_w.writerow
+    csv_w.writerow   = lambda row: _orig_writerow({**row, "Seed": args.run_id})
+    done_runs        = _done_runs(csv_path)
+    mp_safe          = args.metapath.replace(",", "_").replace("/", "_")
 
     # ------------------------------------------------------------------
     # Persist auxiliary tensors to disk once — inference_worker loads them.
@@ -768,7 +696,7 @@ def main():
                 if not weights_path.exists():
                     log.warning("  [Exact L=%d] weights not found — skipping", L)
                     continue
-                if (args.metapath, str(L), "Exact", "") in done_runs:
+                if (args.metapath, str(L), "Exact", "", "", str(args.run_id)) in done_runs:
                     log.info("  [Exact L=%d] already in CSV — skipping", L)
                     # Still populate z paths from disk so KMV/MPRW can compute CKA
                     _z = str(scratch_dir / f"z_exact_L{L}.pt")
@@ -845,9 +773,8 @@ def main():
                     "L":                    L,
                     "Method":               "Exact",
                     "k_value":              "",
-                    "Density_Matched_w":    "",
+                    "w_value":    "",
                     "Materialization_Time": _fmt(t_exact_mat),
-                    "MPRW_Calibration_Time": "",
                     "Inference_Time":       _fmt(inf_res.get("inf_time")),
                     "Mat_RAM_MB":           _fmt(exact_mat_mb, 1) if exact_mat_mb else "",
                     "Inf_RAM_MB":           _fmt(inf_res.get("inf_peak_ram_mb"), 1),
@@ -879,9 +806,10 @@ def main():
     # ------------------------------------------------------------------
     # KMV sweep — materialization: C++ child peak. Inference: subprocess.
     # ------------------------------------------------------------------
-    kmv_edges_by_k: dict = {}
+    if args.skip_kmv:
+        log.info("--skip-kmv: skipping KMV sweep.")
 
-    for k in args.k_values:
+    for k in args.k_values if not args.skip_kmv else []:
         log.info("\n--- KMV k=%d ---", k)
 
         if args.max_rss_gb is not None:
@@ -889,55 +817,47 @@ def main():
             if rss is not None and rss > args.max_rss_gb:
                 log.warning("  [KMV k=%d] RSS guard: %.1f GB > %.1f GB — skipping",
                             k, rss, args.max_rss_gb)
-                if not args.kmv_mat_only:
-                    for L in args.depth:
-                        csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
-                            "Dataset": args.dataset, "MetaPath": args.metapath,
-                            "L": L, "Method": "KMV", "k_value": k,
-                            "exact_status": f"RSS_OOM({rss:.0f}GB)",
-                        }))
-                    csv_fh.flush()
+                for L in args.depth:
+                    csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
+                        "Dataset": args.dataset, "MetaPath": args.metapath,
+                        "L": L, "Method": "KMV", "k_value": k,
+                        "exact_status": f"RSS_OOM({rss:.0f}GB)",
+                    }))
+                csv_fh.flush()
                 continue
 
         try:
             t_kmv_mat, kmv_file = _run_sketch(engine, folder, k, kmv_seed, args.timeout)
             kmv_mat_mb     = engine.last_peak_mb   # C++ child peak
             kmv_edge_count = _count_edges(kmv_file)
-            kmv_edges_by_k[k] = kmv_edge_count
             log.info("  KMV done: edges=%d  mat_time=%.2fs  mat_ram=%s",
                      kmv_edge_count, t_kmv_mat,
                      f"{kmv_mat_mb:.0f}MB" if kmv_mat_mb else "n/a (Windows)")
         except MemoryError as e:
             log.warning("  [KMV k=%d] OOM: %s", k, e)
-            if not args.kmv_mat_only:
-                for L in args.depth:
-                    csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
-                        "Dataset": args.dataset, "MetaPath": args.metapath,
-                        "L": L, "Method": "KMV", "k_value": k,
-                        "exact_status": "KMV_OOM",
-                    }))
-                csv_fh.flush()
+            for L in args.depth:
+                csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
+                    "Dataset": args.dataset, "MetaPath": args.metapath,
+                    "L": L, "Method": "KMV", "k_value": k,
+                    "exact_status": "KMV_OOM",
+                }))
+            csv_fh.flush()
             continue
         except RuntimeError as e:
             log.warning("  [KMV k=%d] error: %s", k, e)
-            if not args.kmv_mat_only:
-                for L in args.depth:
-                    csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
-                        "Dataset": args.dataset, "MetaPath": args.metapath,
-                        "L": L, "Method": "KMV", "k_value": k,
-                        "exact_status": f"KMV_ERR:{str(e)[:60]}",
-                    }))
-                csv_fh.flush()
-            continue
-
-        if args.kmv_mat_only:
-            log.info("  [KMV k=%d] --kmv-mat-only: skipping KMV inference rows", k)
+            for L in args.depth:
+                csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
+                    "Dataset": args.dataset, "MetaPath": args.metapath,
+                    "L": L, "Method": "KMV", "k_value": k,
+                    "exact_status": f"KMV_ERR:{str(e)[:60]}",
+                }))
+            csv_fh.flush()
             continue
 
         kmv_inf_cascade: Optional[str] = None  # L-cascade flag for this k
 
         for L in args.depth:
-            if (args.metapath, str(L), "KMV", str(k)) in done_runs:
+            if (args.metapath, str(L), "KMV", str(k), "", str(args.run_id)) in done_runs:
                 log.info("  [KMV k=%d L=%d] already in CSV — skipping", k, L)
                 continue
             weights_path = weights_dir / f"{mp_safe}_L{L}.pt"
@@ -962,7 +882,7 @@ def main():
                 continue
 
             inf_res, z_kmv_path, layers_kmv_path = _inf_subprocess(
-                kmv_file, "adj", f"kmv_{k}", L)
+                kmv_file, "adj", f"kmv_{k}_s{args.run_id}", L)
             if inf_res is not None and inf_res.get("inf_failed"):
                 status = ("INF_OOM"     if inf_res.get("inf_oom")
                           else "INF_TIMEOUT" if inf_res.get("inf_timeout")
@@ -1000,9 +920,8 @@ def main():
                 "L":                     L,
                 "Method":                "KMV",
                 "k_value":               k,
-                "Density_Matched_w":     "",
+                "w_value":               "",
                 "Materialization_Time":  _fmt(t_kmv_mat),
-                "MPRW_Calibration_Time": "",
                 "Inference_Time":        _fmt(inf_res.get("inf_time")),
                 "Mat_RAM_MB":            _fmt(kmv_mat_mb, 1) if kmv_mat_mb else "",
                 "Inf_RAM_MB":            _fmt(inf_res.get("inf_peak_ram_mb"), 1),
@@ -1017,253 +936,141 @@ def main():
             csv_fh.flush()
 
     if args.skip_mprw:
-        log.info("--skip-mprw: skipping MPRW sweep.")
+        log.info("--skip-mprw: skipping MPRW w-sweep.")
         csv_fh.close()
         log.info("\nDone. Results -> %s", csv_path)
         return
 
     # ------------------------------------------------------------------
-    # MPRW sweep — materialization: mprw_worker net_ram_mb. Inference: subprocess.
+    # MPRW w-sweep — pure C++ backend (bin/mprw_exec).
+    #
+    # Each w in --w-values is one independent `mprw_exec materialize` call.
+    # No calibration, no density matching.  Comparison against KMV happens
+    # at the plotting stage using edge count (density) as the common axis.
+    #
+    # Measurement: identical to Exact/KMV — GNU time -v for RSS, internal
+    # chrono for algo time, same .dat files already staged above.
     # ------------------------------------------------------------------
-    try:
-        mprw_triples = parse_metapath_triples(args.metapath, g_full)
-    except (ValueError, RuntimeError) as e:
-        log.warning("  MPRW: could not parse metapath — %s", e)
-        mprw_triples = None
-
     mprw_work_dir  = Path(data_dir) / "mprw_work"
-    mprw_meta_file = mprw_work_dir / "meta.json"
+    mprw_work_dir.mkdir(parents=True, exist_ok=True)
+    rule_file_path = os.path.join(data_dir, f"cod-rules_{folder}.limit")
+    mprw_bin       = str(Path(project_root) / "bin" / "mprw_exec")
+    if not os.path.exists(mprw_bin):
+        _mprw_bin_exe = mprw_bin + ".exe"
+        if os.path.exists(_mprw_bin_exe):
+            mprw_bin = _mprw_bin_exe
+    log.info("\n--- MPRW w-sweep (bin: %s) ---", mprw_bin)
+    log.info("  w_values=%s", args.w_values)
 
-    if mprw_triples is not None:
-        mprw_work_dir.mkdir(parents=True, exist_ok=True)
-        mprw_meta = {"n_target": n_target, "target_type": target_ntype, "steps": []}
-        for i, (src_t, edge_name, dst_t) in enumerate(mprw_triples):
-            edge_file = mprw_work_dir / f"edge_{i}.pt"
-            torch.save(g_full[src_t, edge_name, dst_t].edge_index.cpu(), edge_file)
-            mprw_meta["steps"].append({
-                "src_type":  src_t, "edge_name": edge_name, "dst_type": dst_t,
-                "n_src":     g_full[src_t].num_nodes,
-                "n_dst":     g_full[dst_t].num_nodes,
-                "edge_file": str(edge_file),
-            })
-        with open(mprw_meta_file, "w") as f:
-            json.dump(mprw_meta, f)
-        log.info("\n--- MPRW sweep ---")
-
-    mprw_worker = str(Path(project_root) / "scripts" / "mprw_worker.py")
-
-    for k in args.k_values:
-        log.info("\n--- MPRW k=%d (density-matched to KMV) ---", k)
-
-        if mprw_triples is None:
-            for L in args.depth:
-                csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
-                    "Dataset": args.dataset, "MetaPath": args.metapath,
-                    "L": L, "Method": "MPRW", "k_value": k,
-                    "exact_status": "MPRW_PARSE_ERR",
-                }))
-            csv_fh.flush()
-            continue
+    for w in args.w_values:
+        log.info("\n--- MPRW w=%d ---", w)
 
         if args.max_rss_gb is not None:
             rss = _rss_gb()
             if rss is not None and rss > args.max_rss_gb:
-                log.warning("  [MPRW k=%d] RSS guard: %.1f GB > %.1f GB — skipping",
-                            k, rss, args.max_rss_gb)
+                log.warning("  [MPRW w=%d] RSS guard: %.1f GB > %.1f GB — skipping",
+                            w, rss, args.max_rss_gb)
                 for L in args.depth:
                     csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
                         "Dataset": args.dataset, "MetaPath": args.metapath,
-                        "L": L, "Method": "MPRW", "k_value": k,
+                        "L": L, "Method": "MPRW", "w_value": w,
                         "exact_status": f"RSS_OOM({rss:.0f}GB)",
                     }))
                 csv_fh.flush()
                 continue
 
-        # --- Calibration / fixed-w selection ---
-        # If --mprw-fixed-w is set, run one worker call with that exact w and
-        # skip the density-matching calibration + truncation logic.
-        target_edges = kmv_edges_by_k.get(k)
-        if args.mprw_fixed_w is not None:
-            calibrated_w = max(1, int(args.mprw_fixed_w))
-            tmp_out = str(mprw_work_dir / f"_fixed_{k}.pt")
-            cmd = [sys.executable, mprw_worker, str(mprw_meta_file), tmp_out,
-                   str(calibrated_w), str(kmv_seed)]
-            t_walk_start = time.perf_counter()
-            res = subprocess.run(cmd, check=True, capture_output=True, text=True,
-                                 timeout=args.timeout)
-            t_best_w_run = time.perf_counter() - t_walk_start
-            best_edge_index: Optional[torch.Tensor] = torch.load(tmp_out, weights_only=True)
-            try:
-                os.remove(tmp_out)
-            except OSError:
-                pass
-            calib_peak_mb = 0.0
-            for line in res.stdout.split("\n"):
-                if line.strip().lower().startswith("peak_ram_mb:"):
-                    try:
-                        calib_peak_mb = float(line.split(":", 1)[1])
-                    except ValueError:
-                        pass
-                    break
-            found_overshoot = True
-            t_calib = 0.0
-            log.info("  [MPRW k=%d] using fixed w=%d (no calibration/truncation)",
-                     k, calibrated_w)
-        else:
-            # --- Phase 1 (Exponential Bounding) + Phase 2 (Binary Search) ---
-            # Calibration_Time = wall clock for these two phases combined.
-            t_calib_start = time.perf_counter()
-            if target_edges is None:
-                # Fallback: no KMV reference — run w=k via worker for consistent RAM measurement.
-                tmp_out = str(mprw_work_dir / f"_calib_{k}.pt")
-                cmd = [sys.executable, mprw_worker, str(mprw_meta_file), tmp_out,
-                       str(k), str(kmv_seed)]
-                t_walk_start = time.perf_counter()
-                res = subprocess.run(cmd, check=True, capture_output=True, text=True,
-                                     timeout=args.timeout)
-                t_best_w_run = time.perf_counter() - t_walk_start
-                best_edge_index = torch.load(tmp_out, weights_only=True)
-                try:
-                    os.remove(tmp_out)
-                except OSError:
-                    pass
-                calib_peak_mb = 0.0
-                for line in res.stdout.split("\n"):
-                    if line.strip().lower().startswith("peak_ram_mb:"):
-                        try:
-                            calib_peak_mb = float(line.split(":", 1)[1])
-                        except ValueError:
-                            pass
-                        break
-                found_overshoot = False
-                calibrated_w = k
-                log.warning("  [MPRW k=%d] KMV edge count unavailable — using w=k", k)
-            else:
-                log.info("  [MPRW k=%d] calibrating w for KMV edge count %d ...",
-                         k, target_edges)
-                calibrated_w, best_edge_index, found_overshoot, calib_peak_mb, t_best_w_run = \
-                    _find_overshoot_w(
-                        str(mprw_meta_file), mprw_work_dir, mprw_worker,
-                        target_edges=target_edges, seed=kmv_seed, log=log,
-                        timeout=args.timeout,
-                    )
-            t_calib = time.perf_counter() - t_calib_start
-            log.info("  [MPRW k=%d] calibration done: w=%d  calib_time=%.2fs  calib_ram=%.0fMB",
-                     k, calibrated_w, t_calib, calib_peak_mb)
+        # Single mprw_exec materialize call at this w — no calibration.
+        mprw_out = mprw_work_dir / f"mat_mprw_{w}.adj"
+        try:
+            t_mprw_mat, mprw_mat_mb = _run_mprw_exec(
+                mprw_bin, data_dir, rule_file_path, str(mprw_out),
+                w, kmv_seed, args.timeout)
+        except RuntimeError as e:
+            log.warning("  [MPRW w=%d] materialize failed: %s", w, e)
+            for L in args.depth:
+                csv_w.writerow(dict({f: "" for f in _FIELDS}, **{
+                    "Dataset": args.dataset, "MetaPath": args.metapath,
+                    "L": L, "Method": "MPRW", "w_value": w,
+                    "exact_status": f"MPRW_ERR:{str(e)[:60]}",
+                }))
+            csv_fh.flush()
+            continue
 
-        # --- Build final MPRW graph ---
-        # Default path keeps old behavior: truncate to KMV edge count.
-        mprw_out = mprw_work_dir / f"mat_mprw_{k}.pt"
-        if args.mprw_fixed_w is not None:
-            final_ei = best_edge_index
-            t_trunc = 0.0
-        else:
-            t_trunc_start = time.perf_counter()
-            if best_edge_index is not None and target_edges is not None \
-                    and best_edge_index.size(1) > target_edges:
-                final_ei = _truncate_to_target(best_edge_index, target_edges, n_target,
-                                               seed=kmv_seed)
-                log.info("  MPRW truncated: %d → %d edges (target=%d)",
-                         best_edge_index.size(1), final_ei.size(1), target_edges)
-            else:
-                final_ei = best_edge_index
-            t_trunc = time.perf_counter() - t_trunc_start
+        mprw_edge_count = _count_edges(str(mprw_out))
+        log.info("  MPRW done: edges=%d  w=%d  mat_time=%.2fs  mat_ram=%s",
+                 mprw_edge_count, w, t_mprw_mat,
+                 f"{mprw_mat_mb:.0f}MB" if mprw_mat_mb else "n/a (Windows)")
 
-        # Final_Walk_Time per spec: time of the single best_w run + truncation.
-        t_final_walk = t_best_w_run + t_trunc
-
-        if final_ei is not None:
-            torch.save(final_ei, mprw_out)
-            mprw_edge_count = final_ei.size(1)
-        else:
-            mprw_edge_count = 0
-        del best_edge_index, final_ei
-
-        log.info("  MPRW done: edges=%d (w=%d)  final_walk_time=%.2fs  calib_time=%.2fs  peak_ram=%.0fMB",
-                 mprw_edge_count, calibrated_w, t_final_walk, t_calib, calib_peak_mb)
-        if target_edges:
-            log.info("  MPRW/KMV edge ratio: %.3f", mprw_edge_count / target_edges)
-
-        mprw_inf_cascade: Optional[str] = None  # L-cascade flag for this k
+        mprw_inf_cascade: Optional[str] = None
 
         for L in args.depth:
-            if (args.metapath, str(L), "MPRW", str(k)) in done_runs:
-                log.info("  [MPRW k=%d L=%d] already in CSV — skipping", k, L)
+            if (args.metapath, str(L), "MPRW", "", str(w), str(args.run_id)) in done_runs:
+                log.info("  [MPRW w=%d L=%d] already in CSV — skipping", w, L)
                 continue
             weights_path = weights_dir / f"{mp_safe}_L{L}.pt"
             if not weights_path.exists():
-                log.warning("  [MPRW k=%d L=%d] weights not found — skipping", k, L)
+                log.warning("  [MPRW w=%d L=%d] weights not found — skipping", w, L)
                 continue
 
-            calib_flag = "" if found_overshoot else "MPRW_TOPO_LIMIT|"
-
             if mprw_inf_cascade is not None:
-                log.warning("  [MPRW k=%d L=%d] skipping — cascaded from earlier L failure (%s)",
-                            k, L, mprw_inf_cascade)
+                log.warning("  [MPRW w=%d L=%d] skipping — cascaded from earlier L failure (%s)",
+                            w, L, mprw_inf_cascade)
                 csv_w.writerow({
                     **{f: "" for f in _FIELDS},
                     "Dataset": args.dataset, "MetaPath": args.metapath,
-                    "L": L, "Method": "MPRW", "k_value": k,
-                    "Density_Matched_w": calibrated_w,
-                    "Materialization_Time": _fmt(t_final_walk),
-                    "MPRW_Calibration_Time": _fmt(t_calib),
-                    "Mat_RAM_MB": "",
-                    "Calib_RAM_MB": _fmt(calib_peak_mb, 1),
+                    "L": L, "Method": "MPRW", "w_value": w,
+                    "Materialization_Time": _fmt(t_mprw_mat),
+                    "Mat_RAM_MB": _fmt(mprw_mat_mb, 1) if mprw_mat_mb else "",
                     "Edge_Count": mprw_edge_count,
                     "Graph_Density": _graph_density(mprw_edge_count, n_target),
-                    "exact_status": f"{calib_flag}INF_CASCADE({mprw_inf_cascade})",
+                    "exact_status": f"INF_CASCADE({mprw_inf_cascade})",
                 })
                 csv_fh.flush()
                 continue
 
             inf_res, z_mprw_path, layers_mprw_path = _inf_subprocess(
-                str(mprw_out), "pt", f"mprw_{k}", L)
+                str(mprw_out), "adj", f"mprw_w{w}_s{args.run_id}", L)
             if inf_res is not None and inf_res.get("inf_failed"):
                 status = ("INF_OOM"     if inf_res.get("inf_oom")
                           else "INF_TIMEOUT" if inf_res.get("inf_timeout")
                           else "INF_FAIL")
-                log.warning("  [MPRW k=%d L=%d] inference failed: %s — cascading remaining depths",
-                            k, L, status)
+                log.warning("  [MPRW w=%d L=%d] inference failed: %s — cascading remaining depths",
+                            w, L, status)
                 mprw_inf_cascade = status
                 csv_w.writerow({
                     **{f: "" for f in _FIELDS},
                     "Dataset": args.dataset, "MetaPath": args.metapath,
-                    "L": L, "Method": "MPRW", "k_value": k,
-                    "Density_Matched_w": calibrated_w,
-                    "Materialization_Time": _fmt(t_final_walk),
-                    "MPRW_Calibration_Time": _fmt(t_calib),
-                    "Mat_RAM_MB": "",
-                    "Calib_RAM_MB": _fmt(calib_peak_mb, 1),
+                    "L": L, "Method": "MPRW", "w_value": w,
+                    "Materialization_Time": _fmt(t_mprw_mat),
+                    "Mat_RAM_MB": _fmt(mprw_mat_mb, 1) if mprw_mat_mb else "",
                     "Edge_Count": mprw_edge_count,
                     "Graph_Density": _graph_density(mprw_edge_count, n_target),
-                    "exact_status": f"{calib_flag}{status}",
+                    "exact_status": status,
                 })
                 csv_fh.flush()
                 continue
 
             cka_cols, pred_sim = _cka_from_disk(
                 z_exact_by_L.get(L), layers_exact_by_L.get(L),
-                z_mprw_path, layers_mprw_path, L, f"MPRW k={k}")
+                z_mprw_path, layers_mprw_path, L, f"MPRW w={w}")
 
-            log.info("  [MPRW k=%d L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  inf_ram=%s  peak_ram=%.0fMB  calib=%.2fs  pred_sim=%s  inf_res_keys=%s",
-                     k, L, inf_res.get("inf_f1", 0), inf_res.get("inf_de", 0),
+            log.info("  [MPRW w=%d L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  inf_ram=%s  mat_ram=%s  pred_sim=%s",
+                     w, L, inf_res.get("inf_f1", 0), inf_res.get("inf_de", 0),
                      inf_res.get("inf_time", 0),
                      f"{inf_res.get('inf_peak_ram_mb', 0):.0f}MB",
-                     calib_peak_mb, t_calib, pred_sim or "n/a",
-                     sorted(inf_res.keys()))
+                     f"{mprw_mat_mb:.0f}MB" if mprw_mat_mb else "n/a",
+                     pred_sim or "n/a")
 
             csv_w.writerow({
                 "Dataset":               args.dataset,
                 "MetaPath":              args.metapath,
                 "L":                     L,
                 "Method":                "MPRW",
-                "k_value":               k,
-                "Density_Matched_w":     calibrated_w,
-                "Materialization_Time":  _fmt(t_final_walk),
-                "MPRW_Calibration_Time": _fmt(t_calib),
+                "k_value":               "",
+                "w_value":               w,
+                "Materialization_Time":  _fmt(t_mprw_mat),
                 "Inference_Time":        _fmt(inf_res.get("inf_time")),
-                "Mat_RAM_MB":            "",
-                "Calib_RAM_MB":          _fmt(calib_peak_mb, 1),
+                "Mat_RAM_MB":            _fmt(mprw_mat_mb, 1) if mprw_mat_mb else "",
                 "Inf_RAM_MB":            _fmt(inf_res.get("inf_peak_ram_mb"), 1),
                 "Edge_Count":            mprw_edge_count,
                 "Graph_Density":         _graph_density(mprw_edge_count, n_target),
@@ -1271,8 +1078,7 @@ def main():
                 "Pred_Similarity":       pred_sim,
                 "Macro_F1":              _fmt(inf_res.get("inf_f1")),
                 "Dirichlet_Energy":      _fmt(inf_res.get("inf_de")),
-                "exact_status":          (exact_status_flag if found_overshoot
-                                          else f"MPRW_TOPO_LIMIT|{exact_status_flag}"),
+                "exact_status":          exact_status_flag,
             })
             csv_fh.flush()
 

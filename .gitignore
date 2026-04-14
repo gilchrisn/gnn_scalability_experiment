@@ -1,6 +1,6 @@
 .env
 hehe.sh
-.venv/
+.venv*
 
 
 bin/
@@ -47,3 +47,4 @@ presentation
 graphify*
 figures*
 transfer*
+HNE*
