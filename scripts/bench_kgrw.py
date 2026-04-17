@@ -1,30 +1,27 @@
 """
-bench_kgrw.py — KGRW quality benchmark against KMV and MPRW.
+bench_kgrw.py — KGRW quality benchmark against MPRW across seeds.
 
-For each (k, w') combination:
-  1. Runs `mprw_exec kgrw` → adjacency file
-  2. Runs inference_worker.py subprocess → F1, CKA, PredAgreement
-  3. Loads master_results.csv for KMV/MPRW reference at matched edge count
-
-Outputs a CSV + printed table so you can see at a glance whether KGRW
-quality (CKA, F1) tracks MPRW or drops to KMV level.
+For each (k, w', seed) combination:
+  1. Runs `mprw_exec kgrw`       → adjacency file
+  2. Runs `mprw_exec materialize` → MPRW reference at matched edges
+  3. Runs inference_worker.py for both → F1, CKA, PredAgreement
+  Aggregates mean ± std across seeds.
 
 Usage
 -----
-# DBLP, L=2, default k/w' sweep:
+# Single seed quick check:
 python scripts/bench_kgrw.py --dataset HGB_DBLP --L 2
 
-# Custom sweep:
-python scripts/bench_kgrw.py --dataset HGB_DBLP --L 2 \
-    --k-values 8 16 32 --w-values 1 2 4 8
+# Multi-seed rigorous run (recommended):
+python scripts/bench_kgrw.py --dataset HGB_DBLP --L 2 --seeds 10 \
+    --k-values 4 8 16 32 --w-values 1 2 4 8 16
 
-# All depths:
-python scripts/bench_kgrw.py --dataset HGB_DBLP --L 1 2 3 4
+# Resume-safe: already-done (L, method, k, w', seed) rows are skipped.
 
 Output
 ------
-  results/<dataset>/kgrw_bench.csv
-  Printed comparison table on stdout
+  results/<dataset>/kgrw_bench.csv  — raw per-seed rows
+  Printed mean±std summary table
 """
 from __future__ import annotations
 
@@ -218,7 +215,11 @@ def main() -> None:
     p.add_argument("--k-values", type=int, nargs="+", default=DEFAULT_K_VALUES)
     p.add_argument("--w-values", type=int, nargs="+", default=DEFAULT_W_PRIMES)
     p.add_argument("--seed", type=int, default=SEED)
+    p.add_argument("--seeds", type=int, default=1,
+                   help="Number of independent seeds to run (default 1). "
+                        "Seeds are 42, 43, 44, ...")
     args = p.parse_args()
+    args.seed_list = list(range(args.seed, args.seed + args.seeds))
 
     cfg         = config.get_dataset_config(args.dataset)
     folder      = config.get_folder_name(args.dataset)
@@ -270,10 +271,10 @@ def main() -> None:
     torch.save(labels_full.cpu(), labels_file)
     torch.save(test_mask.cpu(), mask_file)
 
-    # Output CSV
+    # Output CSV — seed is now a column for multi-seed aggregation
     out_csv = ROOT / "results" / args.dataset / "kgrw_bench.csv"
     out_csv.parent.mkdir(parents=True, exist_ok=True)
-    csv_fields = ["Dataset", "L", "Method", "k", "w_prime",
+    csv_fields = ["Dataset", "L", "Method", "k", "w_prime", "Seed",
                   "Edge_Count", "Mat_Time_s",
                   "Macro_F1", "CKA", "Pred_Agreement"]
     existing_runs: set[tuple] = set()
@@ -281,104 +282,160 @@ def main() -> None:
     if out_csv.exists():
         with open(out_csv, encoding="utf-8") as f:
             for row in csv.DictReader(f):
-                existing_runs.add((row["L"], row["Method"], row["k"], row["w_prime"]))
+                existing_runs.add((row["L"], row["Method"],
+                                   row["k"], row["w_prime"],
+                                   row.get("Seed", "0")))
 
-    fout = open(out_csv, "a", newline="", encoding="utf-8")
+    fout   = open(out_csv, "a", newline="", encoding="utf-8")
     writer = csv.DictWriter(fout, fieldnames=csv_fields)
     if out_csv.stat().st_size == 0:
         writer.writeheader()
 
     for L in args.L:
-        print(f"\n{'='*60}")
-        print(f"L = {L}")
-        print(f"{'='*60}")
-
         weights_path = _find_weights(args.dataset, mp_safe, L)
         if weights_path is None:
-            print(f"  [SKIP] no weights found for L={L}")
-            continue
-        print(f"  Weights: {weights_path}")
+            print(f"\n[SKIP] no weights found for L={L}"); continue
 
-        # Load reference from master_results.csv
-        ref = _load_reference(args.dataset, metapath, L)
+        z_exact_path = tmp_dir / f"z_exact_L{L}.pt"
+        z_exact = None
+        if z_exact_path.exists():
+            z_exact = torch.load(str(z_exact_path), weights_only=True)
 
-        # Print reference header
-        print(f"\n  {'Method':<20} {'Edges':>9} {'F1':>7} {'CKA':>7} {'PA':>7} {'Time':>7}")
-        print(f"  {'-'*60}")
-        if ref.get("exact"):
-            r = ref["exact"]
-            print(f"  {'Exact':<20} {r['edges']:>9,} {r['f1']:>7.4f} {'—':>7} {'—':>7} {r['time']:>6.2f}s")
-        for k_str in sorted(ref.get("kmv", {}).keys(), key=int):
-            r = ref["kmv"][k_str]
-            print(f"  {f'KMV k={k_str}':<20} {r['edges']:>9,} {r['f1']:>7.4f} {r['cka']:>7.4f} {r['pa']:>7.4f} {r['time']:>6.3f}s")
-        for w_str in sorted(ref.get("mprw", {}).keys(), key=int):
-            r = ref["mprw"][w_str]
-            print(f"  {f'MPRW w={w_str}':<20} {r['edges']:>9,} {r['f1']:>7.4f} {r['cka']:>7.4f} {r['pa']:>7.4f} {r['time']:>6.3f}s")
+        print(f"\n{'='*65}  L={L}")
+        print(f"  Weights: {weights_path.name}")
+        print(f"  CKA reference: {'OK' if z_exact is not None else 'MISSING (run exact inference first)'}")
+        print(f"\n  {'Method':<22} {'Edges':>8} {'F1':>7} {'CKA':>7} {'PA':>7}  (mean across {len(args.seed_list)} seed(s))")
+        print(f"  {'-'*65}")
 
-        print(f"  {'-'*60}")
-
-        # Sweep KGRW
-        for k in args.k_values:
-            for wp in args.w_values:
-                run_key = (str(L), "KGRW", str(k), str(wp))
+        # ── MPRW reference: run fresh on this meta-path across seeds ──────
+        for w in args.w_values:
+            mprw_metrics: list[dict] = []
+            for seed in args.seed_list:
+                run_key = (str(L), "MPRW", "", str(w), str(seed))
                 if run_key in existing_runs:
-                    print(f"  [SKIP] KGRW k={k} w'={wp} L={L} already in CSV")
                     continue
+                adj_wsl = f"/tmp/mprw_bench_{w}_s{seed}_{args.dataset}.adj"
+                cmd = (f"cd /mnt/c/Users/Gilchris/UNI/not-school/Research/gnn/"
+                       f"scalability_experiment && "
+                       f"bin/mprw_exec materialize {dataset_dir} {rule_file} "
+                       f"{adj_wsl} {w} {seed}")
+                r = subprocess.run(_wsl(cmd), capture_output=True, text=True, timeout=300)
+                mat_time = 0.0
+                for line in r.stdout.split("\n"):
+                    if line.startswith("time:"):
+                        mat_time = float(line.split(":", 1)[1].strip())
+                cr = subprocess.run(_wsl(f"awk '{{s += NF-1}} END {{print s+0}}' {adj_wsl}"),
+                                    capture_output=True, text=True)
+                edges = int(cr.stdout.strip()) if cr.stdout.strip().isdigit() else 0
 
-                label = f"kgrw_k{k}_wp{wp}_L{L}"
-                adj_wsl = f"/tmp/{label}_{args.dataset}.adj"
-                z_out   = str(tmp_dir / f"z_{label}.pt")
-
-                # Run materialization
-                try:
-                    mat_time, edges = _run_kgrw(dataset_dir, rule_file,
-                                                adj_wsl, k, wp, args.seed)
-                except Exception as e:
-                    print(f"  KGRW k={k} w'={wp}: FAILED ({e})")
-                    continue
-
-                # Run inference
-                inf = _run_inference(adj_wsl, feat_file, str(weights_path), z_out,
-                                     labels_file, mask_file,
-                                     n_target, node_offset, in_dim,
-                                     num_classes, L, label)
-
-                # Compute CKA vs Exact
-                cka_val = float("nan")
-                pa_val  = float("nan")
-                z_exact_path = tmp_dir / f"z_exact_L{L}.pt"
-                if inf and z_exact_path.exists():
+                label  = f"mprw_w{w}_s{seed}_L{L}"
+                z_out  = str(tmp_dir / f"z_{label}.pt")
+                inf    = _run_inference(adj_wsl, feat_file, str(weights_path), z_out,
+                                        labels_file, mask_file,
+                                        n_target, node_offset, in_dim,
+                                        num_classes, L, label)
+                f1 = inf.get("inf_f1", float("nan"))
+                cka_val = pa_val = float("nan")
+                if z_exact is not None and os.path.exists(z_out):
                     try:
                         from src.analysis.cka import LinearCKA
-                        z_exact = torch.load(str(z_exact_path), weights_only=True)
-                        z_kgrw  = torch.load(z_out, weights_only=True)
+                        z_m  = torch.load(z_out, weights_only=True)
                         cka_val = float(LinearCKA(device=torch.device("cpu")).calculate(
-                            z_exact[test_mask], z_kgrw[test_mask]))
-                        pa_val  = (z_exact[test_mask].argmax(1) ==
-                                   z_kgrw[test_mask].argmax(1)).float().mean().item()
+                            z_exact[test_mask], z_m[test_mask]))
+                        pa_val = (z_exact[test_mask].argmax(1) ==
+                                  z_m[test_mask].argmax(1)).float().mean().item()
                     except Exception as e:
-                        print(f"    CKA error: {e}")
+                        print(f"    CKA error (MPRW): {e}")
 
-                f1 = inf.get("inf_f1", float("nan"))
-                print(f"  {'KGRW k='+str(k)+' w='+str(wp):<20} {edges:>9,} {f1:>7.4f} "
-                      f"{cka_val:>7.4f} {pa_val:>7.4f} {mat_time:>6.3f}s")
-
-                writer.writerow({
-                    "Dataset": args.dataset, "L": L,
-                    "Method": "KGRW", "k": k, "w_prime": wp,
-                    "Edge_Count": edges, "Mat_Time_s": round(mat_time, 4),
-                    "Macro_F1": round(f1, 6),
-                    "CKA": round(cka_val, 6) if cka_val == cka_val else "",
-                    "Pred_Agreement": round(pa_val, 6) if pa_val == pa_val else "",
-                })
+                writer.writerow({"Dataset": args.dataset, "L": L,
+                                 "Method": "MPRW", "k": "", "w_prime": w, "Seed": seed,
+                                 "Edge_Count": edges, "Mat_Time_s": round(mat_time, 4),
+                                 "Macro_F1": round(f1, 6) if f1 == f1 else "",
+                                 "CKA": round(cka_val, 6) if cka_val == cka_val else "",
+                                 "Pred_Agreement": round(pa_val, 6) if pa_val == pa_val else ""})
                 fout.flush()
                 existing_runs.add(run_key)
+                mprw_metrics.append({"f1": f1, "cka": cka_val, "pa": pa_val,
+                                     "edges": edges, "time": mat_time})
+
+        # ── KGRW sweep ────────────────────────────────────────────────────
+        for k in args.k_values:
+            for wp in args.w_values:
+                kgrw_metrics: list[dict] = []
+                for seed in args.seed_list:
+                    run_key = (str(L), "KGRW", str(k), str(wp), str(seed))
+                    if run_key in existing_runs:
+                        continue
+                    label   = f"kgrw_k{k}_wp{wp}_s{seed}_L{L}"
+                    adj_wsl = f"/tmp/{label}_{args.dataset}.adj"
+                    z_out   = str(tmp_dir / f"z_{label}.pt")
+                    try:
+                        mat_time, edges = _run_kgrw(dataset_dir, rule_file,
+                                                    adj_wsl, k, wp, seed)
+                    except Exception as e:
+                        print(f"  KGRW k={k} w'={wp} s={seed}: FAILED ({e})"); continue
+
+                    inf = _run_inference(adj_wsl, feat_file, str(weights_path), z_out,
+                                        labels_file, mask_file,
+                                        n_target, node_offset, in_dim, num_classes, L, label)
+                    f1 = inf.get("inf_f1", float("nan"))
+                    cka_val = pa_val = float("nan")
+                    if z_exact is not None and os.path.exists(z_out):
+                        try:
+                            from src.analysis.cka import LinearCKA
+                            z_k = torch.load(z_out, weights_only=True)
+                            cka_val = float(LinearCKA(device=torch.device("cpu")).calculate(
+                                z_exact[test_mask], z_k[test_mask]))
+                            pa_val = (z_exact[test_mask].argmax(1) ==
+                                      z_k[test_mask].argmax(1)).float().mean().item()
+                        except Exception as e:
+                            print(f"    CKA error (KGRW): {e}")
+
+                    writer.writerow({"Dataset": args.dataset, "L": L,
+                                     "Method": "KGRW", "k": k, "w_prime": wp, "Seed": seed,
+                                     "Edge_Count": edges, "Mat_Time_s": round(mat_time, 4),
+                                     "Macro_F1": round(f1, 6) if f1 == f1 else "",
+                                     "CKA": round(cka_val, 6) if cka_val == cka_val else "",
+                                     "Pred_Agreement": round(pa_val, 6) if pa_val == pa_val else ""})
+                    fout.flush()
+                    existing_runs.add(run_key)
+                    kgrw_metrics.append({"f1": f1, "cka": cka_val, "pa": pa_val,
+                                         "edges": edges, "time": mat_time})
+
+        # ── Print aggregated summary from CSV ─────────────────────────────
+        print(f"\n  --- Aggregated (mean ± std, {len(args.seed_list)} seeds) ---")
+        import statistics
+        all_rows = list(csv.DictReader(open(out_csv, encoding="utf-8")))
+        def _agg(method, k_val, w_val):
+            rows_ = [r for r in all_rows
+                     if r["L"] == str(L) and r["Method"] == method
+                     and r["k"] == str(k_val) and r["w_prime"] == str(w_val)]
+            if not rows_: return None
+            def ms(col):
+                vals = [float(r[col]) for r in rows_ if r[col]]
+                if not vals: return float("nan"), float("nan")
+                return (statistics.mean(vals),
+                        statistics.stdev(vals) if len(vals) > 1 else 0.0)
+            edges = int(float(rows_[0]["Edge_Count"])) if rows_[0]["Edge_Count"] else 0
+            f1m, f1s   = ms("Macro_F1")
+            ckam, ckas = ms("CKA")
+            pam, pas   = ms("Pred_Agreement")
+            return edges, f1m, f1s, ckam, ckas, pam, pas
+
+        for w in sorted(args.w_values):
+            a = _agg("MPRW", "", w)
+            if a:
+                e,f,fs,c,cs,p,ps = a
+                print(f"  {'MPRW w='+str(w):<22} {e:>8,} {f:.4f}±{fs:.3f} {c:.4f}±{cs:.3f} {p:.4f}±{ps:.3f}")
+        for k in sorted(args.k_values):
+            for w in sorted(args.w_values):
+                a = _agg("KGRW", k, w)
+                if a:
+                    e,f,fs,c,cs,p,ps = a
+                    print(f"  {'KGRW k='+str(k)+' w='+str(w):<22} {e:>8,} {f:.4f}±{fs:.3f} {c:.4f}±{cs:.3f} {p:.4f}±{ps:.3f}")
 
     fout.close()
-    print(f"\nResults saved: {out_csv}")
-    print("Note: CKA is vs Exact embeddings. Requires z_exact_L<N>.pt in")
-    print("      results/kgrw_eval/ — run eval_kgrw.py with --exact-adj first")
-    print("      if CKA shows nan.")
+    print(f"\nRaw rows: {out_csv}")
 
 
 if __name__ == "__main__":
