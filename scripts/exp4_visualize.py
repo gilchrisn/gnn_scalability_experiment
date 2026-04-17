@@ -320,52 +320,36 @@ def _make_grid(n: int, row_h: float = 3.8) -> tuple:
 # ── PHASE I — Systems ────────────────────────────────────────────────────────
 
 def plot1a(df, datasets, out_dir, prefer_mp, L_fixed, k_fixed):
-    """Stacked bar: peak RAM (Mat + Inf), Exact vs KMV."""
+    """Grouped bar: materialization peak RAM, Exact vs KMV."""
     print(f"\n[plot1a] Peak Memory Footprint — stacked bar (L={L_fixed}, k={k_fixed})")
     x, width = np.arange(len(datasets)), 0.32
     fig, ax  = plt.subplots(figsize=(max(5.5, 1.8 * len(datasets)), 4.2))
 
     for method, offset in [("Exact", -width / 2), ("KMV", width / 2)]:
-        mat_m, mat_s, inf_m, inf_s = [], [], [], []
+        mat_m, mat_s = [], []
         for ds in datasets:
             mp   = _pick_mp(df, ds, prefer_mp, L_ref=L_fixed)
             base = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp) & (df["L"] == L_fixed)]
             sub  = base[base["Method"] == "Exact"] if method == "Exact" else \
                    base[(base["Method"] == "KMV") & (base["k_value"] == k_fixed)]
             m, s = _ms(sub, "Mat_RAM_MB"); mat_m.append(m); mat_s.append(s)
-            m2, s2 = _ms(sub, "Inf_RAM_MB"); inf_m.append(m2); inf_s.append(s2)
 
         color = _C[method]
-        ax.bar(x + offset, mat_m, width, color=color, alpha=0.85,
-               yerr=mat_s if any(s > 0 for s in mat_s) else None,
-               capsize=4, error_kw={"elinewidth": 1.2})
-        valid = [(i, inf_m[i], inf_s[i], mat_m[i]) for i in range(len(datasets))
-                 if not np.isnan(inf_m[i])]
-        if valid:
-            xi   = np.array([x[i] + offset for i, _, _, _ in valid])
-            yi   = [v for _, v, _, _ in valid]
-            si   = [s for _, _, s, _ in valid]
-            bi   = [b for _, _, _, b in valid]
-            ax.bar(xi, yi, width, bottom=bi,
-                   color=color, alpha=0.45, hatch=_HATCH_INF,
-                   yerr=si if any(s > 0 for s in si) else None,
-                   capsize=4, error_kw={"elinewidth": 1.0})
+        bars = ax.bar(x + offset, mat_m, width, color=color, alpha=0.85,
+                      yerr=mat_s if any(s > 0 for s in mat_s) else None,
+                      capsize=4, error_kw={"elinewidth": 1.2})
+        for bar, val in zip(bars, mat_m):
+            if not np.isnan(val):
+                ax.text(bar.get_x() + bar.get_width() / 2, val,
+                        f"{val:.0f}", ha="center", va="bottom", fontsize=7)
 
     ax.set_xticks(x); ax.set_xticklabels([_label(d) for d in datasets])
-    ax.set_ylabel("Peak RAM (MB)")
-    ax.set_title(f"Peak Memory Footprint (L={L_fixed}, k={k_fixed})\n"
-                 "Solid = Materialization, Hatched = Inference")
-
-    all_vals = df[df["Dataset"].isin(datasets)][["Mat_RAM_MB", "Inf_RAM_MB"]] \
-                 .stack().dropna()
-    if not all_vals.empty and (all_vals.max() / max(all_vals.min(), 1e-3)) > 50:
-        ax.set_yscale("log"); ax.set_ylabel("Peak RAM (MB, log scale)")
+    ax.set_ylabel("Materialization Peak RAM (MB)")
+    ax.set_title(f"Materialization Memory: Exact vs KMV (L={L_fixed}, k={k_fixed})")
 
     ax.legend(handles=[
         Patch(facecolor=_C["Exact"], label="Exact",              alpha=0.85),
         Patch(facecolor=_C["KMV"],   label=f"KMV (k={k_fixed})", alpha=0.85),
-        Patch(facecolor="grey",      label="Materialization", hatch=_HATCH_MAT, alpha=0.6),
-        Patch(facecolor="grey",      label="Inference",       hatch=_HATCH_INF, alpha=0.6),
     ], fontsize=7.5)
     fig.tight_layout()
     _save(fig, out_dir / "plot1a_memory_stacked.pdf")
@@ -566,15 +550,15 @@ def plot2(df, datasets, out_dir, prefer_mp, L_fixed):
 
 # ── Plot 3: Dirichlet Energy vs Depth ────────────────────────────────────────
 
-def plot3(df, datasets, out_dir, prefer_mp, k_fixed, depths):
-    print(f"\n[plot3] Dirichlet Energy vs Depth (k={k_fixed})")
+def plot3(df, datasets, out_dir, prefer_mp, k_fixed, w_fixed, depths):
+    print(f"\n[plot3] Dirichlet Energy vs Depth (k={k_fixed}, w={w_fixed})")
     fig, axes = _make_grid(len(datasets))
     for ax, ds in zip(axes, datasets):
         mp = _pick_mp(df, ds, prefer_mp)
         for method, label, ls in [
-            ("Exact", "Exact",                "--"),
-            ("KMV",   f"KMV (k={k_fixed})",   "-"),
-            ("MPRW",  "MPRW",                  "-"),
+            ("Exact", "Exact",                  "--"),
+            ("KMV",   f"KMV (k={k_fixed})",    "-"),
+            ("MPRW",  f"MPRW (w={w_fixed})",   "-"),
         ]:
             xs, ys, errs = [], [], []
             for L in depths:
@@ -585,7 +569,7 @@ def plot3(df, datasets, out_dir, prefer_mp, k_fixed, depths):
                              & (df["L"] == L) & (df["Method"] == "KMV")
                              & (df["k_value"] == k_fixed)]
                 elif method == "MPRW":
-                    sub = _mprw_sub_for_k(df, ds, mp, L, k_fixed)
+                    sub = _mprw_at_w(df, ds, mp, L, w_fixed)
                 else:
                     sub = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp)
                              & (df["L"] == L) & (df["Method"] == "Exact")]
@@ -602,7 +586,8 @@ def plot3(df, datasets, out_dir, prefer_mp, k_fixed, depths):
         ax.set_ylabel("Dirichlet Energy")
         ax.set_title(_label(ds)); ax.legend(fontsize=7)
 
-    fig.suptitle(f"Embedding Smoothness vs. Depth  (k={k_fixed})", fontsize=12)
+    fig.suptitle(f"Embedding Smoothness vs. Depth  (KMV k={k_fixed}, MPRW w={w_fixed})",
+                 fontsize=12)
     fig.tight_layout()
     _save(fig, out_dir / "plot3_dirichlet_vs_depth.pdf")
 
@@ -618,7 +603,7 @@ def _sub_query(df, ds, mp, L, method, k=None):
     return base
 
 
-def plot_k_sweep_suite(df, datasets, out_dir, prefer_mp, L_fixed):
+def plot_k_sweep_suite(df, datasets, out_dir, prefer_mp, L_fixed, w_fixed):
     """3-row × N-col figure: rows = (F1, CKA, Pred-Agreement), cols = datasets.
 
     Blueprint:
@@ -674,18 +659,19 @@ def plot_k_sweep_suite(df, datasets, out_dir, prefer_mp, L_fixed):
                 _line_with_band(ax, kmv_xs, kmv_ys, kmv_errs,
                                 _C["KMV"], _M["KMV"], "-", "KMV")
 
-            # MPRW: density-matched to each KMV k
-            mprw_xs, mprw_ys, mprw_errs = [], [], []
-            for k in all_k:
-                msub = _mprw_sub_for_k(df, ds, mp, L_fixed, int(k))
-                if msub.empty:
-                    continue
+            # MPRW: fixed w (no density matching).  Shown as a horizontal
+            # band so the reader sees MPRW's natural operating point — not
+            # a line that tracks KMV's k.
+            msub = _mprw_at_w(df, ds, mp, L_fixed, w_fixed)
+            if not msub.empty:
                 m, s = metric_fn(msub, L_fixed)
                 if not np.isnan(m):
-                    mprw_xs.append(int(k)); mprw_ys.append(m); mprw_errs.append(s)
-            if mprw_xs:
-                _line_with_band(ax, mprw_xs, mprw_ys, mprw_errs,
-                                _C["MPRW"], _M["MPRW"], "-", "MPRW")
+                    ax.axhline(m, color=_C["MPRW"], linestyle="-",
+                               linewidth=1.8, alpha=0.85,
+                               label=f"MPRW (w={w_fixed})")
+                    if not np.isnan(s) and s > 0:
+                        ax.axhspan(m - s, m + s, color=_C["MPRW"],
+                                   alpha=0.12, linewidth=0)
 
             if row == 1:      # CKA panel: fix y-range
                 ax.set_ylim(0.0, 1.10)
@@ -716,7 +702,7 @@ def plot_k_sweep_suite(df, datasets, out_dir, prefer_mp, L_fixed):
 
 # ── L-sweep suite: 3-panel (Dirichlet / F1 / CKA) vs L, one column per dataset ─
 
-def plot_l_sweep_suite(df, datasets, out_dir, prefer_mp, k_fixed, depths):
+def plot_l_sweep_suite(df, datasets, out_dir, prefer_mp, k_fixed, w_fixed, depths):
     """3-row × N-col figure: rows = (Dirichlet Energy, F1, CKA), cols = datasets.
 
     Blueprint:
@@ -729,7 +715,7 @@ def plot_l_sweep_suite(df, datasets, out_dir, prefer_mp, k_fixed, depths):
     as a ceiling reference.  CKA is read as CKA_L{L} (the deepest layer
     CKA for each model depth L), so it tracks the final representation.
     """
-    print(f"\n[plot_l_sweep_suite] 3-panel L-sweep (k={k_fixed})")
+    print(f"\n[plot_l_sweep_suite] 3-panel L-sweep (KMV k={k_fixed}, MPRW w={w_fixed})")
     n = len(datasets)
     valid_depths = [d for d in depths if d > 0]
 
@@ -748,9 +734,9 @@ def plot_l_sweep_suite(df, datasets, out_dir, prefer_mp, k_fixed, depths):
             ax = axes[row][col]
 
             for method, label, ls in [
-                ("Exact", "Exact",            "--"),
-                ("KMV",   f"KMV (k={k_fixed})", "-"),
-                ("MPRW",  "MPRW",               "-"),
+                ("Exact", "Exact",                  "--"),
+                ("KMV",   f"KMV (k={k_fixed})",    "-"),
+                ("MPRW",  f"MPRW (w={w_fixed})",   "-"),
             ]:
                 xs, ys, errs = [], [], []
                 for L in valid_depths:
@@ -759,7 +745,7 @@ def plot_l_sweep_suite(df, datasets, out_dir, prefer_mp, k_fixed, depths):
                                  & (df["L"] == L) & (df["Method"] == "KMV")
                                  & (df["k_value"] == k_fixed)]
                     elif method == "MPRW":
-                        sub = _mprw_sub_for_k(df, ds, mp, L, k_fixed)
+                        sub = _mprw_at_w(df, ds, mp, L, w_fixed)
                     else:
                         sub = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp)
                                  & (df["L"] == L) & (df["Method"] == "Exact")]
@@ -806,15 +792,16 @@ def plot_l_sweep_suite(df, datasets, out_dir, prefer_mp, k_fixed, depths):
             rotation=90,
         )
 
-    fig.suptitle(f"Depth Robustness Proof: L-Sweep Suite  (k={k_fixed})", fontsize=13,
-                 fontweight="bold")
+    fig.suptitle(f"Depth Robustness Proof: L-Sweep Suite  "
+                 f"(KMV k={k_fixed}, MPRW w={w_fixed})",
+                 fontsize=13, fontweight="bold")
     fig.tight_layout(rect=[0.04, 0, 1, 0.97])
     _save(fig, out_dir / "plot_l_sweep_suite.pdf")
 
 
 # ── CKA per-layer trajectory (within a fixed-depth run) ──────────────────────
 
-def plot_cka_per_layer(df, datasets, out_dir, prefer_mp, k_fixed,
+def plot_cka_per_layer(df, datasets, out_dir, prefer_mp, k_fixed, w_fixed,
                        L_for_trajectory: int = 4):
     """For a model of depth L_for_trajectory, plot CKA_L1..CKA_L{L} vs layer index.
 
@@ -823,7 +810,7 @@ def plot_cka_per_layer(df, datasets, out_dir, prefer_mp, k_fixed,
     final-layer CKA only.
     """
     print(f"\n[plot_cka_per_layer] Within-model CKA trajectory "
-          f"(L={L_for_trajectory}, k={k_fixed})")
+          f"(L={L_for_trajectory}, KMV k={k_fixed}, MPRW w={w_fixed})")
     n_layers   = L_for_trajectory
     layer_cols = [f"CKA_L{i}" for i in range(1, n_layers + 1)]
 
@@ -831,15 +818,15 @@ def plot_cka_per_layer(df, datasets, out_dir, prefer_mp, k_fixed,
     for ax, ds in zip(axes, datasets):
         mp = _pick_mp(df, ds, prefer_mp)
         for method, label, ls in [
-            ("KMV",  f"KMV (k={k_fixed})", "-"),
-            ("MPRW", "MPRW",               "-"),
+            ("KMV",  f"KMV (k={k_fixed})",   "-"),
+            ("MPRW", f"MPRW (w={w_fixed})",  "-"),
         ]:
             if method == "KMV":
                 sub = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp)
                          & (df["L"] == L_for_trajectory) & (df["Method"] == "KMV")
                          & (df["k_value"] == k_fixed)]
-            else:  # MPRW — density-matched to KMV at k_fixed
-                sub = _mprw_sub_for_k(df, ds, mp, L_for_trajectory, k_fixed)
+            else:  # MPRW at fixed w (no density matching)
+                sub = _mprw_at_w(df, ds, mp, L_for_trajectory, w_fixed)
 
             xs, ys, errs = [], [], []
             for i, col in enumerate(layer_cols, start=1):
@@ -862,7 +849,8 @@ def plot_cka_per_layer(df, datasets, out_dir, prefer_mp, k_fixed,
         ax.legend(fontsize=7)
 
     fig.suptitle(
-        f"Within-Model CKA Trajectory  (L={L_for_trajectory}, k={k_fixed})",
+        f"Within-Model CKA Trajectory  "
+        f"(L={L_for_trajectory}, KMV k={k_fixed}, MPRW w={w_fixed})",
         fontsize=12,
     )
     fig.tight_layout()
@@ -904,6 +892,152 @@ def _mprw_sub_for_k(df: pd.DataFrame, ds: str, mp: str, L: int,
         return pd.DataFrame()
     return df[(df["Dataset"] == ds) & (df["MetaPath"] == mp) & (df["L"] == L)
               & (df["Method"] == "MPRW") & (df["w_value"] == w)]
+
+
+def _mprw_at_w(df: pd.DataFrame, ds: str, mp: str, L: int,
+               w: int) -> pd.DataFrame:
+    """Return MPRW rows at a fixed w (no density matching to KMV)."""
+    return df[(df["Dataset"] == ds) & (df["MetaPath"] == mp) & (df["L"] == L)
+              & (df["Method"] == "MPRW") & (df["w_value"] == w)]
+
+
+# ── Memory vs F1 Pareto  (KMV k-sweep vs MPRW w-sweep, same axes) ───────────
+
+def plot_memory_vs_f1(df, datasets, out_dir, prefer_mp, L_fixed):
+    """Mat_RAM_MB (x, log scale) vs Macro-F1 (y), one panel per dataset.
+
+    KMV dots at each k, MPRW dots at each w — both sweeps on the SAME axes.
+    Exact plotted as a single reference point (black ★).  Shows directly
+    whether KMV or MPRW achieves a given F1 at less RAM.  No density
+    matching — each method stays in its natural operating range.
+    """
+    print(f"\n[plot_memory_vs_f1] Memory vs F1 Pareto (L={L_fixed})")
+    n = len(datasets)
+    fig, axes = plt.subplots(1, n, figsize=(4.5 * n, 4.2), squeeze=False)
+
+    for col, ds in enumerate(datasets):
+        ax = axes[0][col]
+        mp = _pick_mp(df, ds, prefer_mp, L_ref=L_fixed)
+        base = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp)
+                  & (df["L"] == L_fixed)]
+
+        # Exact reference point
+        esub = base[base["Method"] == "Exact"]
+        if not esub.empty:
+            ex_ram, _  = _ms(esub, "Mat_RAM_MB")
+            ex_f1,  _  = _ms(esub, "Macro_F1")
+            if not (np.isnan(ex_ram) or np.isnan(ex_f1)):
+                ax.scatter([ex_ram], [ex_f1], marker="*", s=240,
+                           c=_C["Exact"], edgecolors="black",
+                           linewidths=0.8, zorder=5, label="Exact")
+
+        # KMV k-sweep
+        kmv_base = base[base["Method"] == "KMV"].dropna(subset=["k_value"])
+        xs, ys, xerr, yerr, ks = [], [], [], [], []
+        for k in sorted(kmv_base["k_value"].unique()):
+            sub = kmv_base[kmv_base["k_value"] == k]
+            rm, rs = _ms(sub, "Mat_RAM_MB")
+            fm, fs = _ms(sub, "Macro_F1")
+            if np.isnan(rm) or np.isnan(fm):
+                continue
+            xs.append(rm); ys.append(fm)
+            xerr.append(rs); yerr.append(fs); ks.append(int(k))
+        if xs:
+            ax.errorbar(xs, ys, xerr=xerr, yerr=yerr, fmt="o-",
+                        color=_C["KMV"], markersize=7, linewidth=1.8,
+                        capsize=3, elinewidth=1.0, alpha=0.9, label="KMV (k-sweep)")
+            for x, y, k in zip(xs, ys, ks):
+                ax.annotate(f"k={k}", (x, y), xytext=(4, 4),
+                            textcoords="offset points", fontsize=6,
+                            color=_C["KMV"])
+
+        # MPRW w-sweep
+        mprw_base = base[base["Method"] == "MPRW"].dropna(subset=["w_value"])
+        xs, ys, xerr, yerr, ws = [], [], [], [], []
+        for w in sorted(mprw_base["w_value"].unique()):
+            sub = mprw_base[mprw_base["w_value"] == w]
+            rm, rs = _ms(sub, "Mat_RAM_MB")
+            fm, fs = _ms(sub, "Macro_F1")
+            if np.isnan(rm) or np.isnan(fm):
+                continue
+            xs.append(rm); ys.append(fm)
+            xerr.append(rs); yerr.append(fs); ws.append(int(w))
+        if xs:
+            ax.errorbar(xs, ys, xerr=xerr, yerr=yerr, fmt="s-",
+                        color=_C["MPRW"], markersize=6, linewidth=1.8,
+                        capsize=3, elinewidth=1.0, alpha=0.9, label="MPRW (w-sweep)")
+            for x, y, w in zip(xs, ys, ws):
+                ax.annotate(f"w={w}", (x, y), xytext=(4, -10),
+                            textcoords="offset points", fontsize=6,
+                            color=_C["MPRW"])
+
+        ax.set_xscale("log")
+        ax.set_xlabel("Mat. Peak RAM (MB, log)")
+        ax.set_ylabel("Macro-F1")
+        ax.set_title(_label(ds))
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend(fontsize=7, loc="best")
+
+    fig.suptitle(f"Memory vs F1 Pareto  (L={L_fixed})", fontsize=12)
+    fig.tight_layout()
+    _save(fig, out_dir / "plot_memory_vs_f1.pdf")
+
+
+def plot_memory_vs_pa(df, datasets, out_dir, prefer_mp, L_fixed):
+    """Mat_RAM_MB (x, log) vs Prediction Agreement (y).  KMV vs MPRW sweeps.
+
+    PA is the truer fidelity-vs-Exact metric; this panel is a cleaner
+    read of the 'do I pick KMV or MPRW at this RAM budget?' question.
+    """
+    print(f"\n[plot_memory_vs_pa] Memory vs Prediction Agreement (L={L_fixed})")
+    n = len(datasets)
+    fig, axes = plt.subplots(1, n, figsize=(4.5 * n, 4.2), squeeze=False)
+
+    for col, ds in enumerate(datasets):
+        ax = axes[0][col]
+        mp = _pick_mp(df, ds, prefer_mp, L_ref=L_fixed)
+        base = df[(df["Dataset"] == ds) & (df["MetaPath"] == mp)
+                  & (df["L"] == L_fixed)]
+
+        # Exact PA is 1.0 by definition — reference only on RAM axis
+        esub = base[base["Method"] == "Exact"]
+        if not esub.empty:
+            ex_ram, _ = _ms(esub, "Mat_RAM_MB")
+            if not np.isnan(ex_ram):
+                ax.axvline(ex_ram, color=_C["Exact"], linestyle=":",
+                           linewidth=1.2, alpha=0.7,
+                           label=f"Exact RAM ({ex_ram:.0f} MB)")
+
+        for method, marker, label in [("KMV", "o", "KMV (k-sweep)"),
+                                      ("MPRW", "s", "MPRW (w-sweep)")]:
+            col_key = "k_value" if method == "KMV" else "w_value"
+            sub_all = base[base["Method"] == method].dropna(subset=[col_key])
+            xs, ys, xerr, yerr, bs = [], [], [], [], []
+            for b in sorted(sub_all[col_key].unique()):
+                sub = sub_all[sub_all[col_key] == b]
+                rm, rs = _ms(sub, "Mat_RAM_MB")
+                pm, ps = _ms(sub, "Pred_Similarity")
+                if np.isnan(rm) or np.isnan(pm):
+                    continue
+                xs.append(rm); ys.append(pm)
+                xerr.append(rs); yerr.append(ps); bs.append(int(b))
+            if xs:
+                ax.errorbar(xs, ys, xerr=xerr, yerr=yerr,
+                            fmt=f"{marker}-", color=_C[method],
+                            markersize=6, linewidth=1.8, capsize=3,
+                            elinewidth=1.0, alpha=0.9, label=label)
+
+        ax.set_xscale("log")
+        ax.set_xlabel("Mat. Peak RAM (MB, log)")
+        ax.set_ylabel("Prediction Agreement vs Exact")
+        ax.set_ylim(0, 1.05)
+        ax.set_title(_label(ds))
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend(fontsize=7, loc="lower right")
+
+    fig.suptitle(f"Memory vs Prediction-Agreement Pareto  (L={L_fixed})", fontsize=12)
+    fig.tight_layout()
+    _save(fig, out_dir / "plot_memory_vs_pa.pdf")
 
 
 # ── New density-axis plots ──────────────────────────────────────────────────
@@ -1344,6 +1478,8 @@ _ALL_PLOTS  = [
     "plot_quality_vs_density",
     "plot_time_vs_density",
     "plot_collision_plateau",
+    "plot_memory_vs_f1",
+    "plot_memory_vs_pa",
 ]
 _ALL_TABLES = ["table1", "table2", "app_a", "master"]
 
@@ -1365,6 +1501,9 @@ def _parse():
                         "Default: auto-select densest per dataset.")
     p.add_argument("--k-fixed", type=int, default=32,
                    help="Fixed k budget for L-sweep plots and tables (default: 32)")
+    p.add_argument("--w-fixed", type=int, default=32,
+                   help="Fixed MPRW w budget for secondary plots (not density-matched). "
+                        "Default 32 — the natural MPRW operating point paired with k=32.")
     p.add_argument("--l-fixed", type=int, default=2,
                    help="Fixed depth for k-sweep plots and stacked bar (default: 2)")
     p.add_argument("--depth", nargs="+", type=int, default=[1, 2, 3, 4],
@@ -1456,18 +1595,22 @@ def main():
 
     # L-sweep (standalone Dirichlet + 3-panel suite)
     if "plot3" in plots:
-        plot3(df, datasets, out_dir, args.metapath, args.k_fixed, args.depth)
+        plot3(df, datasets, out_dir, args.metapath,
+              args.k_fixed, args.w_fixed, args.depth)
     if "plot_l_sweep_suite" in plots:
-        plot_l_sweep_suite(df, datasets, out_dir, args.metapath, args.k_fixed, args.depth)
+        plot_l_sweep_suite(df, datasets, out_dir, args.metapath,
+                           args.k_fixed, args.w_fixed, args.depth)
 
     # k-sweep (3-panel suite)
     if "plot_k_sweep_suite" in plots:
-        plot_k_sweep_suite(df, datasets, out_dir, args.metapath, args.l_fixed)
+        plot_k_sweep_suite(df, datasets, out_dir, args.metapath,
+                           args.l_fixed, args.w_fixed)
 
     # Per-layer CKA trajectory
     if "plot_cka_per_layer" in plots:
         plot_cka_per_layer(df, datasets, out_dir, args.metapath,
-                           args.k_fixed, L_for_trajectory=args.cka_trajectory_l)
+                           args.k_fixed, args.w_fixed,
+                           L_for_trajectory=args.cka_trajectory_l)
 
     # Density-axis plots (KMV vs MPRW on common edge-count axis)
     if "plot_quality_vs_density" in plots:
@@ -1476,6 +1619,12 @@ def main():
         plot_time_vs_density(df, datasets, out_dir, args.metapath, args.l_fixed)
     if "plot_collision_plateau" in plots:
         plot_collision_plateau(df, datasets, out_dir, args.metapath, args.l_fixed)
+
+    # Memory-vs-quality Pareto plots (KMV k-sweep vs MPRW w-sweep)
+    if "plot_memory_vs_f1" in plots:
+        plot_memory_vs_f1(df, datasets, out_dir, args.metapath, args.l_fixed)
+    if "plot_memory_vs_pa" in plots:
+        plot_memory_vs_pa(df, datasets, out_dir, args.metapath, args.l_fixed)
 
     print(f"\nDone. {len(plots)} plots + {len(tables)} tables -> {out_dir}/")
 

@@ -500,13 +500,246 @@ static void cmd_profile(const std::string& dataset,
 
 
 // ---------------------------------------------------------------------------
+// KMV sketch merge — O(|dst| + |src|) sorted merge, keep k smallest unique.
+// Both dst and src must be sorted ascending. Result is sorted, deduped, ≤k.
+// ---------------------------------------------------------------------------
+static void merge_kmv(std::vector<uint32_t>& dst,
+                      const std::vector<uint32_t>& src,
+                      int k) {
+    if (src.empty()) return;
+    if (dst.empty()) {
+        dst = src;
+        if ((int)dst.size() > k) dst.resize(k);
+        return;
+    }
+    std::vector<uint32_t> merged;
+    merged.reserve(std::min((size_t)k, dst.size() + src.size()));
+
+    size_t i = 0, j = 0;
+    while (i < dst.size() && j < src.size() && (int)merged.size() < k) {
+        if (dst[i] < src[j]) {
+            if (merged.empty() || merged.back() != dst[i])
+                merged.push_back(dst[i]);
+            i++;
+        } else if (dst[i] > src[j]) {
+            if (merged.empty() || merged.back() != src[j])
+                merged.push_back(src[j]);
+            j++;
+        } else {                          // equal — take once
+            if (merged.empty() || merged.back() != dst[i])
+                merged.push_back(dst[i]);
+            i++; j++;
+        }
+    }
+    while (i < dst.size() && (int)merged.size() < k) {
+        if (merged.empty() || merged.back() != dst[i])
+            merged.push_back(dst[i]);
+        i++;
+    }
+    while (j < src.size() && (int)merged.size() < k) {
+        if (merged.empty() || merged.back() != src[j])
+            merged.push_back(src[j]);
+        j++;
+    }
+    dst = std::move(merged);
+}
+
+// ---------------------------------------------------------------------------
+// PATH 3 — KGRW  (KMV-Guided Random Walk)
+//
+// Hybrid materialization that uses KMV sketch propagation for the first
+// floor(L/2) meta-path hops and short random walks for the remaining
+// ceil(L/2) hops.  Combines KMV's uniform midpoint coverage with MPRW's
+// cheap walk-based endpoint discovery.
+//
+// Phase 1: KMV sketch propagation (hops 0 .. mid_hop-1)
+//   Hash each source, propagate k-min sketches level-by-level.
+//   Midpoint nodes accumulate sorted sketches of ≤k source hashes.
+//
+// Phase 2: Short random walks (hops mid_hop .. n_hops-1)
+//   For every midpoint with a non-empty sketch, do w' independent walks.
+//
+// Phase 3: Cross-product edge construction
+//   For midpoint m: ∀ source s ∈ sketch[m], ∀ endpoint u ∈ walks[m]:
+//     Ã[s,u] = 1.  Dedup + make undirected.
+//
+// Output format is identical to cmd_materialize (adjacency list).
+// ---------------------------------------------------------------------------
+static void cmd_kgrw(const std::string& dataset,
+                     const std::string& rule_file,
+                     const std::string& output_file,
+                     int k_budget,
+                     int w_prime,
+                     uint64_t seed,
+                     int64_t /*max_memory_bytes*/) {
+    // ── Graph + rule load (NOT timed — same exclusion as Exact/KMV) ────────
+    HeterGraph g(dataset);
+    Pattern* qp = parse_first_rule_from_file(rule_file);
+
+    uint32_t n_nodes = (uint32_t)g.NT.size();
+    int      n_hops  = (int)qp->ETypes.size();
+    int      mid_hop = n_hops / 2;             // KMV covers hops [0, mid_hop)
+    int      walk_hops = n_hops - mid_hop;     // walks cover hops [mid_hop, n_hops)
+
+    std::vector<StepAccess> steps(n_hops);
+    for (int h = 0; h < n_hops; h++)
+        steps[h] = build_step(g, qp->ETypes[h], qp->EDirect[h]);
+
+    std::vector<uint32_t> sources = collect_sources(g, qp);
+    uint32_t n_src = (uint32_t)sources.size();
+
+    std::cerr << "[kgrw] n_nodes=" << n_nodes
+              << " n_src=" << n_src
+              << " n_hops=" << n_hops
+              << " mid_hop=" << mid_hop
+              << " walk_hops=" << walk_hops << "\n";
+
+    // ── Algorithmic timer starts here ──────────────────────────────────────
+    auto t_start = std::chrono::steady_clock::now();
+
+    // ── Phase 1: KMV Sketch Propagation ────────────────────────────────────
+    // Hash each source node; store reverse mapping hash → node ID.
+    std::unordered_map<uint32_t, uint32_t> hash_to_node;
+    hash_to_node.reserve(n_src * 2);
+
+    // Dense sketch storage: sketch[u] = sorted vector of ≤k hash values.
+    std::vector<std::vector<uint32_t>> cur_sketch(n_nodes);
+
+    PCG32 hash_rng(seed, 0);
+    for (uint32_t si = 0; si < n_src; si++) {
+        uint32_t u = sources[si];
+        uint32_t h;
+        do { h = hash_rng.next_u32(); } while (hash_to_node.count(h));
+        hash_to_node[h] = u;
+        cur_sketch[u].push_back(h);           // single-element sketch
+    }
+
+    auto t_hash = std::chrono::steady_clock::now();
+    std::cerr << "[kgrw] phase1 hash: "
+              << std::chrono::duration<double>(t_hash - t_start).count() << "s\n";
+
+    // Level-by-level propagation through hops 0 .. mid_hop-1.
+    for (int hop = 0; hop < mid_hop; hop++) {
+        std::vector<std::vector<uint32_t>> next_sketch(n_nodes);
+
+        for (uint32_t u = 0; u < n_nodes; u++) {
+            if (cur_sketch[u].empty()) continue;
+            uint32_t deg = steps[hop].degree(u);
+            for (uint32_t i = 0; i < deg; i++) {
+                uint32_t v = steps[hop].dst[steps[hop].beg_ptr[u] + i];
+                merge_kmv(next_sketch[v], cur_sketch[u], k_budget);
+            }
+        }
+
+        uint32_t n_active = 0;
+        for (uint32_t u = 0; u < n_nodes; u++)
+            if (!next_sketch[u].empty()) n_active++;
+
+        std::cerr << "[kgrw] phase1 hop " << hop
+                  << " → " << n_active << " active nodes at next level\n";
+        cur_sketch = std::move(next_sketch);
+    }
+
+    auto t_prop = std::chrono::steady_clock::now();
+    std::cerr << "[kgrw] phase1 propagation: "
+              << std::chrono::duration<double>(t_prop - t_hash).count() << "s\n";
+
+    // ── Phase 2+3: Walk & cross-product pair.
+    //
+    //    For midpoint m with sketch S_m (|S_m| ≤ k sources) and w' walks:
+    //      Each walk j reaches endpoint u.
+    //      Emit edge (s, u) for EVERY s in S_m — cross-product, not round-robin.
+    //
+    //    Theoretical basis: coupon-collector universe shrinks from d_S*d_T
+    //    (MPRW) to d_T (KGRW), saving a factor of d_S walks.  Each walk is
+    //    multiplied across all k sources in the sketch at zero extra walk cost.
+    // ────────────────────────────────────────────────────────────────────────
+    std::vector<std::vector<uint32_t>> adj(n_nodes);
+
+    uint32_t n_mid_active = 0;
+    uint32_t total_walks  = 0;
+    uint32_t dead_walks   = 0;
+
+    for (uint32_t m = 0; m < n_nodes; m++) {
+        if (cur_sketch[m].empty()) continue;
+        n_mid_active++;
+
+        for (int w = 0; w < w_prime; w++) {
+            PCG32 rng(seed + 1, (uint64_t)m * 1000003ULL + (uint64_t)w + 1);
+
+            uint32_t cur = m;
+            bool alive = true;
+            for (int h = mid_hop; h < n_hops && alive; h++) {
+                uint32_t deg = steps[h].degree(cur);
+                if (deg == 0) { alive = false; break; }
+                cur = steps[h].random_nbr(cur, rng);
+            }
+            total_walks++;
+
+            if (!alive) { dead_walks++; continue; }
+
+            uint32_t u = cur;
+            // Cross-product: pair endpoint u with EVERY source in sketch.
+            for (uint32_t hash_val : cur_sketch[m]) {
+                auto src_it = hash_to_node.find(hash_val);
+                if (src_it == hash_to_node.end()) continue;
+                uint32_t s = src_it->second;
+                if (u == s) continue;  // no self-loops
+                auto& nbrs = adj[s];
+                auto pos = std::lower_bound(nbrs.begin(), nbrs.end(), u);
+                if (pos == nbrs.end() || *pos != u)
+                    nbrs.insert(pos, u);
+            }
+        }
+    }
+
+    auto t_build = std::chrono::steady_clock::now();
+    std::cerr << "[kgrw] phase2+3 walk&pair: "
+              << std::chrono::duration<double>(t_build - t_prop).count() << "s"
+              << "  midpoints=" << n_mid_active
+              << "  total_walks=" << total_walks
+              << "  dead=" << dead_walks << "\n";
+
+    // ── Make undirected ─────────────────────────────────────────────────────
+    for (uint32_t u = 0; u < n_nodes; u++) {
+        for (uint32_t v : adj[u]) {
+            if (v == u) continue;
+            auto& nbrs_v = adj[v];
+            auto pos = std::lower_bound(nbrs_v.begin(), nbrs_v.end(), u);
+            if (pos == nbrs_v.end() || *pos != u)
+                nbrs_v.insert(pos, u);
+        }
+    }
+
+    auto t_end = std::chrono::steady_clock::now();
+    double algo_seconds = std::chrono::duration<double>(t_end - t_start).count();
+
+    // ── Output ─────────────────────────────────────────────────────────────
+    write_adj(output_file, adj, n_nodes);
+    std::cout << "time:" << algo_seconds << std::endl;
+
+    int64_t total_edges = 0;
+    for (uint32_t u = 0; u < n_nodes; u++) total_edges += (int64_t)adj[u].size();
+
+    std::cerr << "[kgrw] DONE  sources=" << n_src
+              << "  midpoints=" << n_mid_active
+              << "  k=" << k_budget << "  w'=" << w_prime
+              << "  edges=" << total_edges
+              << "  time=" << algo_seconds << "s\n";
+
+    delete qp;
+}
+
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "Usage:\n"
                   << "  mprw_exec materialize <dataset> <rule_file> <output> <w> <seed> [max_mem_mb]\n"
-                  << "  mprw_exec profile     <dataset> <rule_file> <kmv_adj> <output> <seed> [max_mem_mb]\n";
+                  << "  mprw_exec profile     <dataset> <rule_file> <kmv_adj> <output> <seed> [max_mem_mb]\n"
+                  << "  mprw_exec kgrw        <dataset> <rule_file> <output> <k> <w_prime> <seed> [max_mem_mb]\n";
         return 1;
     }
 
@@ -536,6 +769,18 @@ int main(int argc, char* argv[]) {
         int64_t  max_mem_mb = (argc >= 8) ? std::stoll(argv[7]) : 0;
         cmd_profile(dataset, rule_file, kmv_adj, output, seed,
                     max_mem_mb > 0 ? max_mem_mb * 1024LL * 1024LL : 0LL);
+    } else if (mode == "kgrw") {
+        if (argc < 8) {
+            std::cerr << "Usage: mprw_exec kgrw <dataset> <rule_file> <output> <k> <w_prime> <seed> [max_mem_mb]\n";
+            return 1;
+        }
+        std::string output  = argv[4];
+        int k_budget        = std::stoi(argv[5]);
+        int w_prime         = std::stoi(argv[6]);
+        uint64_t seed       = (uint64_t)std::stoll(argv[7]);
+        int64_t  max_mem_mb = (argc >= 9) ? std::stoll(argv[8]) : 0;
+        cmd_kgrw(dataset, rule_file, output, k_budget, w_prime, seed,
+                 max_mem_mb > 0 ? max_mem_mb * 1024LL * 1024LL : 0LL);
     } else {
         std::cerr << "[mprw_exec] Unknown mode: " << mode << "\n";
         return 1;
