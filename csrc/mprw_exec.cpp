@@ -502,6 +502,7 @@ static void cmd_profile(const std::string& dataset,
 // ---------------------------------------------------------------------------
 // KMV sketch merge — O(|dst| + |src|) sorted merge, keep k smallest unique.
 // Both dst and src must be sorted ascending. Result is sorted, deduped, ≤k.
+// Early exit: if dst is full and src's minimum >= dst's maximum, src adds nothing.
 // ---------------------------------------------------------------------------
 static void merge_kmv(std::vector<uint32_t>& dst,
                       const std::vector<uint32_t>& src,
@@ -512,6 +513,8 @@ static void merge_kmv(std::vector<uint32_t>& dst,
         if ((int)dst.size() > k) dst.resize(k);
         return;
     }
+    // O(1) early exit: full dst, src's min can't improve it
+    if ((int)dst.size() == k && src[0] >= dst.back()) return;
     std::vector<uint32_t> merged;
     merged.reserve(std::min((size_t)k, dst.size() + src.size()));
 
@@ -619,25 +622,35 @@ static void cmd_kgrw(const std::string& dataset,
               << std::chrono::duration<double>(t_hash - t_start).count() << "s\n";
 
     // Level-by-level propagation through hops 0 .. mid_hop-1.
-    for (int hop = 0; hop < mid_hop; hop++) {
-        std::vector<std::vector<uint32_t>> next_sketch(n_nodes);
+    // Reuse next_sketch buffer to avoid O(n_nodes) alloc/free per hop.
+    // will_clear: after swap, next_sketch = old cur_sketch which may have stale data.
+    //   We clear exactly the nodes that were active in the previous cur_sketch,
+    //   guaranteeing next_sketch is zero when we write hop h.
+    std::vector<std::vector<uint32_t>> next_sketch(n_nodes);
+    std::vector<uint32_t> cur_active(sources.begin(), sources.end());
+    std::vector<uint32_t> next_active;
+    std::vector<uint32_t> will_clear;   // cleared from next_sketch at start of each hop
+    next_active.reserve(n_nodes);
 
-        for (uint32_t u = 0; u < n_nodes; u++) {
-            if (cur_sketch[u].empty()) continue;
+    for (int hop = 0; hop < mid_hop; hop++) {
+        // Clear stale data left in next_sketch from 1 hop ago
+        for (uint32_t v : will_clear) next_sketch[v].clear();
+        next_active.clear();
+
+        for (uint32_t u : cur_active) {
             uint32_t deg = steps[hop].degree(u);
             for (uint32_t i = 0; i < deg; i++) {
                 uint32_t v = steps[hop].dst[steps[hop].beg_ptr[u] + i];
+                if (next_sketch[v].empty()) next_active.push_back(v);
                 merge_kmv(next_sketch[v], cur_sketch[u], k_budget);
             }
         }
 
-        uint32_t n_active = 0;
-        for (uint32_t u = 0; u < n_nodes; u++)
-            if (!next_sketch[u].empty()) n_active++;
-
         std::cerr << "[kgrw] phase1 hop " << hop
-                  << " → " << n_active << " active nodes at next level\n";
-        cur_sketch = std::move(next_sketch);
+                  << " → " << next_active.size() << " active nodes at next level\n";
+        will_clear = cur_active;
+        cur_active = next_active;
+        cur_sketch.swap(next_sketch);
     }
 
     auto t_prop = std::chrono::steady_clock::now();
@@ -653,6 +666,7 @@ static void cmd_kgrw(const std::string& dataset,
     //    Theoretical basis: coupon-collector universe shrinks from d_S*d_T
     //    (MPRW) to d_T (KGRW), saving a factor of d_S walks.  Each walk is
     //    multiplied across all k sources in the sketch at zero extra walk cost.
+    //
     // ────────────────────────────────────────────────────────────────────────
     std::vector<std::vector<uint32_t>> adj(n_nodes);
 
@@ -684,7 +698,7 @@ static void cmd_kgrw(const std::string& dataset,
                 auto src_it = hash_to_node.find(hash_val);
                 if (src_it == hash_to_node.end()) continue;
                 uint32_t s = src_it->second;
-                if (u == s) continue;  // no self-loops
+                if (u == s) continue;
                 auto& nbrs = adj[s];
                 auto pos = std::lower_bound(nbrs.begin(), nbrs.end(), u);
                 if (pos == nbrs.end() || *pos != u)
