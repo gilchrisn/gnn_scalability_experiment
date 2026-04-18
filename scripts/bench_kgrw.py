@@ -368,7 +368,7 @@ def main() -> None:
                                     capture_output=True, text=True)
                 edges = int(cr.stdout.strip()) if cr.stdout.strip().isdigit() else 0
 
-                label  = f"mprw_w{w}_s{seed}_L{L}"
+                label  = f"mprw_w{w}_s{seed}_L{L}_{args.dataset}"
                 z_out  = str(tmp_dir / f"z_{label}.pt")
                 inf    = _run_inference(adj_wsl, feat_file, str(weights_path), z_out,
                                         labels_file, mask_file,
@@ -406,7 +406,7 @@ def main() -> None:
                     run_key = (str(L), "KGRW", str(k), str(wp), str(seed))
                     if run_key in existing_runs:
                         continue
-                    label   = f"kgrw_k{k}_wp{wp}_s{seed}_L{L}"
+                    label   = f"kgrw_k{k}_wp{wp}_s{seed}_L{L}_{args.dataset}"
                     adj_wsl = f"/tmp/{label}_{args.dataset}.adj"
                     z_out   = str(tmp_dir / f"z_{label}.pt")
                     try:

@@ -255,3 +255,162 @@ python scripts/analysis_is_bias.py --dataset HGB_DBLP --sample 2000
 ```
 
 Raw data: `results/HGB_DBLP/kgrw_bench.csv`, `results/HGB_ACM/kgrw_bench.csv`, `results/HGB_IMDB/kgrw_bench.csv`
+
+---
+
+## 10. Adaptive Saturation-Triggered Walks (STW)
+
+**Motivation.** Sections 2–5 established that MPRW and KGRW each dominate on disjoint coverage regimes, with a graph-computable crossover $E^*$. Empirically (`memory/project_kgrw_findings.md`, depth sweeps), a *second* form of complementarity emerges along the endpoint-degree axis:
+
+- **Tail endpoints** ($r_L(w) \le k$) — KMV sketches reconstruct the reverse-reachable source set **exactly** (Lemma 10.1). MPRW under-covers tails due to coupon-collector + IS bias.
+- **Hub endpoints** ($r_L(w) > k$) — KMV sketches drop to a size-$k$ sub-sample; MPRW walks over-sample hubs in a way that happens to align with SAGE's aggregation distribution.
+
+STW marries the two into a **single unified algorithm** whose mode at each endpoint is determined by a local signal — sketch saturation — rather than a global phase boundary.
+
+### 10.1 Notation
+
+Let $\tau = (e_1, \ldots, e_L)$ be the meta-path, $V_\ell$ the node type at hop $\ell$, and $r : V_0 \to [0,1)$ a uniform random hash. Let
+
+- $N_\ell^{-1}(w) = \{u \in V_0 : u \text{ reaches } w \text{ in } \ell \text{ hops along } \tau\}$ — reverse-reachable source set
+- $r_\ell(w) = |N_\ell^{-1}(w)|$
+- $K_\ell[w] \subset [0,1)$, $|K_\ell[w]| \le k$ — KMV sketch at $w$ after $\ell$ hops
+- $H : [0,1) \to V_0$ — inverse hash map, $H(r(u)) = u$
+
+**Propagation.** $K_0[v] = \{r(v)\}$ for $v \in V_0$. For $\ell \ge 1$, $K_\ell[w] = \text{KMV-merge}_k \left( \bigcup_{v \xrightarrow{e_\ell} w} K_{\ell-1}[v] \right)$, keeping the $k$ smallest distinct values.
+
+### 10.2 Two foundational lemmas
+
+**Lemma 10.1 (Pointwise Exactness).** *For every $w \in V_\ell$:*
+
+$$r_\ell(w) \le k \;\Longleftrightarrow\; K_\ell[w] = \{r(u) : u \in N_\ell^{-1}(w)\}.$$
+
+*In this case, $\{H(x) : x \in K_\ell[w]\} = N_\ell^{-1}(w)$ exactly (zero error).*
+
+**Proof.** Induction on $\ell$. Base $\ell=0$: $K_0[v] = \{r(v)\}$, $N_0^{-1}(v) = \{v\}$; immediate. Inductive step: write $A_\ell(w) = \bigcup_{v \xrightarrow{e_\ell} w} \{r(u) : u \in N_{\ell-1}^{-1}(v)\} = \{r(u) : u \in N_\ell^{-1}(w)\}$. Min-$k$ merge is associative, so $K_\ell[w] = \min\text{-}k(A_\ell(w))$. If $|A_\ell(w)| = r_\ell(w) \le k$, $\min$-$k$ is the identity, giving $K_\ell[w] = A_\ell(w)$. Conversely, if $K_\ell[w] = A_\ell(w)$ then $|K_\ell[w]| = r_\ell(w)$, forcing $r_\ell(w) \le k$. $\square$
+
+**Lemma 10.2 (Uniform Sub-Sampling).** *If $r_\ell(w) > k$, then the set $\{H(x) : x \in K_\ell[w]\}$ is a uniform random sample of size $k$ drawn without replacement from $N_\ell^{-1}(w)$.*
+
+**Proof.** $r$ is a uniform random hash so the hashes $\{r(u) : u \in N_\ell^{-1}(w)\}$ are i.i.d. uniform. The $k$ smallest values of $r_\ell(w)$ i.i.d. uniforms select each size-$k$ subset with probability $\binom{r_\ell(w)}{k}^{-1}$ — i.e. uniform sampling without replacement. $\square$
+
+### 10.3 The STW algorithm
+
+```
+Input:  meta-path τ, hash r : V_0 → [0,1), sketch size k, walk budget w'
+Output: edge set Ẽ ⊂ V_0 × V_L
+
+Phase A — KMV propagation (single pass, L hops):
+    K_0[v] ← {r(v)}                for v ∈ V_0
+    for ℓ = 1..L:
+        for each w ∈ V_ℓ:
+            K_ℓ[w] ← KMV-merge_k(⋃_{v→w} K_{ℓ-1}[v])
+
+Phase B — Endpoint-adaptive edge emission:
+    for each w ∈ V_L:
+        # Exact part: every sketch entry yields an exact edge
+        for x ∈ K_L[w]:
+            Ẽ ← Ẽ ∪ {(H(x), w)}
+
+        # Walk part: only hub endpoints need augmentation
+        if |K_L[w]| = k:                              # hub test
+            for i = 1..w':
+                u ← reverse_walk(w, τ)                # one backward MP walk
+                Ẽ ← Ẽ ∪ {(u, w)}
+    return Ẽ
+```
+
+`reverse_walk(w, τ)` samples a uniform predecessor under $e_\ell$ at each hop $\ell = L, L-1, \ldots, 1$, returning a source $u \in N_L^{-1}(w)$.
+
+**Single-pass property.** Phase A is identical to standard KMV propagation — one forward sweep over $G^*$. Phase B is *local*: each endpoint is handled independently using only its own sketch. There is no global split, no calibration, no second propagation.
+
+### 10.4 Main theorem: adaptive exactness
+
+**Theorem 10.3 (Adaptive Exactness of STW).** *Fix any meta-path $\tau$, any graph $G^*$, any $k \ge 1$, $w' \ge 0$. For every endpoint $w \in V_L$ and every source $u \in N_L^{-1}(w)$:*
+
+$$
+\Pr\!\left[(u, w) \in \widetilde{E}\right] \;=\;
+\begin{cases}
+1 & \text{if } r_L(w) \le k \quad (\text{tail})\\[2pt]
+\dfrac{k}{r_L(w)} + \left(1 - \dfrac{k}{r_L(w)}\right)\!\left(1 - \left(1 - \dfrac{1}{r_L(w)}\right)^{w'}\right) & \text{if } r_L(w) > k \quad (\text{hub})
+\end{cases}
+$$
+
+**Proof.**
+
+*Case 1 ($r_L(w) \le k$).* By Lemma 10.1, $r(u) \in K_L[w]$ deterministically, so Phase B emits $(H(r(u)), w) = (u, w)$ with probability 1.
+
+*Case 2 ($r_L(w) > k$).* Let $A = \{r(u') : u' \in N_L^{-1}(w)\}$ with $|A| = r_L(w)$. The events "$u$ is recovered by the sketch" and "$u$ is hit by some reverse walk" contribute disjointly after conditioning.
+
+Let $S = \{H(x) : x \in K_L[w]\}$ be the sketch-recovered source set. By Lemma 10.2, $\Pr[u \in S] = k / r_L(w)$, and Phase B emits $(u,w)$ iff $u \in S$ — contributing the first term.
+
+If $u \notin S$, the walk-phase may still recover $(u,w)$. A single reverse walk from $w$ hits $u$ with probability $1 / r_L(w)$ (uniform predecessors give uniform endpoint by induction on the reverse walk — the walk distribution on $N_L^{-1}(w)$ is uniform). Over $w'$ independent walks,
+
+$$\Pr[\text{some walk hits } u \mid u \notin S] = 1 - (1 - 1/r_L(w))^{w'}.$$
+
+Summing the conditional paths yields the stated formula. $\square$
+
+**Corollary 10.4 (Zero-error tail).** *The expected number of missed tail edges is zero:*
+
+$$\mathbb{E}\!\left[\big|\{(u,w) \in E : r_L(w) \le k,\ (u,w) \notin \widetilde{E}\}\big|\right] = 0.$$
+
+This is a property **no MPRW variant can achieve** at any finite walk budget (coupon collector gives $(1 - 1/n_u)^{n_u w}$ miss probability, strictly positive).
+
+### 10.5 Expected cost
+
+Let $T = \{w \in V_L : r_L(w) \le k\}$, $H_V = V_L \setminus T$ (tail / hub partition of endpoints).
+
+**Proposition 10.5 (Edge emission cost).**
+
+$$\mathbb{E}\!\left[|\widetilde{E}|\right] = \underbrace{\sum_{w \in T} r_L(w)}_{\text{exact tail edges}} \;+\; \underbrace{k \cdot |H_V|}_{\text{sketch-exact hub edges}} \;+\; \underbrace{w' \cdot |H_V|}_{\text{walk-sampled hub edges (with collisions)}}.$$
+
+**Proposition 10.6 (Runtime).** Phase A: $O(|E^*| \cdot k \log k)$ (standard KMV). Phase B: $O(|T| \cdot \bar{r}_T + |H_V| \cdot (k + w' L))$ where $\bar{r}_T = (1/|T|)\sum_{w \in T} r_L(w)$. Walks touch only hub endpoints.
+
+**Comparison:**
+
+| Method | Tail coverage | Hub coverage | Walks wasted on tail |
+|--------|---------------|-------------|-------------------|
+| Pure KMV (k) | exact | $k / r_L(w)$ per edge | — |
+| Pure MPRW (w) | $\approx 1 - (1 - 1/n_u)^w$ | $\approx 1 - (1 - 1/n_u)^w$ | yes (all $w$ walks) |
+| **STW ($k, w'$)** | **exact** | $k/r_L(w) + (1-k/r_L(w))(1 - (1-1/r_L(w))^{w'})$ | **none** |
+
+STW strictly dominates pure KMV on hubs (added walk coverage) and strictly dominates pure MPRW on tails (exactness). It does *not* waste any walk on a tail endpoint — walks fire only when $|K_L[w]| = k$, a local $O(1)$ test.
+
+### 10.6 SAGE drift bound
+
+Let $\mu_w = \frac{1}{|N_L(w)|}\sum_{u \in N_L^{-1}(w)} h_u$ be the exact SAGE-mean feature at $w$, and $\tilde{\mu}_w$ the STW-approximate mean using $\widetilde{E}$.
+
+**Theorem 10.7 (Drift bound).** *Assume features $\|h_u\|_2 \le B$. Then for any endpoint $w$:*
+
+$$\mathbb{E}\!\left[\|\tilde{\mu}_w - \mu_w\|_2^2\right] \le
+\begin{cases}
+0 & r_L(w) \le k \\[2pt]
+\dfrac{B^2}{\min(k + w', r_L(w))} & r_L(w) > k
+\end{cases}$$
+
+**Proof sketch.** Tail case: $\tilde{\mu}_w = \mu_w$ deterministically (Lemma 10.1). Hub case: the recovered source set $\widetilde{N}(w) = S \cup W$ (sketch $\cup$ walks) is a size-$\min(k+w', r_L(w))$ sample (with collisions) from $N_L^{-1}(w)$. Both $S$ (Lemma 10.2) and each walk endpoint (uniform by reverse walk) are uniform samples. By Bernstein for bounded-norm uniform samples without replacement, the mean-estimation variance is bounded by $B^2 / |\widetilde{N}(w)|$. $\square$
+
+**Comparison to pure KMV bound** ($B^2/k$): STW improves the hub bound by the additive walk contribution. **Comparison to pure MPRW**: MPRW's bound is $B^2 / \min(w, n_u)$ with no tail exactness — and the MPRW *bias* term (non-uniform endpoint distribution) is absent in STW because STW's walks are conditioned on endpoint $w$, giving uniform predecessor sampling.
+
+### 10.7 Why this is *elegant*, not "run both"
+
+1. **One sketch, one pass.** Phase A is unchanged KMV propagation. No second data structure.
+2. **Local switch.** The tail/hub decision is an $O(1)$ test on $|K_L[w]|$ — no global parameter, no calibration.
+3. **Walks are conditional corrections.** Walks only fire where KMV provably loses information (Lemma 10.1's converse: $|K_L[w]| = k \iff r_L(w) > k$).
+4. **Neighborhood-summary framing intact.** The sketch remains the primary object; walks *extend* it at exactly the endpoints where the summary has saturated.
+
+### 10.8 Implementation variants (equivalent up to walk direction)
+
+- **Variant B1 (reverse walks from hubs).** As stated above. Requires reverse adjacency on $e_1, \ldots, e_L$.
+- **Variant B2 (forward walks from saturation layer).** At each node $v$ at hop $\ell^*(v) = \min\{\ell : |K_\ell[v]| = k\}$, fire $w'$ forward walks of length $L - \ell^*(v)$. Pair each walk endpoint $w$ with the $k$ sources in $K_{\ell^*(v)}[v]$ via cross-product. Equivalent in distribution; avoids reverse adjacency but emits extra edges at non-saturated endpoints (must filter).
+
+Variant B1 is cleanest for the theorem. Variant B2 reuses the existing forward-walk machinery in `csrc/mprw_exec.cpp`.
+
+### 10.9 Empirical validation plan
+
+To validate Theorem 10.3 and compare to pure KMV / MPRW:
+
+1. **Tail/hub partition.** For each dataset+metapath, measure $|T|/|V_L|$ and $|H_V|/|V_L|$ at $k \in \{4, 16, 32\}$. Confirms non-trivial strata on DBLP/ACM/IMDB/PubMed.
+2. **Per-endpoint edge recall.** For a sample of endpoints, compute observed $\Pr[(u,w) \in \widetilde{E}]$ and compare to the closed form in Theorem 10.3.
+3. **CKA and Macro-F1.** STW vs. KMV vs. MPRW at matched edge count and matched wall time, across 5 seeds, L $\in \{1,2,3,4\}$.
+4. **Drift diagnostic.** Directly measure $\|\tilde{\mu}_w - \mu_w\|_2$ stratified by $r_L(w)$; expect exact zero for tail, $O(1/\sqrt{k+w'})$ for hub.
+
+Reproduction scripts to be added in `scripts/bench_stw.py` (not yet written).

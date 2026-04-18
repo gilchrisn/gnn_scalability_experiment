@@ -385,3 +385,61 @@ If it shows ~23692, the staging was overwritten by training.
    Empirical: ~20% fewer edges at same CKA. KGRW k=16 w'=4 achieves CKA=1.000 on IMDB MDMDM.
 
 **Cost**: +2-3 MB RSS (sketch vectors), +15% time at equal CKA. Negligible.
+
+---
+
+## Wide w-sweep + tail-fraction analysis (April 19 2026)
+
+Crossover experiment to expose MPRW's coupon-collector tail and test whether KGRW's advantage
+generalizes beyond starvation budgets. Theory bridge via Pointwise Exactness Lemma
+(THEORY.md §10): |T|/|V_L| @ k predicts where KGRW wins.
+
+### Reproduction (from project root, WSL)
+
+```bash
+# Step 1: generate exact z-embeddings (if not already done)
+for DS in HGB_DBLP HGB_ACM HGB_IMDB; do
+  python scripts/bench_kgrw.py --dataset $DS --L 2 --gen-exact
+done
+
+# Step 2: wide w-sweep, 5 seeds, per dataset (sequential — parallel hits I/O race)
+for DS in HGB_DBLP HGB_ACM HGB_IMDB; do
+  python scripts/bench_kgrw.py --dataset $DS --L 2 \
+    --k-values 4 8 16 32 \
+    --w-values 1 4 16 32 64 128 \
+    --seeds 5
+done
+
+# Step 3: aggregate across seeds → markdown summary
+python scripts/aggregate_kgrw_bench.py
+# Output: results/kgrw_bench_summary.md
+
+# Step 4: tail-fraction analysis from exact adjacencies
+python scripts/tail_fraction.py
+# Output: results/tail_fraction.csv
+```
+
+### Key outputs
+
+| File | Content |
+|------|---------|
+| `results/HGB_{DBLP,ACM,IMDB}/kgrw_bench.csv` | Raw per-seed rows (135 L=2 rows each) |
+| `results/kgrw_bench_summary.md` | Aggregated table + marginal-cost + matched-density CKA |
+| `results/tail_fraction.csv` | |T|/|V_L| @ k∈{4,8,16,32,64} per dataset/metapath |
+
+### Headline findings
+
+1. **Coupon-collector visible in MPRW marginal edges/ms** — DBLP: 3522→307 monotone decay;
+   IMDB saturates at w=32; ACM masked by w=32 structural jump.
+2. **Matched-density CKA (KGRW − MPRW) at lowest budget**: DBLP +0.080, ACM −0.023, IMDB +0.037.
+3. **Tail-fraction predicts KGRW win**: |T|/|V_L| @ k=4 correlates with advantage
+   (DBLP 0.44, IMDB 0.63 → wins; ACM 0.18 hub-heavy → loses).
+4. **KGRW is not a framework-level win** — narrow regime (lowest budget only, tail-dominated
+   graphs only). Theory sound, empirical regime too narrow to publish.
+
+### Race condition warning
+
+`bench_kgrw.py` labels tmp adj + z-embedding files per-dataset (`_{args.dataset}` suffix).
+Earlier version collided when running datasets in parallel — seeds 43-46 for ACM/IMDB
+produced identical metrics because z_out was clobbered. **Run datasets sequentially** or
+verify labels are dataset-scoped.
