@@ -2,7 +2,7 @@
 
 **Author**: Gilchris  
 **Last updated**: April 2026  
-**Status**: 3-dataset benchmark complete (DBLP, ACM, IMDB). IS-bias analysis complete.
+**Status**: 3-dataset depth sweep complete (DBLP, ACM, IMDB, L=1..4, 5 seeds). IS-bias analysis complete.
 
 ---
 
@@ -114,9 +114,14 @@ wsl bash -c "cd /mnt/... && for w in 1 2 4 8 16 32 64 128 256 512 8192; do
 # (run inference_worker.py on mprw_apapa_w8192.adj → z_exact_L2.pt)
 # See bench_kgrw.py source for the exact subprocess call.
 
-# Run multi-seed benchmark
+# Generate z_exact reference embeddings for all depths (only needs running once)
 python scripts/bench_kgrw.py \
-    --dataset HGB_DBLP --L 2 \
+    --dataset HGB_DBLP --L 1 2 3 4 --gen-exact \
+    --exact-adj results/HGB_DBLP/exact_apapa.adj
+
+# Run full depth sweep (L=1..4, 5 seeds)
+python scripts/bench_kgrw.py \
+    --dataset HGB_DBLP --L 1 2 3 4 \
     --k-values 4 8 16 --w-values 1 4 16 --seeds 5
 ```
 
@@ -134,6 +139,17 @@ KGRW k=16 w'=4    12,720     0.802±0.002      0.964±0.001      59.9MB
 ```
 At CKA=0.964: KGRW k=16 w'=4 (12.7K edges, 5.2ms) vs MPRW w=64 (15.9K edges, 6.1ms).
 **~20% fewer edges, ~15% faster at equal quality.**
+
+**Depth sweep (L=1..4, k=4 w'=1 vs MPRW w=1, 5 seeds):**
+```
+L    KGRW      MPRW     gap     KGRW(w4)  MPRW(w4)
+1    0.939     0.886    +0.052   0.955     0.927
+2    0.937     0.857    +0.080   0.955     0.919
+3    0.930     0.832    +0.098   0.950     0.909
+4    0.932     0.823    +0.109   0.953     0.909
+```
+KGRW advantage grows monotonically with depth: +0.052 at L=1 → +0.109 at L=4.
+Deeper SAGE accumulates more IS-bias error from MPRW's skewed edge set.
 
 ---
 
@@ -161,9 +177,14 @@ compile_rule_for_cpp(
 # Train + restage (same pattern as DBLP — always restage after exp2_train!)
 # exp2_train dataset=HGB_ACM, metapath=above, depth=2
 
-# Run benchmark
+# Generate z_exact reference embeddings for all depths
 python scripts/bench_kgrw.py \
-    --dataset HGB_ACM --L 2 \
+    --dataset HGB_ACM --L 1 2 3 4 --gen-exact \
+    --exact-adj results/HGB_ACM/exact_papap.adj
+
+# Run full depth sweep
+python scripts/bench_kgrw.py \
+    --dataset HGB_ACM --L 1 2 3 4 \
     --k-values 4 8 16 --w-values 1 4 16 --seeds 5
 ```
 
@@ -180,6 +201,18 @@ KGRW k=16 w'=4     6,916     0.820±0.001
 ```
 **Inverse regime**: more edges = worse CKA. Feature-dominated task (paper text features
 dominate). Graph structure adds noise. Both methods best at minimum walks. KGRW ≈ MPRW.
+
+**Depth sweep (L=1..4, k=4 w'=1 vs MPRW w=1, 5 seeds):**
+```
+L    KGRW      MPRW     gap     KGRW(w4)  MPRW(w4)
+1    0.966     0.941    +0.026   0.982     0.970
+2    0.824     0.847    -0.023   0.820     0.827    ← only failure case
+3    0.948     0.902    +0.046   0.973     0.955
+4    0.951     0.899    +0.052   0.975     0.957
+```
+L=2 is the one failure: KGRW k=4 w'=1 produces 11K edges vs MPRW w=1's 3K edges.
+ACM's inverse regime penalizes KGRW for producing too many edges. At equal edge count
+(w'=4 ≈ 20K), KGRW(0.820) and MPRW(0.827) are within noise. All other depths: KGRW wins.
 
 ---
 
@@ -217,9 +250,14 @@ compile_rule_for_cpp(
 # Train + restage
 # exp2_train dataset=HGB_IMDB, metapath=above, depth=2
 
-# Run benchmark
+# Generate z_exact reference embeddings for all depths
 python scripts/bench_kgrw.py \
-    --dataset HGB_IMDB --L 2 \
+    --dataset HGB_IMDB --L 1 2 3 4 --gen-exact \
+    --exact-adj results/HGB_IMDB/exact_mdmdm.adj
+
+# Run full depth sweep
+python scripts/bench_kgrw.py \
+    --dataset HGB_IMDB --L 1 2 3 4 \
     --k-values 4 8 16 --w-values 1 4 16 --seeds 5
 ```
 
@@ -236,6 +274,17 @@ KGRW k=4  w'=4     12,068     0.994±0.000
 KGRW k=16 w'=4     16,174     1.000±0.000   ← fully reconstructs exact graph
 ```
 Sparse enough that KGRW k=16 w'=4 achieves CKA=1.000 — complete coverage.
+
+**Depth sweep (L=1..4, k=4 w'=1 vs MPRW w=1, 5 seeds):**
+```
+L    KGRW      MPRW     gap     KGRW(w4)  MPRW(w4)
+1    0.977     0.928    +0.049   0.995     0.992
+2    0.969     0.932    +0.037   0.994     0.991
+3    0.958     0.907    +0.051   0.994     0.989
+4    0.952     0.893    +0.059   0.993     0.989
+```
+KGRW advantage is consistent (+0.037 to +0.059) across all depths. Very sparse graph (16K exact)
+means KGRW's k-edges cover the neighborhood well even at w'=1.
 
 ---
 
@@ -309,9 +358,9 @@ If it shows ~23692, the staging was overwritten by training.
 | `HGBn-DBLP/cod-rules_HGBn-DBLP.limit` | Current rule: APAPA `-2 0 -2 1 -2 0 -2 -1 1 -4 -4 -4 -4` |
 | `HGBn-ACM/cod-rules_HGBn-ACM.limit` | Current rule: PAPAP `-2 2 -2 0 -2 2 -2 -1 0 -4 -4 -4 -4` |
 | `HGBn-IMDB/cod-rules_HGBn-IMDB.limit` | Current rule: MDMDM `-2 6 -2 2 -2 6 -2 -1 2 -4 -4 -4 -4` |
-| `results/HGB_DBLP/kgrw_bench.csv` | 60 rows: 3 k-values × 3 w'-values × 1L × 5seeds + MPRW refs |
-| `results/HGB_ACM/kgrw_bench.csv` | Same structure |
-| `results/HGB_IMDB/kgrw_bench.csv` | Same structure |
+| `results/HGB_DBLP/kgrw_bench.csv` | 240 rows: 3k × 3w' × 4L × 5seeds + MPRW refs |
+| `results/HGB_ACM/kgrw_bench.csv` | 240 rows: same structure |
+| `results/HGB_IMDB/kgrw_bench.csv` | 240 rows: same structure |
 | `results/HGB_DBLP/mprw_apapa_w*.adj` | MPRW reference adj files at w=1..8192 |
 | `results/HGB_DBLP/exact_apapa.adj` | Exact APAPA adj (MPRW w=8192) |
 | `results/HGB_ACM/exact_papap.adj` | Exact PAPAP adj (MPRW w=16384) |

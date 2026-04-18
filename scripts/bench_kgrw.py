@@ -218,6 +218,11 @@ def main() -> None:
     p.add_argument("--seeds", type=int, default=1,
                    help="Number of independent seeds to run (default 1). "
                         "Seeds are 42, 43, 44, ...")
+    p.add_argument("--gen-exact", action="store_true",
+                   help="Generate z_exact_<dataset>_L<L>.pt files from exact adj, then exit.")
+    p.add_argument("--exact-adj", default=None,
+                   help="Path to exact adjacency file (Windows path). "
+                        "If omitted, looks in results/<dataset>/exact_papap.adj etc.")
     args = p.parse_args()
     args.seed_list = list(range(args.seed, args.seed + args.seeds))
 
@@ -264,12 +269,40 @@ def main() -> None:
     # Save temp tensors
     tmp_dir = ROOT / "results" / "kgrw_eval"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    feat_file   = str(tmp_dir / "x.pt")
-    labels_file = str(tmp_dir / "labels.pt")
-    mask_file   = str(tmp_dir / "mask.pt")
+    feat_file   = str(tmp_dir / f"x_{args.dataset}.pt")
+    labels_file = str(tmp_dir / f"labels_{args.dataset}.pt")
+    mask_file   = str(tmp_dir / f"mask_{args.dataset}.pt")
     torch.save(g[cfg.target_node].x.cpu(), feat_file)
     torch.save(labels_full.cpu(), labels_file)
     torch.save(test_mask.cpu(), mask_file)
+
+    if args.gen_exact:
+        # Find exact adj file
+        exact_adj = args.exact_adj
+        if exact_adj is None:
+            candidates = sorted((ROOT / "results" / args.dataset).glob("exact_*.adj"))
+            if not candidates:
+                print("ERROR: no exact adj found. Pass --exact-adj <path>."); return
+            exact_adj = str(candidates[0])
+        # Convert to WSL path for inference
+        exact_adj_wsl = exact_adj.replace("\\", "/").replace("C:/", "/mnt/c/")
+        print(f"Generating z_exact files from {exact_adj}")
+        for L in args.L:
+            weights_path = _find_weights(args.dataset, mp_safe, L)
+            if weights_path is None:
+                print(f"  [SKIP] no weights for L={L}"); continue
+            z_out = str(tmp_dir / f"z_exact_{args.dataset}_L{L}.pt")
+            _run_inference(exact_adj_wsl, feat_file, str(weights_path), z_out,
+                           labels_file, mask_file,
+                           n_target, node_offset, in_dim, num_classes, L,
+                           f"exact_{args.dataset}_L{L}")
+            if os.path.exists(z_out):
+                z = torch.load(z_out, weights_only=True)
+                print(f"  L={L}: saved z_exact shape={z.shape}")
+            else:
+                print(f"  L={L}: FAILED to generate z_exact")
+        print("Done. Now re-run bench_kgrw.py without --gen-exact.")
+        return
 
     # Output CSV — seed is now a column for multi-seed aggregation
     out_csv = ROOT / "results" / args.dataset / "kgrw_bench.csv"
@@ -296,10 +329,17 @@ def main() -> None:
         if weights_path is None:
             print(f"\n[SKIP] no weights found for L={L}"); continue
 
-        z_exact_path = tmp_dir / f"z_exact_L{L}.pt"
+        z_exact_path = tmp_dir / f"z_exact_{args.dataset}_L{L}.pt"
+        # Fallback to legacy name (no dataset prefix) for backwards compat
+        if not z_exact_path.exists():
+            z_exact_path = tmp_dir / f"z_exact_L{L}.pt"
         z_exact = None
         if z_exact_path.exists():
-            z_exact = torch.load(str(z_exact_path), weights_only=True)
+            loaded = torch.load(str(z_exact_path), weights_only=True)
+            if loaded.shape[0] == n_target:
+                z_exact = loaded
+            else:
+                print(f"  [WARN] z_exact shape {loaded.shape} != n_target={n_target}, skipping")
 
         print(f"\n{'='*65}  L={L}")
         print(f"  Weights: {weights_path.name}")
