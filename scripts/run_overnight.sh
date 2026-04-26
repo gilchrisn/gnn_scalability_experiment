@@ -15,8 +15,11 @@
 
 set +e   # do NOT abort on errors — keep going to next metapath
 cd "$(dirname "$0")/.."
+# Try Linux venv first, then Windows-style venv
+source .venv/bin/activate     2>/dev/null || \
 source .venv/Scripts/activate 2>/dev/null || true
 export PYTHONUTF8=1
+export PYTHONUNBUFFERED=1     # so tee'd output appears in real time
 
 LOG_DIR="results/scale_validation_logs"
 mkdir -p "$LOG_DIR"
@@ -33,7 +36,7 @@ run_phase() {
     echo
     echo "===== $label  ($(date +%H:%M:%S)) ====="
     # KMV+MPRW
-    python scripts/bench_scale_validation.py \
+    python -u scripts/bench_scale_validation.py \
         --datasets "$dataset" \
         --metapaths "$@" \
         --k-values $kvals \
@@ -43,7 +46,7 @@ run_phase() {
         --method-timeout "$mtimeout" \
         2>&1 | tee -a "$LOG_DIR/${label// /_}_${TS}.log"
     # KGRW (reduced grid)
-    python scripts/bench_scale_validation.py \
+    python -u scripts/bench_scale_validation.py \
         --datasets "$dataset" \
         --metapaths "$@" \
         --k-values $KGRW_K \
