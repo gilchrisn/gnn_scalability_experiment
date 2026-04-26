@@ -34,6 +34,17 @@ misc/
 de/
 cs470/
 
+# Stray graph-staging artefacts inside otherwise-tracked dirs
+**/node.dat
+**/link.dat
+**/meta.dat
+**/info.dat
+**/label.dat
+**/label.dat.test
+**/record.dat
+**/cod-rules_*.limit
+**/*-cod-global-rules.dat
+
 # --- LaTeX build artifacts ---
 *.aux
 *.bbl
