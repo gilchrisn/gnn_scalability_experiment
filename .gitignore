@@ -1,50 +1,71 @@
+# --- Environment / runtime ---
 .env
-hehe.sh
 .venv*
-
-
-bin/
-checkpoints/
-results/
-datasets/
-exp_data/
-
-*.csv
-*.png
 __pycache__/
-output/
-
-de/
-
-IMPORTANT_REMINDER.md
+.pytest_cache/
+.claude/
+*.ps1
+hehe.sh
 script.ps1
 
-HGB*
-lightning_logs
-global_res
+# --- Build artifacts ---
+bin/
+build/
+checkpoints/
+lightning_logs/
+output/
+global_res/
 
-hub-conf 
-springer
-bench*
-*.ps1
-RUNBOOK.md
-# parallel-k-P-core-decomposition-code  # now tracked (BoolAP baseline)
-CLAUDE.md
-cs470
+# --- Data (regenerable / large) ---
 data/
 datasets/
-documents
+exp_data/
+results/
+staging/
+HGB*/
+HNE_PubMed/
 OGB_MAG/
 OAG_CS/
 MINI_OGB_MAG/
 MINI_OAG_CS/
 MINI_RCDD/
+transfer*/
 misc/
-.claude
-.pytest_cache
-markdown
-presentation
-graphify*
-figures*
-transfer*
-HNE_PubMed/
+de/
+cs470/
+
+# --- LaTeX build artifacts ---
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.toc
+*.synctex*
+
+# --- Paper drafts / private research notes ---
+final_report/research_notes/
+final_report/kmv_hgnn_theory.md
+final_report/kmv_invariances_and_mprw_bias.md
+final_report/mprw_kmv_optimality.md
+springer/
+documents/
+markdown/
+presentation/
+RUNBOOK.md
+IMPORTANT_REMINDER.md
+
+# --- Internal authoring tooling ---
+CLAUDE.md
+AGENTS.md
+graphify*/
+.graphify_extract.json
+
+# --- Loose figures / generated outputs at repo root ---
+figures/
+*.csv
+*.png
+hub-conf/
+bench*/
+
+# Note: parallel-k-P-core-decomposition-code/ is tracked (BoolAP baseline).
