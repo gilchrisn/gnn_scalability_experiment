@@ -2,18 +2,14 @@
 
 Code accompanying the paper **"KMV Graph Reconstruction: Sketch-Based Approximate Adjacency for Scalable HGNN Inference"** — an extension of the KMV sketch propagation framework of Niu et al. (ICDE 2025) to the heterogeneous-GNN inference setting.
 
-The compiled paper lives at [`final_report/report.pdf`](final_report/report.pdf).
-
 ## What's here
 
 ```
 .
-├── final_report/        # paper source (LaTeX + figures + bib)
 ├── src/                 # Python: bridge to C++ binaries, dataset loaders, GNN models
 ├── scripts/             # experiment driver scripts (exp1..exp18, bench_*, run_*)
 ├── csrc/                # C++ source for the MPRW baseline
 ├── HUB/                 # C++ source for Exact + KMV (from the base paper, used unmodified)
-├── parallel-k-P-core-decomposition-code/   # BoolAP baseline (Guo et al. ICDE 2024)
 ├── tests/               # pytest unit tests
 ├── main.py              # CLI entry point
 ├── Makefile             # builds bin/graph_prep and bin/mprw_exec
@@ -71,13 +67,6 @@ python scripts/exp4_visualize.py --dataset HGB_DBLP
 
 Per-experiment scripts (`exp1_partition.py` through `exp18_rigor_check.py`) are individually invokable; each is documented in its own docstring.
 
-## Building the paper
-
-```bash
-cd final_report
-pdflatex report.tex && bibtex report && pdflatex report.tex && pdflatex report.tex
-```
-
 ## Citation
 
 If you use this code, please also cite the base paper:
@@ -93,4 +82,4 @@ If you use this code, please also cite the base paper:
 
 ## License
 
-GPL-3.0 (see [`LICENSE`](LICENSE)). The `HUB/` and `parallel-k-P-core-decomposition-code/` subtrees originate from third-party authors and retain their own licenses where applicable.
+GPL-3.0 (see [`LICENSE`](LICENSE)). The `HUB/` subtree originates from the base paper's authors and retains its own licensing terms.

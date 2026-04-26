@@ -54,11 +54,10 @@ cs470/
 *.toc
 *.synctex*
 
-# --- Paper drafts / private research notes ---
-final_report/research_notes/
-final_report/kmv_hgnn_theory.md
-final_report/kmv_invariances_and_mprw_bias.md
-final_report/mprw_kmv_optimality.md
+# --- Paper, supplementary writeups, third-party baselines ---
+final_report/
+experiments/
+parallel-k-P-core-decomposition-code/
 springer/
 documents/
 markdown/
@@ -79,4 +78,3 @@ figures/
 hub-conf/
 bench*/
 
-# Note: parallel-k-P-core-decomposition-code/ is tracked (BoolAP baseline).
