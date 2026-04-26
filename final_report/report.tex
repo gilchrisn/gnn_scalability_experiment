@@ -29,19 +29,20 @@
 
 \title{KMV Graph Reconstruction: Sketch-Based Approximate Adjacency\\for Scalable HGNN Inference}
 \subtitle{An extension of the KMV sketch propagation framework of Niu et al.~\cite{berahmand2024kmv}}
+\thanks{Code: \url{https://github.com/gilchrisn/gnn_scalability_experiment}}
 
 \author{Gilchris Nathaniel}
 \affiliation{%
   \institution{Singapore Management University}
   \country{Singapore}}
-\email{gilchris.nathaniel.2022@smu.edu.sg}
+\email{gilchris.nathaniel.2023@smu.edu.sg}
 
 \begin{abstract}
 Heterogeneous Graph Neural Network (HGNN) inference on meta-path-induced relational graphs $H_\mathcal{P}$ has an architectural ceiling: $H_\mathcal{P}$ is $O(|V|^2)$ in the worst case. On production-scale knowledge graphs --- OGB~MAG ($736$\,K target nodes, $2.86$--$13.63$\,B relational edges across its three densest meta-paths) --- exact materialization completes in $17$--$34$ minutes, but the subsequent GNN forward pass is killed by out-of-memory at every depth $L\in\{2,3,4\}$. This paper presents \textbf{KMV graph reconstruction}, a systems-level workaround.
 
 We extend the KMV sketch propagation framework~\cite{berahmand2024kmv} to emit a sparse approximate adjacency $\widetilde{A}$ of size $O(|V|\cdot k)$. Each hash retained in a terminal sketch points back to its origin node via the global hash map maintained at initialization; resolving these pointers reuses the propagation pass already required for centrality estimation at zero extra computation. On the full OGB~MAG graph, KMV at $k{=}8$ completes both materialization (under $10$\,s) and inference ($\sim$$1.2$\,s) where Exact cannot run inference at all (Table~\ref{tab:scalability}).
 
-At medium scale (ACM, DBLP, IMDB, PubMed; full materialization feasible), KMV and Meta-Path Random Walks (MPRW)~\cite{dong2017metapath2vec} achieve statistically indistinguishable Macro-F1 at matched output density. MPRW retains a $1$--$9$\,pp Linear CKA advantage; we observe a coincident structural difference (MPRW's walk-completion sampling retains $3$--$8$\,pp more homophilic edges than KMV's hash-based sampling on ACM and DBLP) but do not run the importance-corrected MPRW baseline that would establish a causal mechanism. Two finite-sample bounds---a Spatial Variance Bound on per-layer aggregation and a Bounded Representation Drift on multi-layer drift---characterise KMV's intermediate behavior; neither bound implies a guarantee on downstream classification loss.
+At medium scale (ACM, DBLP, IMDB, PubMed; full materialization feasible), KMV and Meta-Path Random Walks (MPRW)~\cite{dong2017metapath2vec} achieve statistically indistinguishable Macro-F1 at matched output density. MPRW retains a $1$--$9$\,pp Linear CKA advantage; we report an unexplained empirical anomaly in which MPRW retains a more homophilic edge subset than KMV at matched density on ACM and DBLP, but we do not run the importance-corrected MPRW baseline that would establish a causal mechanism. Two finite-sample bounds---a Spatial Variance Bound on per-layer aggregation and a Bounded Representation Drift on multi-layer drift---characterise KMV's intermediate behavior; neither bound implies a guarantee on downstream classification loss.
 \end{abstract}
 
 \maketitle
@@ -64,7 +65,7 @@ Each hash retained in a terminal KMV sketch carries a pointer to its originating
 
 \textbf{Main empirical result.} On the full OGB~MAG graph ($736$\,K papers, $2.86$--$13.63$\,B edges across the three densest meta-paths), Exact materializes $H_\mathcal{P}$ in $17$--$34$ minutes, but the subsequent GNN forward pass is killed by OOM at every depth $L \in \{2,3,4\}$. KMV at $k{=}8$ completes both materialization and inference in under $\sim$$10$\,s and $\sim$$1.2$\,s respectively (Table~\ref{tab:scalability}). This regime---where the binding constraint is downstream HGNN inference on the materialized adjacency, rather than propagation itself---is the operating point for which KMV reconstruction is intended.
 
-\textbf{Scope of claims.} On medium-scale benchmarks where exact materialization is feasible, KMV does not outperform Meta-Path Random Walks (MPRW)~\cite{dong2017metapath2vec} on Macro-F1; the two methods are statistically interchangeable at matched output density. We document two extensions we attempted to obtain a structural KMV-vs-MPRW gap on node classification (a hybrid scheme, Appendix~\ref{sec:app-kgrw}; and a narrow regime where MPRW's importance-sampling bias measurably degrades F1, Appendix~\ref{sec:app-dblp-aptpa}); each is reported with its operating range.
+\textbf{Scope of claims.} On medium-scale benchmarks where exact materialization is feasible, KMV does not outperform Meta-Path Random Walks (MPRW)~\cite{dong2017metapath2vec} on Macro-F1; the two methods are statistically interchangeable at matched output density. The contribution of this paper is the scaling regime, not a quality advantage at small scale.
 
 Our contributions are:
 \begin{enumerate}
@@ -246,7 +247,19 @@ $\Delta^{(\ell+1)} \leq C^{(\ell)} \cdot \Delta^{(\ell)} + C^{(\ell)} \cdot \var
 Unrolling from $\Delta^{(0)} = 0$ yields the result.
 \end{proof}
 
-The bound decays with $k$ (more sketch budget $\to$ tighter approximation) but grows with $L$ (deeper networks compound per-layer error) --- the \emph{budget--depth trade-off} measured empirically in Section~\ref{sec:experiments}.
+The bound decays with $k$ (more sketch budget $\to$ tighter approximation) but grows with $L$ (deeper networks compound per-layer error)---the \emph{budget--depth trade-off} measured empirically in Section~\ref{sec:experiments}.
+
+\subsection{Empirical Tightness}
+\label{sec:i2-tightness}
+
+The exponential-in-$L$ factor $C^L$ in Theorem~\ref{thm:drift} is an artefact of the recursive Lipschitz unrolling. Empirically the propagation itself is exact: the bottom-$k$-of-bottom-$k$ merge introduces zero leak relative to bottom-$k$ of the full $L$-hop neighborhood (Figure~\ref{fig:i2}). Across four datasets and $L\in\{1,2,3,4\}$ the leak rate is identically $0$. Theorem~\ref{thm:drift}'s exponential-in-$L$ drift bound is therefore loose by construction; it bounds the proof technique, not the algorithm in practice.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{I2_tightness.pdf}
+  \caption{KMV propagation tightness: the fraction of (node, $L$) combinations on which the bottom-$k$-of-bottom-$k$ propagation introduces zero leak relative to bottom-$k$ of the full $L$-hop neighborhood. Across four datasets and $L\in\{1,2,3,4\}$, the empirical leak rate is $0$.}
+  \label{fig:i2}
+\end{figure}
 
 %% ======================================================================
 \section{Experimental Methodology}
@@ -254,10 +267,10 @@ The bound decays with $k$ (more sketch budget $\to$ tighter approximation) but g
 
 \sloppy
 
-\subsection{Two-Stage Inductive Protocol}
+\subsection{Two-Stage Inductive Pipeline}
 \label{sec:methodology-protocol}
 
-Training a graph encoder directly on a stochastic sparsifier's output $\widetilde{A}$ exposes the gradient to edge-set noise that varies between runs and between epochs, destabilising optimisation. We therefore adopt a two-stage inductive protocol that decouples the sparsifier from training. Stage~I uses the exact adjacency to fit encoder weights; Stage~II uses the sparsifier at inference only, with frozen weights.
+Training a graph encoder directly on a stochastic sparsifier's output $\widetilde{A}$ exposes the gradient to edge-set noise that varies between runs and between epochs, destabilising optimisation. We therefore adopt a two-stage inductive pipeline that decouples the sparsifier from training. Stage~I uses the exact adjacency to fit encoder weights; Stage~II uses the sparsifier at inference only, with frozen weights.
 
 \textbf{Stage I (training).} Partition the target-type node set $\mathcal{V}_0$ into a training subset $V_\text{train}$ ($|V_\text{train}|/|\mathcal{V}_0|=0.4$) and a test subset $V_\text{test}$ (the remaining $0.6$). Where the underlying KG carries temporal metadata on the target type --- e.g., paper publication year for DBLP and OGB~MAG --- the partition is chronological, with $V_\text{train}$ containing the oldest $40\%$. Otherwise the partition is uniform at random with seed $42$. Materialise the exact relational graph $A_\text{train}$, restricted to the subgraph induced by $V_\text{train}$ (edges $(u,v)$ where both $u,v\in V_\text{train}$). Train a GraphSAGE encoder $f_\theta$ with mean aggregation, hidden dimension $64$, on $(A_\text{train}, X_{V_\text{train}})$ to convergence: cross-entropy loss, Adam optimiser, early stopping with patience $30$, maximum $200$ epochs. Save the frozen weights $\theta^*$. We repeat this for each model depth $L \in \{1,2,3,4\}$ separately, producing four checkpoints per dataset.
 
@@ -288,7 +301,7 @@ KMV $k$ and MPRW $w$ both range over consecutive powers of two; the $w$-range ex
 \noindent\textbf{Replicates.}
 For every $(k, L, \text{dataset})$ cell we run $50$ KMV replicates with independent hash seeds. For every $(w, L, \text{dataset})$ cell we run $10$ MPRW replicates with independent walk-RNG seeds (eight on IMDB). Exact is deterministic; we record one run per $(L, \text{dataset})$ cell. Cell-level standard deviations reported in Table~\ref{tab:fidelity} are computed across the replicates of that cell. Cross-dataset comparisons fix $k{=}32$, $w{=}32$, $L{=}2$ as the operating point unless stated otherwise.
 
-\subsection{Measurement Protocol}
+\subsection{Measurement}
 \label{sec:methodology-measurement}
 
 We require comparable timing and memory measurements across Exact, KMV, and MPRW. All three materialisers are invoked as child processes under a uniform external wrapper that records peak resident memory and wall-clock time, ensuring that the reported metrics come from a single, instrument-agnostic source.
@@ -325,7 +338,7 @@ We use Macro-F1 against the ground-truth label as the headline downstream metric
 
 \subsection{Setup}
 
-We follow the methodology of \S\ref{sec:methodology}: the two-stage protocol of \S\ref{sec:methodology-protocol}, the three baselines of \S\ref{sec:methodology-baselines}, the parameter grid of \S\ref{sec:methodology-grid}, the measurement protocol of \S\ref{sec:methodology-measurement}, and the fidelity metrics of \S\ref{sec:methodology-metrics}. This subsection records dataset-specific quantities not part of the methodology.
+We follow the methodology of \S\ref{sec:methodology}: the two-stage pipeline of \S\ref{sec:methodology-protocol}, the three baselines of \S\ref{sec:methodology-baselines}, the parameter grid of \S\ref{sec:methodology-grid}, the measurement protocol of \S\ref{sec:methodology-measurement}, and the fidelity metrics of \S\ref{sec:methodology-metrics}. This subsection records dataset-specific quantities not part of the methodology.
 
 \textbf{Datasets.} We evaluate on four heterogeneous knowledge graphs (Table~\ref{tab:datasets}). On each dataset we use the densest meta-path that yields a target-type relational graph; the densest meta-path is the adversarial choice for any sparsifier because the exact $H_\mathcal{P}$ approaches saturation ($\rho{\to}1$).
 
@@ -407,7 +420,7 @@ We exclude ACM from the cross-dataset aggregate because of meta-path saturation 
 On the three non-saturated benchmarks (DBLP, IMDB, PubMed) at matched density ($k{=}32$, $w{=}32$), KMV and MPRW Macro-F1 are within $\sim$1\,pp of each other.
 On DBLP the three methods are within $0.7$\,pp (KMV $0.763$, MPRW $0.767$, Exact $0.769$). On PubMed they are within $1.2$\,pp (KMV $0.318$, MPRW $0.312$, Exact $0.306$). On IMDB both sparsifiers exceed Exact by $\sim$$5$\,pp (KMV $0.565$, MPRW $0.571$, Exact $0.520$); the offset holds for both, so we do not claim a regularisation effect.
 
-CKA consistently favours MPRW: $0.93$--$1.00$ vs KMV's $0.89$--$0.98$, a $1$--$9$\,pp gap across the four datasets. Higher CKA is \emph{not} aligned with higher F1: on DBLP MPRW's $0.993$ CKA pairs with $0.767$ F1 vs KMV's $0.976$/$0.763$ --- the F1 gap is $0.4$\,pp despite a $1.7$\,pp CKA gap. \S\ref{sec:homophily} reports a coincident structural difference (MPRW retains more homophilic edges than KMV at matched density on ACM and DBLP); whether this difference \emph{causes} the CKA gap is not established by our experiments and would require an importance-corrected MPRW baseline (open work, \S\ref{sec:future}).
+CKA consistently favours MPRW: $0.93$--$1.00$ vs KMV's $0.89$--$0.98$, a $1$--$9$\,pp gap across the four datasets. Higher CKA is \emph{not} aligned with higher F1: on DBLP MPRW's $0.993$ CKA pairs with $0.767$ F1 vs KMV's $0.976$/$0.763$---the F1 gap is $0.4$\,pp despite a $1.7$\,pp CKA gap. MPRW maintains a $1$--$9$\,pp Linear CKA advantage over KMV. We observe an unexplained empirical anomaly where MPRW retains a significantly more homophilic edge subset than KMV at matched densities (see Appendix~\ref{sec:app-mprw-bias}); establishing whether this is the causal mechanism for the CKA gap remains open.
 
 \textbf{ACM as a saturation control.}
 ACM PTP at $\rho{=}1.00$ is saturated: every paper-paper pair shares at least one term, so $H_\mathcal{P}$ is a near-complete graph. KMV F1 ($0.721$) drops $\sim$9\,pp below Exact ($0.813$) and MPRW ($0.807$) on this dataset; the gap reflects KMV's edge-count budget hitting a topological ceiling specific to the saturation regime, rather than a representative comparison. We retain ACM in Table~\ref{tab:fidelity} as a control on what happens when a sparsifier is applied to a graph that is already maximally connected, and exclude it from cross-dataset aggregates.
@@ -480,7 +493,7 @@ On this scale, Exact materialises $H_\mathcal{P}$ but cannot run inference; KMV 
 \label{sec:discussion-comparison}
 
 The experimental evidence shows that KMV and MPRW deliver \emph{comparable} downstream quality.
-Neither method dominates across all datasets: KMV leads on DBLP APTPA at $L{=}4$ with starved budgets (Appendix~\ref{sec:app-dblp-aptpa}), MPRW leads on ACM PTP at $L{=}2$ (the saturated, hub-dense regime), and the two are statistically interchangeable on IMDB and PubMed.
+Neither method dominates across all datasets: MPRW leads on ACM PTP at $L{=}2$ (the saturated, hub-dense regime), and the two are statistically interchangeable on DBLP, IMDB, and PubMed.
 
 The contribution of KMV is therefore not a quality advantage over MPRW but a set of operational properties as an approximation of Exact:
 
@@ -538,7 +551,7 @@ We list the threats to the claims of this paper explicitly.
 \label{sec:future}
 
 \begin{itemize}
-\item \textbf{Tighten Theorem~\ref{thm:drift}.} Empirically the propagation is tight: no information is lost in the bottom-$k$-of-bottom-$k$ merge across the four datasets and $L\in\{1,\ldots,4\}$ (Appendix~\ref{sec:app-i2}). The current exponential-in-$L$ bound is therefore loose by construction. A topology-aware tighter bound conditioning on per-node max-intermediate-degree is open.
+\item \textbf{Tighten Theorem~\ref{thm:drift}.} Empirically the propagation is tight: no information is lost in the bottom-$k$-of-bottom-$k$ merge across the four datasets and $L\in\{1,\ldots,4\}$ (\S\ref{sec:i2-tightness}). The current exponential-in-$L$ bound is therefore loose by construction. A topology-aware tighter bound conditioning on per-node max-intermediate-degree is open.
 \item \textbf{Importance-corrected MPRW.} A reweighted MPRW baseline (\S\ref{sec:homophily}) is the clean test of whether the homophily structure of MPRW's retained edges is causally responsible for the CKA gap.
 \item \textbf{Motif and spectral preservation.} The bottom-$k$ representation preserves \emph{set} information but not \emph{multiset}. Whether $L$-hop motif counts and spectral statistics survive the propagation is open, and would identify which classes of downstream task can consume $\mathcal{K}_L$ directly.
 \item \textbf{Sketch-aware training.} End-to-end training on $\widetilde{A}_\text{KMV}$ with variance reduction (control variates, antithetic sampling), removing the requirement that an Exact training subgraph be feasible at all.
@@ -565,11 +578,26 @@ The mechanistic question of which structural properties of $H_\mathcal{P}$ the b
 %% ======================================================================
 \appendix
 
+\section{Layer-wise CKA Trajectory}
+\label{sec:layer-cka}
+
+This appendix serves as the empirical validation of the drift bound in Theorem~\ref{thm:drift}.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\columnwidth]{plot_cka_per_layer.pdf}
+  \caption{Layer-wise CKA trajectory within a depth-4 model ($k{=}32$). Each point $\ell$ shows CKA between the Exact-trained reference and the approximate model at intermediate layer $\ell$.}
+  \label{fig:cka-layers}
+\end{figure}
+
+Figure~\ref{fig:cka-layers} shows how representational alignment evolves within a depth-4 model. MPRW remains nearly flat near $1.0$ across all layers. KMV shows a steeper decline, consistent with the recursive drift expansion in Theorem~\ref{thm:drift}; the degradation follows the analytical decay curve of \S\ref{sec:theory} rather than collapsing.
+
 \section{Expansion-Decay Signal}
 \label{sec:app-i4}
 
-Beyond average aggregation, the KMV sketch carries an additional signal: the rate at which $\log\max\mathcal{K}_L[v]$ shrinks with depth $L$.
-Under a per-node expansion model $|N_L(v)| \approx |N_{L-1}(v)| \cdot \beta_v$, the expectation of $\max\mathcal{K}_L[v]$ scales as $k/|N_L(v)|$, giving the relation
+This is a secondary structural property of the sketch and is not theoretically novel (bottom-$k$ max-hash scaling is implicit in the HIP estimator literature); we report it as an empirical consequence the same sketch already exposes.
+
+The KMV sketch carries an additional signal beyond average aggregation: the rate at which $\log\max\mathcal{K}_L[v]$ shrinks with depth $L$. Under a per-node expansion model $|N_L(v)| \approx |N_{L-1}(v)| \cdot \beta_v$, the expectation of $\max\mathcal{K}_L[v]$ scales as $k/|N_L(v)|$, giving the relation
 \[
   \mathrm{slope}_L\bigl(\log\max\mathcal{K}_L[v]\bigr) \;=\; -\,\mathrm{slope}_L\bigl(\log|N_L(v)|\bigr).
 \]
@@ -590,98 +618,34 @@ HNE\_PubMed & $-0.997$ & $1.1\times 10^{-125}$ & 110 \\
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:i4} reports per-node Pearson correlations between the max-hash slope and the ground-truth cardinality slope. The agreement is essentially perfect on PubMed and IMDB ($r{=}-0.997$, $-0.992$) and strong on DBLP ($r{=}-0.789$). The signal is recoverable from the sketch with no extra propagation pass and no additional memory beyond the sketch itself.
-Operationally, this enables adaptive-depth message passing (terminate at the $L$ where the slope plateaus per node), structural-role detection via slope clustering, and online mixing-time estimation at $O(|V|\cdot k)$ memory---a quantity that normally requires full neighborhood enumeration or a Laplacian eigendecomposition. We do not claim the signal is theoretically novel (bottom-$k$ max-hash scaling is implicit in the HIP estimator literature); we report it as an empirical consequence the same sketch already exposes.
-
-\section{Hybrid Scheme: KGRW}
-\label{sec:app-kgrw}
-
-We hypothesised that KMV's deterministic Phase~1 propagation could remove MPRW's two known inefficiencies---dead walks at sparse meta-paths, and coupon-collector saturation at dense ones---by giving each walk a known set of source endpoints to start from. We implemented this as KGRW: KMV propagation for $\lfloor L/2\rfloor$ hops, walks for the remaining $\lceil L/2\rceil$, edges generated by joining sketch entries to walk endpoints.
-
-After replacing a flawed round-robin pairing with cross-product joining, KGRW achieves $+0.080$ CKA over MPRW on DBLP APAPA at the lowest budget ($k{=}4$, $w'{=}1$, $\sim$2.5\,K edges) and $+0.037$ on IMDB MDMDM. On ACM PAPAP it loses ($-0.023$), and at moderate budgets on every dataset the advantage vanishes (Figs.~\ref{fig:kgrw-depth}--\ref{fig:kgrw-tail}). The advantage tracks a node-level \emph{tail-fraction} statistic ($|T|/|V_L|$ at each $k$) that the practitioner cannot easily pre-compute and that varies across dataset/meta-path pairs. The regime in which KGRW wins is too narrow to support a standalone algorithm.
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\columnwidth]{fig5_depth_sweep.pdf}
-  \caption{KGRW vs MPRW CKA gap across depths $L\in\{1,2,3,4\}$ on three datasets at the lowest budget ($k{=}4$, $w'{=}1$ vs $w{=}1$). The KGRW advantage is positive and grows with depth on DBLP APAPA and IMDB MDMDM; on ACM PAPAP it inverts at $L{=}2$.}
-  \label{fig:kgrw-depth}
-\end{figure}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\columnwidth]{fig8_tail_vs_advantage.pdf}
-  \caption{Per-dataset tail-fraction $|T|/|V_L|$ at $k{=}4$ vs the empirical KGRW low-budget CKA advantage. ACM (lowest tail-fraction $0.18$, hub-heavy) loses to MPRW; DBLP ($0.44$) and IMDB ($0.63$) both win, but the magnitude of the win is not strictly monotone in tail-fraction. Tail-fraction predicts the \emph{sign} of the advantage cleanly but not the magnitude.}
-  \label{fig:kgrw-tail}
-\end{figure}
-
-The KGRW prototype and reproduction recipe are provided in the accompanying code artifact.
-
-\section{Narrow-Regime Case Study: DBLP APTPA, $L{=}4$}
-\label{sec:app-dblp-aptpa}
-
-The one configuration in which we observed a non-marginal F1 gap between KMV and MPRW is DBLP APTPA (author$\to$paper$\to$term$\to$paper$\to$author, $L{=}4$ meta-path) with model depth $L{=}2$ and walk budget $w \le 16$. At every matched-density point in this regime, KMV beats MPRW by $1.5$--$2$\,pp Macro-F1, $\sim$3\,pp Prediction Agreement, and produces $\sim$$2\times$ lower Dirichlet Energy (Figs.~\ref{fig:dblp-aptpa}--\ref{fig:is-mechanism}). The mechanism is the importance-sampling bias predicted by the model: a long meta-path gives the random walk enough hops for the stationary (hub) distribution to dominate, but a small $w$ does not give enough Monte-Carlo samples to dilute the bias. On shorter meta-paths or moderate budgets the methods are again interchangeable. We present the regime as a clean instance of the IS-bias mechanism, not as a sparsifier verdict.
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\columnwidth]{dblp_aptpa_starved.pdf}
-  \caption{DBLP APTPA ($L{=}4$ meta-path), inference model depth $L{=}2$, starved budgets ($k \le 16$, $w \le 16$). Four panels: \emph{Macro-F1} (top-left, higher better) and \emph{Prediction Agreement} (top-right, higher better) both show KMV above MPRW at every matched-density point; \emph{Dirichlet Energy} (bottom-left) shows KMV closer to the Exact reference ($20.6$) than MPRW; \emph{Linear CKA} (bottom-right) shows MPRW above KMV --- the same homophily-bias signature characterised in \S\ref{sec:homophily}, surviving here because long meta-path~+~small $w$ amplifies it. On shorter meta-paths or moderate budgets the methods are again interchangeable.}
-  \label{fig:dblp-aptpa}
-\end{figure}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\columnwidth]{is_mechanism_dblp_aptpa.pdf}
-  \caption{Importance-sampling mechanism on DBLP APTPA. The endpoint-degree distribution of edges retained by MPRW is shifted toward higher-degree nodes relative to Exact, while KMV's hash-based sampling preserves the Exact distribution. This is the same hub-bias that drives the homophily measurement in \S\ref{sec:homophily}, made visible at the per-edge level.}
-  \label{fig:is-mechanism}
-\end{figure}
-
-\section{Layer-wise CKA}
-\label{sec:layer-cka}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\columnwidth]{figure/plot_cka_per_layer.pdf}
-  \caption{Layer-wise CKA trajectory within a depth-4 model ($k{=}32$). Each point $\ell$ shows CKA between the Exact-trained reference and the approximate model at intermediate layer $\ell$.}
-  \label{fig:cka-layers}
-\end{figure}
-
-Figure~\ref{fig:cka-layers} shows how representational alignment evolves within a depth-4 model. MPRW remains nearly flat near $1.0$ across all layers. KMV shows a steeper decline, consistent with the recursive drift expansion in Theorem~\ref{thm:drift}; the degradation follows the analytical decay curve of \S\ref{sec:theory} rather than collapsing.
-
-\section{Empirical Tightness of Theorem~\ref{thm:drift}}
-\label{sec:app-i2}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\columnwidth]{I2_tightness.pdf}
-  \caption{KMV propagation tightness: the fraction of (node, $L$) combinations on which the bottom-$k$-of-bottom-$k$ propagation introduces zero leak relative to bottom-$k$ of the full L-hop neighborhood. Across four datasets and $L\in\{1,2,3,4\}$, the empirical leak rate is $0$. Theorem~\ref{thm:drift}'s exponential-in-$L$ drift bound is therefore an upper bound on the proof technique, not on the algorithm in practice.}
-  \label{fig:i2}
-\end{figure}
+Table~\ref{tab:i4} reports per-node Pearson correlations between the max-hash slope and the ground-truth cardinality slope. The agreement is essentially perfect on PubMed and IMDB ($r{=}-0.997$, $-0.992$) and strong on DBLP ($r{=}-0.789$). The signal is recoverable from the sketch with no extra propagation pass and no additional memory beyond the sketch itself, enabling adaptive-depth message passing, structural-role detection via slope clustering, and online mixing-time estimation at $O(|V|\cdot k)$ memory.
 
 \section{Bottom-$k$ Jaccard Preservation}
 \label{sec:app-i5}
 
+The bottom-$k$ representation preserves Jaccard \emph{rank} between neighborhoods but fails to preserve absolute Jaccard at intermediate depths---an explicit limitation of the sketch as a similarity estimator.
+
 \begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{I5_jaccard_preservation.pdf}
-  \caption{Estimated vs.\ ground-truth Jaccard between $L$-hop neighborhoods, sampled per pair across $L\in\{1,2,3,4\}$ on three datasets. Pearson rank-correlation exceeds $0.93$ throughout, but the absolute estimate has a systematic negative bias peaking at $L{=}2$ ($-10\,$pp on IMDB and PubMed) and recovering at $L{=}4$ as neighborhoods saturate. The bias is a calibration issue, not a ranking one --- which is why we expect link-prediction (a ranking task) to be the right downstream consumer, not absolute-Jaccard estimation (\S\ref{sec:future}).}
+  \caption{Estimated vs.\ ground-truth Jaccard between $L$-hop neighborhoods, sampled per pair across $L\in\{1,2,3,4\}$ on three datasets. Pearson rank-correlation exceeds $0.93$ throughout, but the absolute estimate has a systematic negative bias peaking at $L{=}2$ ($-10$\,pp on IMDB and PubMed) and recovering at $L{=}4$ as neighborhoods saturate.}
   \label{fig:i5}
 \end{figure}
 
-\section{Homophily Bias and Spectral-Radius Inversion}
+The bias is a calibration issue, not a ranking one. Downstream consumers that depend on the \emph{ordering} of neighborhood-pair similarities (e.g., link prediction, nearest-neighbor retrieval) inherit a near-faithful signal; consumers that depend on absolute-Jaccard magnitudes do not.
+
+\section{Structural Anomalies: Homophily Bias and Spectral Radius}
 \label{sec:app-mprw-bias}
 \label{sec:homophily}
 
-Table~\ref{tab:fidelity} shows MPRW's Linear CKA at $0.93$--$1.00$ versus KMV's $0.89$--$0.98$---a consistent $1$--$9$\,pp gap that does not translate into a Macro-F1 advantage. We probe one candidate mechanism: \emph{edge-level label homophily}.
+This appendix records two empirical structural differences between the KMV-retained and MPRW-retained edge sets at matched density. We frame both as \emph{unconfirmed empirical findings}: they are unresolved artefacts of importance-sampled walk completion versus uniform-hash sampling, and we do not establish a causal link to the downstream CKA gap reported in \S\ref{sec:fidelity-orig}.
 
-\paragraph{Definition.}
+\paragraph{Edge homophily.}
 For an undirected sparsified adjacency $\widetilde{A}$ and a class label $y_u$ assigned to each target node $u$,
 \[
   \mathrm{homophily}(\widetilde{A}) \;=\; \frac{|\{(u,v)\in\widetilde{A}\,:\,y_u = y_v\}|}{|\{(u,v)\in\widetilde{A}\,:\,y_u, y_v \text{ both labelled}\}|},
 \]
-i.e.\ the fraction of retained edges whose two endpoints carry the same class label, restricted to edges where both endpoints are labelled. ACM and DBLP have full label coverage on their target node sets. PubMed has $1.83\%$ label coverage and is statistically underpowered for this measurement; we exclude it. We did not run this measurement on IMDB.
-
-\paragraph{Measurement.}
-For each dataset we materialise $\widetilde{A}_\text{KMV}$ at $k\in\{4,8,16\}$ and $\widetilde{A}_\text{MPRW}$ at the closest-edge-count $w$, then compute homophily on the retained edge set. Reference Exact-graph homophily is $0.523$ on ACM (saturated, near-clique) and $0.465$ on DBLP. Both sparsifiers retain a \emph{more} homophilic subset than Exact (sparsification preferentially keeps within-class edges); the question is whether the two sparsifiers retain it at the same level.
+i.e.\ the fraction of retained edges whose two endpoints carry the same class label. ACM and DBLP have full label coverage on their target node sets. PubMed has $1.83\%$ label coverage and is statistically underpowered for this measurement; we exclude it from the headline numbers.
 
 \begin{table}[H]
 \caption{Edge homophily of the retained adjacency at matched output density on ACM and DBLP. Densities are the sparsifier's own (KMV's edge count vs.\ Exact's $|E_\text{exact}|$ on the left, MPRW's on the right). $\Delta = \text{MPRW} - \text{KMV}$.}
@@ -703,23 +667,22 @@ DBLP   & 4.91\% & 0.698 & 2.49\% & 0.771 & $+7.3$\,pp \\
 \end{tabular}
 \end{table}
 
-\paragraph{Interpretation.}
-On ACM and DBLP, at three matched-density levels each, MPRW's retained edges have a $3.3$--$7.9$\,pp higher fraction of same-class endpoints than KMV's. This is a descriptive observation about the structure of the retained edge sets; nothing in the measurement establishes that this homophily difference \emph{causes} the CKA gap of \S\ref{sec:fidelity-orig}. A plausible structural mechanism is that walks completing $L$ meta-path hops preferentially traverse well-connected intermediate nodes, and well-connected nodes link same-class endpoints more often than cross-class ones in these datasets; we do not test this hypothesis here. A clean causal test is an importance-reweighted MPRW baseline at matched density (\S\ref{sec:future}).
-
-\paragraph{Caveats.}
-The measurement covers two datasets. The Macro-F1 numbers in Table~\ref{tab:fidelity}, where KMV and MPRW tie within seed noise, remain the more robust comparison; the CKA gap is suggestive of a structural asymmetry, not a fidelity verdict.
+On ACM and DBLP, MPRW's retained edges have a $3.3$--$7.9$\,pp higher fraction of same-class endpoints than KMV's at matched density. The discrepancy is an unconfirmed empirical finding; a clean test of whether it is causally responsible for the CKA gap is an importance-reweighted MPRW baseline at matched density, listed as open work in \S\ref{sec:future}.
 
 \begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{H1_homophily_vs_density.pdf}
-  \caption{Edge-level label homophily of the retained adjacency vs.\ matched output density on all four datasets (Exact reference homophily annotated per panel: $0.523$ ACM, $0.465$ DBLP, $0.719$ IMDB, $0.124$ PubMed). On ACM and DBLP---where label coverage is full and the meta-path is not yet saturated---MPRW's curve sits above KMV's at every density. On IMDB the curves overlap (the meta-path saturates near $\rho{=}1$, so retained subsets are near-identical). On PubMed homophily is statistically underpowered ($1.83\%$ test-label coverage) and is shown only as a sanity reference. The ACM/DBLP signal is the source of the CKA gap discussed in \S\ref{sec:homophily}.}
+  \caption{Edge-level label homophily of the retained adjacency vs.\ matched output density on all four datasets (Exact reference homophily annotated per panel: $0.523$ ACM, $0.465$ DBLP, $0.719$ IMDB, $0.124$ PubMed). On ACM and DBLP---where label coverage is full and the meta-path is not yet saturated---MPRW's curve sits above KMV's at every density. On IMDB the curves overlap. PubMed is shown only as a sanity reference.}
   \label{fig:h1}
 \end{figure}
+
+\paragraph{Spectral radius.}
+A second unconfirmed structural difference: at matched density, KMV's retained adjacency has $\lambda_{\max}$ that is $2$--$6\times$ higher than MPRW's across all four datasets (Figure~\ref{fig:h5}). We initially predicted the inverse direction (walks concentrating on hubs would yield high $\lambda_{\max}$); the data falsifies that prediction. The likely mechanism is that MPRW's retained edges form a tree-like walk skeleton with many leaves, while uniform-hash sampling preserves expander-like structure. We do not establish this mechanism beyond the visible inversion in the figure.
 
 \begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{H5_spectral_radius.pdf}
-  \caption{Spectral radius $\lambda_{\max}$ of the retained adjacency at matched density. We initially predicted MPRW $>$ KMV (walks concentrate on hubs $\Rightarrow$ high $\lambda_{\max}$); the data inverted the prediction. KMV's $\lambda_{\max}$ is $2$--$6\times$ higher than MPRW's across all four datasets at all measured densities. The mechanism: MPRW's retained edges form a tree-like walk skeleton with many leaves (low $\lambda_{\max}$), while KMV's near-uniform per-neighborhood sampling preserves expander structure.}
+  \caption{Spectral radius $\lambda_{\max}$ of the retained adjacency at matched density. KMV's $\lambda_{\max}$ is $2$--$6\times$ higher than MPRW's across all four datasets at all measured densities.}
   \label{fig:h5}
 \end{figure}
 
