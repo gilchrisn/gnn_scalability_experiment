@@ -63,25 +63,44 @@ def _wsl(cmd_str: str) -> list[str]:
     return ["bash", "-c", cmd_str]
 
 
-def _run_timed(cmd_inner: str, timeout_s: int) -> tuple[bool, float, float, str]:
-    """Run a shell command wrapped with /usr/bin/time -v.
-    Returns (ok, time_emitted_by_binary, peak_rss_mb, error_msg).
+def _run_timed(cmd_inner: str, timeout_s: int,
+                max_retries: int = 2) -> tuple[bool, float, float, str]:
+    """Run `/usr/bin/time -v <cmd_inner>` with cwd=ROOT, retry on transient errors.
 
-    The binary is expected to print 'time:<seconds>' in stdout (graph_prep
-    and mprw_exec both do).  Peak RSS comes from GNU time stderr.
+    cmd_inner is a shell string with paths RELATIVE to project root.
+    No `cd` is used; subprocess.cwd handles directory.
+
+    Retries up to max_retries on transient FS errors (Stale handle, IO error,
+    intermittent missing files), useful on networked filesystems.
     """
-    cmd = (f"cd /mnt/c/Users/Gilchris/UNI/not-school/Research/gnn/scalability_experiment && "
-           f"/usr/bin/time -v {cmd_inner}")
-    try:
-        r = subprocess.run(_wsl(cmd), capture_output=True, text=True, timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        return (False, 0.0, 0.0, f"TIMEOUT ({timeout_s}s)")
-    except Exception as e:
-        return (False, 0.0, 0.0, f"EXC: {type(e).__name__} {str(e)[:80]}")
+    cmd_str = f"/usr/bin/time -v {cmd_inner}"
+    cmd_argv = _wsl(cmd_str)
+    last_err = ""
+    for attempt in range(max_retries + 1):
+        try:
+            r = subprocess.run(cmd_argv, capture_output=True, text=True,
+                               timeout=timeout_s, cwd=str(ROOT))
+        except subprocess.TimeoutExpired:
+            return (False, 0.0, 0.0, f"TIMEOUT ({timeout_s}s)")
+        except Exception as e:
+            last_err = f"EXC: {type(e).__name__} {str(e)[:80]}"
+            time.sleep(2); continue
+
+        if r.returncode == 0:
+            break
+
+        last_err = (r.stderr or r.stdout or "")[-200:]
+        # Retry on transient filesystem errors only
+        if attempt < max_retries and (
+            "Input/output error" in last_err or
+            "Stale file handle"  in last_err
+        ):
+            time.sleep(2 + attempt * 3)
+            continue
+        return (False, 0.0, 0.0, f"EXIT={r.returncode} {last_err}")
 
     if r.returncode != 0:
-        tail = (r.stderr or r.stdout or "")[-200:]
-        return (False, 0.0, 0.0, f"EXIT={r.returncode} {tail}")
+        return (False, 0.0, 0.0, f"EXIT={r.returncode} {last_err}")
 
     # Pull binary's own time
     bin_time = 0.0
