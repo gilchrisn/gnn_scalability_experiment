@@ -870,7 +870,8 @@ def main() -> None:
 
     dataset  = args.dataset
     folder   = config.get_folder_name(dataset)
-    data_dir = os.path.join(project_root, folder)
+    data_dir = config.get_staging_dir(dataset)
+    os.makedirs(data_dir, exist_ok=True)
     out_dir  = Path(project_root) / "results" / dataset
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -944,7 +945,7 @@ def main() -> None:
     generate_qnodes(data_dir, folder, target_node_type=cfg.target_node, g_hetero=g_full)
     setup_global_res_dirs(folder, project_root)
 
-    runner = GraphPrepRunner(binary=config.CPP_EXECUTABLE, working_dir=project_root, verbose=False)
+    runner = GraphPrepRunner(binary=config.CPP_EXECUTABLE, working_dir=config.STAGING_DIR, verbose=False)
     engine = CppEngine(executable_path=config.CPP_EXECUTABLE, data_dir=data_dir)
     cka    = LinearCKA(device=config.DEVICE)
 

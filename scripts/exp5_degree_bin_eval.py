@@ -615,7 +615,8 @@ def _run_real_experiment(args, log: logging.Logger):
     y_test = labels[test_mask].numpy()    # [n_test]
 
     # ── Stage C++ files ───────────────────────────────────────────────────
-    data_dir = os.path.join(str(_ROOT), folder)
+    data_dir = config.get_staging_dir(DATASET)
+    os.makedirs(data_dir, exist_ok=True)
     setup_global_res_dirs(folder, str(_ROOT))
     PyGToCppAdapter(data_dir).convert(g_full)
     compile_rule_for_cpp(args.metapath, g_full, data_dir, folder)

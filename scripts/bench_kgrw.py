@@ -81,6 +81,32 @@ def _find_weights(dataset: str, mp_safe: str, L: int) -> Path | None:
     return None
 
 
+def _run_kmv(dataset_dir: str, rule_file: str, out_base_wsl: str,
+             k: int, seed: int) -> tuple[float, int, str]:
+    """Run graph_prep sketch (raw KMV), return (algo_time_s, edge_count, actual_adj_path).
+
+    graph_prep sketch <data_dir> <rule> <out_base> <k> "1" <seed>
+    Output is written to <out_base>_0 (suffix appended by binary).
+    """
+    cmd = (f"cd /mnt/c/Users/Gilchris/UNI/not-school/Research/gnn/scalability_experiment && "
+           f"bin/graph_prep sketch {dataset_dir} {rule_file} {out_base_wsl} {k} 1 {seed}")
+    result = subprocess.run(_wsl(cmd), capture_output=True, text=True, timeout=600)
+    if result.returncode != 0:
+        raise RuntimeError(f"graph_prep sketch failed: {result.stderr[-300:]}")
+
+    time_s = 0.0
+    for line in result.stdout.split("\n"):
+        if line.startswith("time:"):
+            try: time_s = float(line.split(":", 1)[1].strip())
+            except ValueError: pass
+
+    actual_adj = f"{out_base_wsl}_0"
+    cr = subprocess.run(_wsl(f"awk '{{s += NF-1}} END {{print s+0}}' {actual_adj}"),
+                        capture_output=True, text=True)
+    edges = int(cr.stdout.strip()) if cr.stdout.strip().isdigit() else 0
+    return time_s, edges, actual_adj
+
+
 def _run_kgrw(dataset_dir: str, rule_file: str, out_adj: str,
               k: int, w_prime: int, seed: int) -> tuple[float, int]:
     """Run mprw_exec kgrw, return (algo_time_s, edge_count)."""
@@ -218,6 +244,15 @@ def main() -> None:
     p.add_argument("--seeds", type=int, default=1,
                    help="Number of independent seeds to run (default 1). "
                         "Seeds are 42, 43, 44, ...")
+    p.add_argument("--metapath", default=None,
+                   help="Explicit metapath (comma-separated relations). "
+                        "If set, skips weights auto-detect and uses this. "
+                        "weights file expected at results/<dataset>/weights/<mp_safe>_L<L>.pt")
+    p.add_argument("--csv-out", default=None,
+                   help="Override CSV output path. Default: results/<dataset>/kgrw_bench.csv")
+    p.add_argument("--skip-kmv",  action="store_true", help="skip raw KMV sweep")
+    p.add_argument("--skip-mprw", action="store_true", help="skip MPRW sweep")
+    p.add_argument("--skip-kgrw", action="store_true", help="skip KGRW sweep")
     p.add_argument("--gen-exact", action="store_true",
                    help="Generate z_exact_<dataset>_L<L>.pt files from exact adj, then exit.")
     p.add_argument("--exact-adj", default=None,
@@ -228,8 +263,9 @@ def main() -> None:
 
     cfg         = config.get_dataset_config(args.dataset)
     folder      = config.get_folder_name(args.dataset)
-    dataset_dir = folder  # relative, e.g. HGBn-DBLP
-    rule_file   = f"{folder}/cod-rules_{folder}.limit"
+    # POSIX-relative path used inside the WSL bash command (forward slashes).
+    dataset_dir = f"staging/{folder}"
+    rule_file   = f"{dataset_dir}/cod-rules_{folder}.limit"
     metapath    = cfg.metapaths[0] if hasattr(cfg, "metapaths") else ""
 
     # Infer metapath from rule file / config
@@ -253,11 +289,15 @@ def main() -> None:
     test_mask = torch.zeros(n_target, dtype=torch.bool)
     test_mask[test_ids] = True
 
-    # Infer metapath name from weights directory
-    weights_dir = ROOT / "results" / args.dataset / "weights"
-    pt_files = list(weights_dir.glob("*.pt")) if weights_dir.exists() else []
-    mp_safe = pt_files[0].stem.rsplit("_L", 1)[0] if pt_files else "unknown"
-    metapath = mp_safe.replace("_", ",")
+    # Infer metapath name from weights directory, or use explicit override
+    if args.metapath:
+        metapath = args.metapath
+        mp_safe  = metapath.replace(",", "_")
+    else:
+        weights_dir = ROOT / "results" / args.dataset / "weights"
+        pt_files = list(weights_dir.glob("*.pt")) if weights_dir.exists() else []
+        mp_safe = pt_files[0].stem.rsplit("_L", 1)[0] if pt_files else "unknown"
+        metapath = mp_safe.replace("_", ",")
 
     print(f"\nDataset:  {args.dataset}")
     print(f"Target:   {cfg.target_node}  ({n_target} nodes, {test_mask.sum()} test)")
@@ -305,7 +345,8 @@ def main() -> None:
         return
 
     # Output CSV — seed is now a column for multi-seed aggregation
-    out_csv = ROOT / "results" / args.dataset / "kgrw_bench.csv"
+    out_csv = (Path(args.csv_out) if args.csv_out
+               else ROOT / "results" / args.dataset / "kgrw_bench.csv")
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     csv_fields = ["Dataset", "L", "Method", "k", "w_prime", "Seed",
                   "Edge_Count", "Mat_Time_s",
@@ -347,8 +388,49 @@ def main() -> None:
         print(f"\n  {'Method':<22} {'Edges':>8} {'F1':>7} {'CKA':>7} {'PA':>7}  (mean across {len(args.seed_list)} seed(s))")
         print(f"  {'-'*65}")
 
+        # ── Raw KMV sweep: graph_prep sketch at each k ────────────────────
+        for k in (args.k_values if not args.skip_kmv else []):
+            for seed in args.seed_list:
+                run_key = (str(L), "KMV", str(k), "", str(seed))
+                if run_key in existing_runs:
+                    continue
+                out_base = f"/tmp/kmv_k{k}_s{seed}_{args.dataset}"
+                try:
+                    mat_time, edges, adj_wsl = _run_kmv(
+                        dataset_dir, rule_file, out_base, k, seed)
+                except Exception as e:
+                    print(f"  KMV k={k} s={seed}: FAILED ({e})"); continue
+
+                label  = f"kmv_k{k}_s{seed}_L{L}_{args.dataset}"
+                z_out  = str(tmp_dir / f"z_{label}.pt")
+                inf    = _run_inference(adj_wsl, feat_file, str(weights_path), z_out,
+                                        labels_file, mask_file,
+                                        n_target, node_offset, in_dim,
+                                        num_classes, L, label)
+                f1 = inf.get("inf_f1", float("nan"))
+                cka_val = pa_val = float("nan")
+                if z_exact is not None and os.path.exists(z_out):
+                    try:
+                        from src.analysis.cka import LinearCKA
+                        z_m  = torch.load(z_out, weights_only=True)
+                        cka_val = float(LinearCKA(device=torch.device("cpu")).calculate(
+                            z_exact[test_mask], z_m[test_mask]))
+                        pa_val = (z_exact[test_mask].argmax(1) ==
+                                  z_m[test_mask].argmax(1)).float().mean().item()
+                    except Exception as e:
+                        print(f"    CKA error (KMV): {e}")
+
+                writer.writerow({"Dataset": args.dataset, "L": L,
+                                 "Method": "KMV", "k": k, "w_prime": "", "Seed": seed,
+                                 "Edge_Count": edges, "Mat_Time_s": round(mat_time, 4),
+                                 "Macro_F1": round(f1, 6) if f1 == f1 else "",
+                                 "CKA": round(cka_val, 6) if cka_val == cka_val else "",
+                                 "Pred_Agreement": round(pa_val, 6) if pa_val == pa_val else ""})
+                fout.flush()
+                existing_runs.add(run_key)
+
         # ── MPRW reference: run fresh on this meta-path across seeds ──────
-        for w in args.w_values:
+        for w in (args.w_values if not args.skip_mprw else []):
             mprw_metrics: list[dict] = []
             for seed in args.seed_list:
                 run_key = (str(L), "MPRW", "", str(w), str(seed))
@@ -399,7 +481,7 @@ def main() -> None:
                                      "edges": edges, "time": mat_time})
 
         # ── KGRW sweep ────────────────────────────────────────────────────
-        for k in args.k_values:
+        for k in (args.k_values if not args.skip_kgrw else []):
             for wp in args.w_values:
                 kgrw_metrics: list[dict] = []
                 for seed in args.seed_list:
@@ -462,6 +544,11 @@ def main() -> None:
             pam, pas   = ms("Pred_Agreement")
             return edges, f1m, f1s, ckam, ckas, pam, pas
 
+        for k in sorted(args.k_values):
+            a = _agg("KMV", k, "")
+            if a:
+                e,f,fs,c,cs,p,ps = a
+                print(f"  {'KMV k='+str(k):<22} {e:>8,} {f:.4f}±{fs:.3f} {c:.4f}±{cs:.3f} {p:.4f}±{ps:.3f}")
         for w in sorted(args.w_values):
             a = _agg("MPRW", "", w)
             if a:

@@ -203,13 +203,14 @@ def main() -> None:
         # Re-generate a few KGRW adj files for analysis
         print("KGRW (re-materializing for path-count analysis):")
         folder = config.get_folder_name(args.dataset)
-        rule   = f"{folder}/cod-rules_{folder}.limit"
+        staging_rel = f"staging/{folder}"
+        rule   = f"{staging_rel}/cod-rules_{folder}.limit"
         import subprocess
         for k, wp in [(4, 1), (4, 4), (8, 4), (16, 4), (16, 16)]:
             out = f"/tmp/bias_kgrw_k{k}_wp{wp}.adj"
             cmd = (f"cd /mnt/c/Users/Gilchris/UNI/not-school/Research/gnn/"
                    f"scalability_experiment && "
-                   f"bin/mprw_exec kgrw {folder} {rule} {out} {k} {wp} {args.seed}")
+                   f"bin/mprw_exec kgrw {staging_rel} {rule} {out} {k} {wp} {args.seed}")
             subprocess.run(["wsl", "--exec", "bash", "-c", cmd],
                            capture_output=True, timeout=60)
             # Copy to Windows

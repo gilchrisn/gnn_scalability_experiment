@@ -78,9 +78,13 @@ class CppEngine(ExecutionEngine):
         print(f"    [C++] Exec: {' '.join(inner_cmd)}")
         start_fallback = time.perf_counter()
 
+        # The binary writes cwd-relative `global_res/...` side files.  Force
+        # the working directory to the staging root so those writes land under
+        # `staging/global_res/` consistently (matching GraphPrepRunner).
+        from src.config import config as _cfg
         try:
             res = subprocess.run(cmd, check=True, capture_output=True, text=True,
-                                 timeout=timeout)
+                                 timeout=timeout, cwd=_cfg.STAGING_DIR)
 
             # Parse GNU time peak RSS from stderr.
             # "Maximum resident set size (kbytes): 12345"

@@ -202,17 +202,18 @@ def _run_hg_stats(
     Materializes the matching graph, counts edges and peers from the
     output file, then deletes it. No hg_stats C++ call needed.
     """
-    adj_path = os.path.join(data_dir, "mat_exact.adj") if data_dir else os.path.join(folder, "mat_exact.adj")
+    staging_dir = data_dir if data_dir else os.path.join(config.STAGING_DIR, folder)
+    adj_path = os.path.join(staging_dir, "mat_exact.adj")
+    rule_path = os.path.join(staging_dir, f"cod-rules_{folder}.limit")
 
-    # Materialize to get the adjacency file
+    # Materialize to get the adjacency file. Binary reads dataset files via the
+    # first arg (treated as dataset dir) and writes global_res/ relative to cwd.
     try:
-        from src.bridge import CppEngine
-        engine = CppEngine(config.CPP_EXECUTABLE, data_dir or folder)
-        cmd = [config.CPP_EXECUTABLE, "materialize", folder,
-               os.path.join(folder, f"cod-rules_{folder}.limit"), adj_path]
+        cmd = [config.CPP_EXECUTABLE, "materialize", staging_dir, rule_path, adj_path]
         import subprocess, time as _time
         t0 = _time.perf_counter()
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800,
+                                cwd=config.STAGING_DIR)
         mat_time = _time.perf_counter() - t0
     except Exception as e:
         log.warning("  table3 | materialize failed for %s: %s", metapath[:60], e)
@@ -483,7 +484,8 @@ def main() -> None:
 
     dataset  = args.dataset
     folder   = config.get_folder_name(dataset)
-    data_dir = os.path.join(project_root, folder)
+    data_dir = config.get_staging_dir(dataset)
+    os.makedirs(data_dir, exist_ok=True)
     out_dir  = Path(project_root) / "results" / dataset
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -612,7 +614,7 @@ def main() -> None:
 
     runner = GraphPrepRunner(
         binary=config.CPP_EXECUTABLE,
-        working_dir=project_root,
+        working_dir=config.STAGING_DIR,
         timeout=args.timeout,
         verbose=False,
     )

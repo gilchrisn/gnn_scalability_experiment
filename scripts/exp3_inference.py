@@ -530,7 +530,8 @@ def main():
 
     cfg          = config.get_dataset_config(args.dataset)
     folder       = config.get_folder_name(args.dataset)
-    data_dir     = os.path.join(project_root, folder)
+    data_dir     = config.get_staging_dir(args.dataset)
+    os.makedirs(data_dir, exist_ok=True)
     target_ntype = cfg.target_node
 
     assert part["target_type"] == target_ntype, (

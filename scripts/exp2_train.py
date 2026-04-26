@@ -372,7 +372,8 @@ def main():
     # ------------------------------------------------------------------
     # Stage C++ files + run ExactD (once, reused across all L)
     # ------------------------------------------------------------------
-    data_dir = os.path.join(project_root, folder)
+    data_dir = config.get_staging_dir(args.dataset)
+    os.makedirs(data_dir, exist_ok=True)
     setup_global_res_dirs(folder, project_root)
     engine   = CppEngine(executable_path=config.CPP_EXECUTABLE, data_dir=data_dir)
 

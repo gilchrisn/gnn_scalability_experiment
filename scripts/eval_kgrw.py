@@ -94,7 +94,7 @@ def main():
 
     cfg = config.get_dataset_config(args.dataset)
     folder = config.get_folder_name(args.dataset)
-    data_dir = str(ROOT / folder)
+    data_dir = config.get_staging_dir(args.dataset)
     target_ntype = cfg.target_node
 
     # Partition

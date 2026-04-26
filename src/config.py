@@ -47,6 +47,7 @@ class Config:
         # Paths
         self.PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.DATA_DIR = os.path.join(self.PROJECT_ROOT, "datasets")
+        self.STAGING_DIR = os.path.join(self.PROJECT_ROOT, "staging")
         self.OUTPUT_DIR = os.path.join(self.PROJECT_ROOT, "output")
         self.TEMP_DIR = os.path.join(self.OUTPUT_DIR, "intermediate")
         self.MODEL_DIR = os.path.join(self.OUTPUT_DIR, "models")
@@ -196,9 +197,16 @@ class Config:
     
     def _ensure_directories(self) -> None:
         """Create necessary directories if they don't exist."""
-        for dir_path in [self.DATA_DIR, self.OUTPUT_DIR, self.TEMP_DIR, 
+        for dir_path in [self.DATA_DIR, self.STAGING_DIR, self.OUTPUT_DIR, self.TEMP_DIR,
                         self.MODEL_DIR, self.RESULTS_DIR]:
             os.makedirs(dir_path, exist_ok=True)
+
+    def get_staging_dir(self, dataset_key: str) -> str:
+        """Absolute path to the C++ working directory for a dataset.
+
+        All staging folders live under ``<project_root>/staging/``.
+        """
+        return os.path.join(self.STAGING_DIR, self.get_folder_name(dataset_key))
     
     def get_folder_name(self, dataset_key: str) -> str:
         """Return the C++ working-directory name for a dataset.

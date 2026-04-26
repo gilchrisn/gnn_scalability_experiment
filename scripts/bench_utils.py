@@ -180,9 +180,12 @@ def setup_global_res_dirs(folder_name: str, project_root: str):
     """
     Creates the rigid directory structure required by C++ exact-baseline tracking.
 
-    Expected layout (hardcoded inside the C++ binary):
+    Expected layout (hardcoded inside the C++ binary, written relative to cwd):
         global_res/<folder_name>/df1/   ← Degree centrality baselines
         global_res/<folder_name>/hf1/   ← H-Index centrality baselines
+
+    The runner invokes the binary with cwd=<project_root>/staging, so these
+    are created at ``staging/global_res/…`` on disk.
 
     Args:
         folder_name:  Dataset folder name (e.g. 'HGBn-ACM').
@@ -191,8 +194,8 @@ def setup_global_res_dirs(folder_name: str, project_root: str):
     Returns:
         Tuple of (df1_dir, hf1_dir) absolute paths.
     """
-    df1_dir = os.path.join(project_root, "global_res", folder_name, "df1")
-    hf1_dir = os.path.join(project_root, "global_res", folder_name, "hf1")
+    df1_dir = os.path.join(project_root, "staging", "global_res", folder_name, "df1")
+    hf1_dir = os.path.join(project_root, "staging", "global_res", folder_name, "hf1")
     os.makedirs(df1_dir, exist_ok=True)
     os.makedirs(hf1_dir, exist_ok=True)
     return df1_dir, hf1_dir

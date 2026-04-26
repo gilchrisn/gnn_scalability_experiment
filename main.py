@@ -10,8 +10,6 @@ from src.commands import (
     TrainCommand,
     BenchmarkCommand,
     MineCommand,
-    AnalyzeCommand,
-    CompareCommand,
     TrainFidelityCommand,
     VisualizeFidelityCommand,
     MLPBaselineCommand,
@@ -46,10 +44,6 @@ def main():
     TrainCommand.register_subparser(subparsers)
     MineCommand.register_subparser(subparsers)
 
-    # Diagnostic Commands
-    AnalyzeCommand.register_subparser(subparsers)
-    CompareCommand.register_subparser(subparsers)
-
     # Journal Experiment Commands
     TrainFidelityCommand.register_subparser(subparsers)
     VisualizeFidelityCommand.register_subparser(subparsers)
@@ -70,8 +64,6 @@ def main():
         'benchmark':          BenchmarkCommand(),
         'train':              TrainCommand(),
         'mine':               MineCommand(),
-        'analyze':            AnalyzeCommand(),
-        'compare':            CompareCommand(),
         'train_fidelity':     TrainFidelityCommand(),
         'visualize_fidelity': VisualizeFidelityCommand(),
         'mlp_baseline':       MLPBaselineCommand(),
