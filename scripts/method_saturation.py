@@ -1,19 +1,41 @@
 """method_saturation.py — saturation + marginal-cost analysis for KMV / KGRW / MPRW.
 
-Three lenses (1 row each, 3 columns one per dataset):
-    (1) Edges vs primary parameter (k for KMV, w for MPRW, k×w for KGRW)
-    (2) Time vs edges                — slope = cost per new edge
-    (3) Marginal cost dt/dE          — does it diverge (coupon collector) or plateau?
+PURPOSE
+-------
+Tests the **Marginal Cost Theorem** (THEORY.md §5) empirically.  The theorem
+says MPRW's cost-per-new-edge dt/dE diverges as edges → max-neighborhood
+(coupon-collector effect), while KMV's stays bounded.  KGRW should sit
+between, with a crossover.
+
+We plot 3 rows, one column per dataset, all three methods on each panel:
+
+    Row 1 — edges vs primary parameter
+        Are we even reaching saturation?  How fast does each method "fill in"?
+        KMV against k.  MPRW against w.  KGRW against k (fixed w') and
+        against w' (fixed k).
+
+    Row 2 — time vs edges
+        Direct cost picture.  Slope of each curve = avg cost per edge.
+        If methods overlap, the cheaper-per-edge wins for any density target.
+
+    Row 3 — marginal cost dt/dE   ★ THE TALK SLIDE ★
+        Computed numerically: between consecutive parameter steps,
+        ΔTime / ΔEdges.  This is the dealbreaker plot.  Theorem prediction:
+            - MPRW: dt/dE rises monotonically → coupon collector visible
+            - KMV: roughly flat → bounded marginal cost
+            - KGRW: between, with crossover
 
 Inputs:  results/<DS>/kgrw_bench.csv    (L=2)
-Outputs: results/method_saturation.pdf
-         results/method_saturation.md
+Outputs: results/method_saturation.pdf  (3-row × N-dataset grid)
+         results/method_saturation.csv  (long-form per-cell table)
+         results/method_saturation.md   (per-cell markdown table per dataset)
 """
 from __future__ import annotations
 
 import csv
+from collections import Counter
 from pathlib import Path
-from statistics import mean
+from statistics import mean, stdev
 
 import matplotlib
 matplotlib.use("Agg")
@@ -25,20 +47,33 @@ DATASETS = ["HGB_DBLP", "HGB_ACM", "HGB_IMDB", "HNE_PubMed"]
 COLORS   = {"KMV": "#2CA02C", "KGRW": "#1F77B4", "MPRW": "#D62728"}
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# Loading & aggregation helpers.
+# ────────────────────────────────────────────────────────────────────────────
+
 def _load(ds: str) -> list[dict]:
+    """Load per-dataset CSV, filter to SAGE-depth L=2 (the row's "L" column
+    is GNN depth, not metapath length — we run all benches at L_sage=2)."""
     with open(ROOT / "results" / ds / "kgrw_bench.csv", encoding="utf-8") as f:
         return [r for r in csv.DictReader(f) if r.get("L") == "2"]
 
 
 def _flt(v):
+    """Tolerant float parse (CSV cells may be empty)."""
     try: return float(v) if v not in ("", None) else None
     except ValueError: return None
 
 
 def _agg_method(rows: list[dict], method: str
-               ) -> list[tuple[int, int, float, float]]:
-    """Return list of (k_or_None, w_or_None, edges_mean, time_mean) sorted by edges.
-    For KMV: k set, w None.  For MPRW: w set, k None.  For KGRW: both set."""
+               ) -> list[tuple]:
+    """For one method, aggregate seeds into one (edges, time, time_std)
+    point per cell.
+
+    Returns list of (k, w, edges_mean, time_mean, time_std), sorted by edges.
+    time_std is the across-seed std of materialization time — used both
+    for error bars on the time-vs-edges plot and for diagnosing whether
+    a negative dt/dE is just noise (yes, almost always).
+    """
     cells: dict[tuple, list[tuple[float, float]]] = {}
     for r in rows:
         if r["Method"] != method: continue
@@ -55,12 +90,52 @@ def _agg_method(rows: list[dict], method: str
     for (k, w), pairs in cells.items():
         es = [p[0] for p in pairs]
         ts = [p[1] for p in pairs]
-        out.append((k, w, mean(es), mean(ts)))
+        t_mean = mean(ts)
+        t_std  = stdev(ts) if len(ts) > 1 else 0.0
+        out.append((k, w, mean(es), t_mean, t_std))
     return sorted(out, key=lambda r: r[2])
 
 
+def _linfit(xs, ys):
+    """Linear least squares y = a*x + b. Returns (slope, intercept, r2)
+    or None if degenerate."""
+    n = len(xs)
+    if n < 2: return None
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    den = sum((xs[i] - mx) ** 2 for i in range(n))
+    if den == 0: return None
+    a = sum((xs[i] - mx) * (ys[i] - my) for i in range(n)) / den
+    b = my - a * mx
+    ss_res = sum((ys[i] - (a * xs[i] + b)) ** 2 for i in range(n))
+    ss_tot = sum((ys[i] - my) ** 2 for i in range(n))
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 1.0
+    return a, b, r2
+
+
+def _densest(kgrw, idx: int):
+    """In a 2D KGRW grid, return the value of axis `idx` (0=k, 1=w') that
+    appears in the most cells — i.e. the slice with the most data points.
+
+    Picking the *largest* parameter often gives a sparse slice (only 3-4
+    points on DBLP/IMDB). Picking the densest slice gives more points
+    for the marginal/fit, at the cost of not always being the "biggest k"."""
+    if not kgrw: return None
+    counts = Counter(p[idx] for p in kgrw)
+    return max(counts, key=counts.get)
+
+
 def _marginal(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
-    """Given list of (edges, time) sorted by edges, return [(edges, dt/dE)]."""
+    """Numeric derivative dt/dE between consecutive (edges, time) points.
+
+    For two adjacent parameter steps producing (E1, T1) and (E2, T2):
+        marginal_cost = (T2 - T1) / (E2 - E1)
+    Plotted at the midpoint of [E1, E2] so the curve sits sensibly on x.
+
+    THIS IS THE METRIC FOR THE TALK SLIDE.  Rising = coupon collector
+    (MPRW) or sketch-merge cost growing (KMV at very high k).  Flat =
+    bounded (KMV in normal regime).
+    """
     out = []
     for i in range(1, len(points)):
         e1, t1 = points[i - 1]
@@ -71,7 +146,10 @@ def _marginal(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
     return out
 
 
-# ─── Aggregate per dataset ─────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
+# Stage 1 — Aggregate per dataset.  For each dataset, build the three
+# per-method curves we'll plot in 3 rows below.
+# ────────────────────────────────────────────────────────────────────────────
 
 agg: dict = {}
 for ds in DATASETS:
@@ -79,157 +157,144 @@ for ds in DATASETS:
     kmv  = _agg_method(rows, "KMV")     # (k, None, edges, time)
     mprw = _agg_method(rows, "MPRW")    # (None, w, edges, time)
     kgrw = _agg_method(rows, "KGRW")    # (k, w, edges, time)
-
     agg[ds] = {"KMV":  kmv, "MPRW": mprw, "KGRW": kgrw}
 
 
-# ─── Plot ──────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
+# Stage 2 — The plot.
+#
+# ONE row × N datasets.  Each panel: time vs edges, log-log.
+#   KMV  (green line)   — 1D sweep over k, sorted by edges produced.
+#   MPRW (red line)     — 1D sweep over w, sorted by edges produced.
+#   KGRW (blue scatter) — 2D grid over (k, w'), one dot per cell.
+#
+# How to read:
+#   X = how many edges the materialised graph Ã ended up with (density).
+#   Y = wall-clock cost to produce those edges.
+#   Local slope of a curve = cost per edge at that density.
+#   Saturation = the rightmost x value a method's curve reaches.  KMV
+#     stops well before MPRW because at large k it can't add edges that
+#     don't exist; MPRW keeps trying with more walks.
+#
+# What we want to see in the picture:
+#   - KMV sits in the lower-left and plateaus on x: cheap, capped density.
+#   - MPRW reaches further right on x but bends up on y near the right
+#     edge: each extra edge costs more (coupon collector).
+#   - KGRW (blue dots) — does the cloud sit between the two lines, on
+#     KMV's, or above MPRW's?  That's the answer to "does KGRW work".
+# ────────────────────────────────────────────────────────────────────────────
 
-fig, axes = plt.subplots(3, len(DATASETS), figsize=(5 * len(DATASETS), 13))
+fig, axes = plt.subplots(1, len(DATASETS),
+                         figsize=(4.5 * len(DATASETS), 4.2))
+if len(DATASETS) == 1:
+    axes = [axes]
 
 for col, ds in enumerate(DATASETS):
-    ds_short = ds.replace("HGB_", "")
+    ds_short = ds.replace("HGB_", "").replace("HNE_", "")
+    ax = axes[col]
 
-    # Row 1 — edges vs primary param
-    ax = axes[0, col]
-    kmv_pts  = [(p[0], p[2]) for p in agg[ds]["KMV"]]   # (k, edges)
-    mprw_pts = [(p[1], p[2]) for p in agg[ds]["MPRW"]]  # (w, edges)
-    if kmv_pts:
-        kmv_pts.sort()
-        ax.plot([p[0] for p in kmv_pts], [p[1] for p in kmv_pts],
-                "o-", color=COLORS["KMV"], label="KMV  (x = sketch size k)",
-                markersize=6, linewidth=2)
-    if mprw_pts:
-        mprw_pts.sort()
-        ax.plot([p[0] for p in mprw_pts], [p[1] for p in mprw_pts],
-                "s-", color=COLORS["MPRW"], label="MPRW (x = walks per node w)",
-                markersize=6, linewidth=2)
-    # KGRW: pick k-sweep at largest w', and w-sweep at largest k
-    kgrw = agg[ds]["KGRW"]
+    # KMV: 1D sweep over k → connected line sorted by edges.
+    kmv = sorted([(p[2], p[3]) for p in agg[ds]["KMV"]])
+    if kmv:
+        ax.plot([p[0] for p in kmv], [p[1] for p in kmv],
+                "o-", color=COLORS["KMV"], label="KMV (sweep k)",
+                markersize=5, linewidth=1.6)
+    # MPRW: 1D sweep over w → connected line sorted by edges.
+    mprw = sorted([(p[2], p[3]) for p in agg[ds]["MPRW"]])
+    if mprw:
+        ax.plot([p[0] for p in mprw], [p[1] for p in mprw],
+                "s-", color=COLORS["MPRW"], label="MPRW (sweep w)",
+                markersize=5, linewidth=1.6)
+    # KGRW: 2D grid → scatter cloud, one dot per (k, w') cell.
+    kgrw = [(p[2], p[3]) for p in agg[ds]["KGRW"]]
     if kgrw:
-        ks = sorted({p[0] for p in kgrw})
-        ws = sorted({p[1] for p in kgrw})
-        # k-sweep at largest w'
-        if ws:
-            wmax = ws[-1]
-            sub = sorted([(p[0], p[2]) for p in kgrw if p[1] == wmax])
-            ax.plot([p[0] for p in sub], [p[1] for p in sub],
-                    "^--", color=COLORS["KGRW"],
-                    label=f"KGRW (x = k, fixed w'={wmax})",
-                    markersize=6, linewidth=1.5, alpha=0.9)
-        # w-sweep at largest k
-        if ks:
-            kmax = ks[-1]
-            sub = sorted([(p[1], p[2]) for p in kgrw if p[0] == kmax])
-            ax.plot([p[0] for p in sub], [p[1] for p in sub],
-                    "v:", color=COLORS["KGRW"],
-                    label=f"KGRW (x = w', fixed k={kmax})",
-                    markersize=6, linewidth=1.5, alpha=0.9)
-    ax.set_xscale("log", base=2)
-    ax.set_xlabel("Method primary parameter (k or w, log₂)")
-    ax.set_ylabel("Edge count")
-    ax.set_title(f"{ds_short}: how edges grow with parameter",
-                 fontsize=11, fontweight="bold")
-    ax.grid(alpha=0.3)
-    ax.legend(fontsize=8, loc="lower right", framealpha=0.95)
+        ax.scatter([p[0] for p in kgrw], [p[1] for p in kgrw],
+                   marker="^", color=COLORS["KGRW"], s=22, alpha=0.55,
+                   label=f"KGRW (k × w', n={len(kgrw)})")
 
-    # Row 2 — time vs edges (slope = cost per edge)
-    ax = axes[1, col]
-    for label, pts in [("KMV",  [(p[2], p[3]) for p in agg[ds]["KMV"]]),
-                       ("MPRW", [(p[2], p[3]) for p in agg[ds]["MPRW"]]),
-                       ("KGRW", [(p[2], p[3]) for p in agg[ds]["KGRW"]])]:
-        if not pts: continue
-        pts = sorted(pts)
-        ax.plot([p[0] for p in pts], [p[1] for p in pts],
-                "o", color=COLORS[label], label=label, markersize=5, alpha=0.7)
-    ax.set_xlabel("Edge count")
-    ax.set_ylabel("Materialization time (s)")
-    ax.set_title(f"{ds_short}: total time vs edges produced",
-                 fontsize=11, fontweight="bold")
-    ax.grid(alpha=0.3)
-    ax.legend(fontsize=9, loc="upper left", framealpha=0.95)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("edges in Ã")
+    if col == 0:
+        ax.set_ylabel("materialisation time (s)")
+    ax.set_title(ds_short, fontsize=12, fontweight="bold")
+    ax.grid(alpha=0.3, which="both")
+    ax.legend(fontsize=9, loc="lower right", framealpha=0.95)
 
-    # Row 3 — marginal dt/dE
-    ax = axes[2, col]
-    for label in ["KMV", "MPRW", "KGRW"]:
-        pts = sorted([(p[2], p[3]) for p in agg[ds][label]])
-        marg = _marginal(pts)
-        if marg:
-            ax.plot([p[0] for p in marg], [p[1] for p in marg],
-                    "o-", color=COLORS[label], label=label,
-                    markersize=5, linewidth=1.5, alpha=0.8)
-    ax.set_xlabel("Edge count (midpoint of interval)")
-    ax.set_ylabel("Marginal cost  dt / dE  (s per new edge)")
-    ax.set_title(f"{ds_short}: cost per next edge\n"
-                 f"(rising = coupon-collector / saturation)",
-                 fontsize=11, fontweight="bold")
-    ax.set_yscale("symlog", linthresh=1e-7)
-    ax.grid(alpha=0.3)
-    ax.legend(fontsize=9, loc="upper left", framealpha=0.95)
-
-fig.suptitle("Method saturation at L=2:  KMV (green) vs KGRW (blue) vs MPRW (red)\n"
-             "Row 1 = edge growth | Row 2 = total time | Row 3 = marginal cost (dt/dE)",
-             fontsize=13, y=1.0, fontweight="bold")
+fig.suptitle("Cost vs density at L=2 — slope on log-log = cost per edge",
+             fontsize=12, y=1.02)
 fig.tight_layout()
 out_pdf = ROOT / "results" / "method_saturation.pdf"
 fig.savefig(out_pdf, dpi=150, bbox_inches="tight")
 print(f"Wrote {out_pdf}")
 
 
-# ─── Markdown — saturation point + marginal-cost regime per method ────────
+# ────────────────────────────────────────────────────────────────────────────
+# Stage 3 — Per-cell CSV + Markdown.  One row per (dataset, method, k, w')
+# cell with mean edges, mean materialization time, and marginal dt/dE
+# (= cost of the *next* edge between this cell and the previous one in the
+# same method's sweep, sorted by edge count). Sweeps are intra-method:
+# the marginal compares cell i to cell i-1 within the same method only.
+# ────────────────────────────────────────────────────────────────────────────
+
+def _emit_rows(ds: str, method: str):
+    """Yield dicts for every cell in this (ds, method) sweep, with
+    marginal_dtdE relative to the previous cell in this method's curve.
+    Includes time std across seeds — useful for telling apart real
+    saturation jumps from timer noise."""
+    pts = agg[ds][method]   # already sorted by edges_mean
+    prev_e = prev_t = None
+    for k, w, e, t, t_std in pts:
+        if prev_e is not None and e > prev_e:
+            dtde = (t - prev_t) / (e - prev_e)
+        else:
+            dtde = None
+        yield {
+            "Dataset":      ds,
+            "Method":       method,
+            "k":            k if k is not None else "",
+            "w_prime":      w if w is not None else "",
+            "edges_mean":   f"{e:.0f}",
+            "mat_time_s":   f"{t:.4f}",
+            "mat_time_std": f"{t_std:.4f}",
+            "marginal_dtdE": "" if dtde is None else f"{dtde:.6e}",
+        }
+        prev_e, prev_t = e, t
+
+out_csv = ROOT / "results" / "method_saturation.csv"
+fields = ["Dataset", "Method", "k", "w_prime",
+          "edges_mean", "mat_time_s", "mat_time_std", "marginal_dtdE"]
+with open(out_csv, "w", newline="", encoding="utf-8") as f:
+    w_csv = csv.DictWriter(f, fieldnames=fields)
+    w_csv.writeheader()
+    for ds in DATASETS:
+        for method in ["KMV", "KGRW", "MPRW"]:
+            for row in _emit_rows(ds, method):
+                w_csv.writerow(row)
+print(f"Wrote {out_csv}")
+
+
+# Markdown — every cell, grouped by dataset, sorted by Method then edges.
 
 md = ["# Method saturation @ L=2 — KMV / KGRW / MPRW\n",
-      "Saturation = first parameter step where edges grow < 5% (per doubling).",
-      "Marginal cost = dt/dE; rising = coupon collector (MPRW) or capacity exhaustion (KMV).\n"]
-
-def _saturation_param(pts: list[tuple[int | None, float]],
-                       thresh: float = 0.05) -> str:
-    """Smallest parameter where Δedges/edges < thresh on next doubling."""
-    pts = [p for p in pts if p[0] is not None]
-    pts.sort()
-    for i in range(len(pts) - 1):
-        a, b = pts[i], pts[i + 1]
-        if a[1] > 0 and (b[1] - a[1]) / a[1] < thresh:
-            return str(a[0])
-    return f">{pts[-1][0]}" if pts else "—"
+      "Every (method, k, w') cell. Sorted by Method then edge count.",
+      "`dt/dE` = marginal cost of the next edge vs the previous cell in",
+      "the same method's sweep (empty for the smallest cell of each method).\n"]
 
 for ds in DATASETS:
     md.append(f"\n## {ds}\n")
-    md.append("| Method | sweep | sat. param | edge plateau | mat time at plateau |")
-    md.append("|---|---|---:|---:|---:|")
-    kmv  = [(p[0], p[2], p[3]) for p in agg[ds]["KMV"]]
-    mprw = [(p[1], p[2], p[3]) for p in agg[ds]["MPRW"]]
-    kgrw = agg[ds]["KGRW"]
-
-    if kmv:
-        sat = _saturation_param([(x[0], x[1]) for x in kmv])
-        e   = max(x[1] for x in kmv)
-        t   = next(x[2] for x in kmv if x[1] == e)
-        md.append(f"| KMV  | k          | {sat} | {e:,.0f} | {t:.4f}s |")
-    if mprw:
-        sat = _saturation_param([(x[0], x[1]) for x in mprw])
-        e   = max(x[1] for x in mprw)
-        t   = next(x[2] for x in mprw if x[1] == e)
-        md.append(f"| MPRW | w          | {sat} | {e:,.0f} | {t:.4f}s |")
-    if kgrw:
-        # KGRW k-sweep at largest w'
-        ws = sorted({p[1] for p in kgrw})
-        if ws:
-            wmax = ws[-1]
-            sub = sorted([(p[0], p[2], p[3]) for p in kgrw if p[1] == wmax])
-            sat = _saturation_param([(x[0], x[1]) for x in sub])
-            e   = max(x[1] for x in sub)
-            t   = next(x[2] for x in sub if x[1] == e)
-            md.append(f"| KGRW | k @ w'={wmax} | {sat} | {e:,.0f} | {t:.4f}s |")
-        # KGRW w-sweep at largest k
-        ks = sorted({p[0] for p in kgrw})
-        if ks:
-            kmax = ks[-1]
-            sub = sorted([(p[1], p[2], p[3]) for p in kgrw if p[0] == kmax])
-            sat = _saturation_param([(x[0], x[1]) for x in sub])
-            e   = max(x[1] for x in sub)
-            t   = next(x[2] for x in sub if x[1] == e)
-            md.append(f"| KGRW | w' @ k={kmax} | {sat} | {e:,.0f} | {t:.4f}s |")
+    md.append("| Method | k | w' | edges | mat time mean ±std (s) | dt/dE (s/edge) |")
+    md.append("|---|---|---|---:|---:|---:|")
+    for method in ["KMV", "KGRW", "MPRW"]:
+        for row in _emit_rows(ds, method):
+            k_disp = row["k"] or "—"
+            w_disp = row["w_prime"] or "—"
+            e_disp = f"{int(row['edges_mean']):,}"
+            t_disp = f"{row['mat_time_s']} ± {row['mat_time_std']}"
+            dtde_disp = "—" if row["marginal_dtdE"] == "" \
+                            else f"{float(row['marginal_dtdE']):.2e}"
+            md.append(f"| {method} | {k_disp} | {w_disp} | {e_disp} "
+                      f"| {t_disp} | {dtde_disp} |")
 
 out_md = ROOT / "results" / "method_saturation.md"
 out_md.write_text("\n".join(md), encoding="utf-8")

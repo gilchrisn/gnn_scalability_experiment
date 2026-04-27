@@ -1,24 +1,51 @@
 /**
- * mprw_exec.cpp — Standalone MPRW materialization executable.
+ * mprw_exec.cpp — Standalone MPRW + KGRW materialization executable.
  *
- * Interface is identical to graph_prep (Exact/KMV):
- *   - Loads graph from .dat files via HeterGraph (same code path)  
- *   - Starts internal chrono timer AFTER graph load (same as Exact/KMV t_start)
- *   - Emits "time:<seconds>" to stdout (parsed identically by engine.py)
- *   - Wrapped with /usr/bin/time -v by exp3_inference.py for peak RSS
+ * READING GUIDE (for the talk)
+ * ----------------------------
+ * This file implements three meta-path materialization algorithms.  All three
+ * load the heterogeneous graph the same way (HeterGraph from HUB/), use the
+ * same per-hop neighbor-lookup primitive (StepAccess), and output adjacency
+ * lists in the same format. They differ only in HOW they decide which
+ * (source, endpoint) pairs to emit.
  *
- * This ensures timing and memory comparisons against Exact/KMV are apples-to-apples.
+ *   1. cmd_materialize  (≈ line 195)  — MPRW
+ *        For each source node, fire `w` independent random walks of length L.
+ *        Endpoint of each walk becomes a discovered neighbor.
+ *        Cost per new edge rises as w grows (coupon collector).
+ *
+ *   2. cmd_profile      (≈ line 355)  — density-matched MPRW (research path)
+ *        Walk EACH source until its unique-neighbor count hits a per-source
+ *        target read from a KMV adj file. Used to compare density-matched.
+ *        Not used in the main bench, but present for completeness.
+ *
+ *   3. cmd_kgrw         (≈ line 571)  — KGRW (KMV-Guided Random Walk)
+ *        Phase 1: KMV sketch propagation through floor(L/2) hops, accumulating
+ *                 ≤k smallest source hashes at each midpoint.
+ *        Phase 2: From each midpoint, fire w' short random walks for the
+ *                 remaining ceil(L/2) hops to discover endpoints.
+ *        Phase 3: Cross-product pair every source in midpoint's sketch with
+ *                 every walk endpoint. The d_S savings vs MPRW comes from this.
+ *
+ * SHARED INFRASTRUCTURE (lines 39–183)
+ *   - PCG32       (line 43): tiny PRNG used everywhere — single-stream, fast,
+ *                            unbiased Lemire bounded() for uniform random
+ *                            neighbor pick.
+ *   - StepAccess  (line 89): O(1) per-hop neighbor lookup (CSR-style raw ptrs).
+ *                            One per metapath hop. Built once, reused everywhere.
+ *   - merge_kmv   (line 507): the only KMV-specific primitive — sorted merge
+ *                             of two sketches keeping the k smallest unique values.
+ *
+ * TIMING / MEASUREMENT
+ *   - All three commands start chrono AFTER graph load (matches HUB/ Exact+KMV).
+ *   - Emit "time:<seconds>" on stdout — parsed by Python wrappers.
+ *   - Wrapped externally with /usr/bin/time -v for peak RSS.
+ *   - Apples-to-apples comparison with graph_prep (Exact/KMV) commands.
  *
  * Usage:
  *   mprw_exec materialize <dataset_dir> <rule_file> <output_file> <w> <seed>
- *   mprw_exec profile     <dataset_dir> <rule_file> <output_file> <max_w> <seed>
- *
- * materialize: runs w walks per source node, outputs adjacency list (same format
- *              as run_materialization in ReadAnyBURLRules.cpp).
- *
- * profile:     depth-first walk, outputs per-node cumulative unique neighbor
- *              counts as a CSV (n_source rows x max_w columns). Used to find
- *              the plateau w without calibration binary-search.
+ *   mprw_exec profile     <dataset_dir> <rule_file> <kmv_adj> <output> <seed>
+ *   mprw_exec kgrw        <dataset_dir> <rule_file> <output> <k> <w_prime> <seed>
  */
 
 // Pull in HeterGraph, Pattern, Peers, parse_first_rule_from_file.
@@ -183,14 +210,36 @@ static void write_adj(const std::string& path,
 }
 
 // ---------------------------------------------------------------------------
-// PATH 1 — materialize
+// PATH 1 — MPRW (Meta-Path Random Walk)  materialize
 //
-// Loop order: BFS (w-epoch outer, node inner) — uniform degradation if memory
-// capped, plus dedup after every epoch keeps peak working-set bounded.
+// ALGORITHM (high level for the talk)
+// -----------------------------------
+//     for w_idx = 0 .. w-1:                          ← outer epoch loop
+//         for each source node s:                    ← inner: every source
+//             cur = s
+//             for hop = 0 .. L-1:                    ← walk L hops
+//                 cur = uniform_random_neighbor(cur, hop)
+//             record edge (s, cur) if alive          ← endpoint = neighbor
+//         dedup-merge into adj                       ← keep memory bounded
+//     make undirected at the end
 //
-// Memory accounting tracks only algorithm-allocated edge arrays, same
-// principle as Gemini's spec but using vector::capacity() as the source of
-// truth (matches what the OS will actually page in).
+// EACH (source, walk_index) IS AN INDEPENDENT TRIAL
+//   - Per-walk RNG seeded by (seed, source_idx * 1000003 + w_idx + 1).
+//   - The 1000003 prime separates source streams; +w_idx makes walks
+//     prefix-consistent (edges discovered at w=8 ⊇ those at w=4 for same seed).
+//
+// WHY THE EPOCH STRUCTURE
+//   - "BFS layout" (all sources in lockstep, walk index outer) means we can
+//     dedup-and-merge after every epoch. That keeps the peak working set
+//     bounded — without it, we'd hold w * |sources| terminals before merging.
+//   - Memory cap (optional): if projected adj+coalesce footprint exceeds the
+//     limit, break early. This is how MPRW gets memory-capped in benchmarks.
+//
+// WHY MPRW LOSES AT HIGH BUDGET (talk slide):
+//   The coupon-collector universe per source is product of degrees =
+//   d_1 × d_2 × ... × d_L. To collect the LAST few unique neighbors,
+//   expected walks ≈ universe_size × ln(universe_size). So dt/dE rises
+//   sharply once you've found most easy edges — the "coupon-collector tail."
 // ---------------------------------------------------------------------------
 static void cmd_materialize(const std::string& dataset,
                             const std::string& rule_file,
@@ -550,21 +599,34 @@ static void merge_kmv(std::vector<uint32_t>& dst,
 // ---------------------------------------------------------------------------
 // PATH 3 — KGRW  (KMV-Guided Random Walk)
 //
-// Hybrid materialization that uses KMV sketch propagation for the first
-// floor(L/2) meta-path hops and short random walks for the remaining
-// ceil(L/2) hops.  Combines KMV's uniform midpoint coverage with MPRW's
-// cheap walk-based endpoint discovery.
+// THE PITCH (for the talk)
+// ------------------------
+// MPRW has TWO weaknesses:
+//   (a) Importance-sampling bias: edges (s, t) discovered with probability
+//       proportional to path_count(s,t) — not uniform.
+//   (b) Coupon-collector universe d_S × d_T per source — quadratic-ish in
+//       degree, costly to fill.
 //
-// Phase 1: KMV sketch propagation (hops 0 .. mid_hop-1)
-//   Hash each source, propagate k-min sketches level-by-level.
-//   Midpoint nodes accumulate sorted sketches of ≤k source hashes.
+// KGRW fixes both by splitting the metapath at midpoint (hop L/2):
+//   Phase 1: KMV sketch propagation through hops [0, L/2).  Each midpoint
+//            node m accumulates a uniform-min-hash sketch of size ≤k drawn
+//            from sources that reach m. Bias-free at the source side.
+//   Phase 2: Short walks of length L/2 from each midpoint to find endpoints.
+//            Coupon-collector universe shrinks to d_T (the second-half product).
+//   Phase 3: Cross-product join: for midpoint m, edge (s, u) emitted for
+//            every (source s in sketch[m]) × (walk endpoint u from m).
+//            Each walk now contributes k edges, not 1 (KGRW vs MPRW: the
+//            k-source amplification is the d_S savings).
 //
-// Phase 2: Short random walks (hops mid_hop .. n_hops-1)
-//   For every midpoint with a non-empty sketch, do w' independent walks.
+// Cost per midpoint:
+//     Phase 1 (one-time, amortized over all edges): O(|E*_{1..L/2}| × k)
+//     Phase 2 (per midpoint × w'):                 O(w' × L/2)
+//     Phase 3 (cross-product):                     O(k × w' × #midpoints)
 //
-// Phase 3: Cross-product edge construction
-//   For midpoint m: ∀ source s ∈ sketch[m], ∀ endpoint u ∈ walks[m]:
-//     Ã[s,u] = 1.  Dedup + make undirected.
+// IMPORTANT IMPLEMENTATION DETAIL: cross-product, NOT round-robin
+//   Original KGRW used round-robin pairing (1 edge per walk) and lost coverage.
+//   Cross-product (this file) emits k edges per walk, exploiting the source-
+//   sketch fully. Coverage matches MPRW at much smaller w'.
 //
 // Output format is identical to cmd_materialize (adjacency list).
 // ---------------------------------------------------------------------------
@@ -600,14 +662,26 @@ static void cmd_kgrw(const std::string& dataset,
     // ── Algorithmic timer starts here ──────────────────────────────────────
     auto t_start = std::chrono::steady_clock::now();
 
-    // ── Phase 1: KMV Sketch Propagation ────────────────────────────────────
-    // Hash each source node; store reverse mapping hash → node ID.
+    // ────────────────────────────────────────────────────────────────────
+    // Phase 1 — KMV Sketch Propagation
+    //
+    // Step 1a: Initialize. Hash every source node with a fresh uint32. Store
+    //   reverse map hash→source so we can recover source IDs at the end.
+    //   Each source's "sketch" starts as a singleton {its_own_hash}.
+    // Step 1b (further down): walk forward through hops [0, mid_hop), at
+    //   each level merging the source-side sketches into the destination's
+    //   sketch via merge_kmv (keeps k smallest unique).
+    //
+    // Result: every node m at hop mid_hop holds a sketch sketch[m] = up to k
+    //   source hashes drawn UNIFORMLY (by min-hash) from sources that reach m.
+    // ────────────────────────────────────────────────────────────────────
     std::unordered_map<uint32_t, uint32_t> hash_to_node;
     hash_to_node.reserve(n_src * 2);
 
     // Dense sketch storage: sketch[u] = sorted vector of ≤k hash values.
     std::vector<std::vector<uint32_t>> cur_sketch(n_nodes);
 
+    // Hash every source. Reject collisions so the reverse map is unique.
     PCG32 hash_rng(seed, 0);
     for (uint32_t si = 0; si < n_src; si++) {
         uint32_t u = sources[si];
@@ -657,17 +731,29 @@ static void cmd_kgrw(const std::string& dataset,
     std::cerr << "[kgrw] phase1 propagation: "
               << std::chrono::duration<double>(t_prop - t_hash).count() << "s\n";
 
-    // ── Phase 2+3: Walk & cross-product pair.
+    // ────────────────────────────────────────────────────────────────────
+    // Phase 2 + Phase 3 — Walk & cross-product pair.
     //
-    //    For midpoint m with sketch S_m (|S_m| ≤ k sources) and w' walks:
-    //      Each walk j reaches endpoint u.
-    //      Emit edge (s, u) for EVERY s in S_m — cross-product, not round-robin.
+    //   Iterate every midpoint m (every node at hop L/2 with a non-empty
+    //   sketch).  Fire w' independent walks of length L/2 from m.  For each
+    //   walk endpoint u, emit edge (s, u) for EVERY s in sketch[m].
     //
-    //    Theoretical basis: coupon-collector universe shrinks from d_S*d_T
-    //    (MPRW) to d_T (KGRW), saving a factor of d_S walks.  Each walk is
-    //    multiplied across all k sources in the sketch at zero extra walk cost.
+    //   Walk endpoint distribution: by symmetry, the walk distribution on
+    //   N_{L/2}(m) is uniform (assuming uniform predecessor sampling), so we
+    //   get unbiased sampling on the second half too.
     //
-    // ────────────────────────────────────────────────────────────────────────
+    //   Why cross-product (not round-robin):
+    //     Round-robin (1 edge per walk) plateaus at coverage d_T because each
+    //     walk "wastes" the source-side sketch.  Cross-product turns each walk
+    //     into k edges, achieving k × coverage at the same walk cost. This is
+    //     where the d_S savings materializes empirically.
+    //
+    //   Why this matters theoretically (THEORY.md §5):
+    //     MPRW coupon-collector universe = d_S × d_T per source.
+    //     KGRW Phase-2 universe          = d_T per midpoint (smaller).
+    //     For dense graphs and high coverage, KGRW dominates MPRW past a
+    //     graph-computable crossover E*.
+    // ────────────────────────────────────────────────────────────────────
     std::vector<std::vector<uint32_t>> adj(n_nodes);
 
     uint32_t n_mid_active = 0;
