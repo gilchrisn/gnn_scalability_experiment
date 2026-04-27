@@ -77,7 +77,6 @@ DEFAULT_L         = 2
 
 GRAPH_PREP_BIN = "bin/graph_prep"
 MPRW_BIN       = "bin/mprw_exec"
-PROJECT_WSL    = "/mnt/c/Users/Gilchris/UNI/not-school/Research/gnn/scalability_experiment"
 
 
 def _wsl(cmd: str) -> list[str]:
@@ -85,6 +84,13 @@ def _wsl(cmd: str) -> list[str]:
     if sys.platform == "win32":
         return ["wsl", "--exec", "bash", "-c", cmd]
     return ["bash", "-c", cmd]
+
+
+# All C++ wrappers run with cwd=ROOT so `bin/graph_prep` resolves correctly
+# and side-files land where the existing pipeline expects them. On Windows,
+# wsl.exe automatically maps a Windows cwd (C:\...) to its /mnt/c/... view
+# inside the WSL session — no manual path translation needed.
+ROOT_STR = str(ROOT)
 
 
 def _stage_tag(frac: float) -> str:
@@ -364,9 +370,9 @@ def run_kmv(data_dir: str, rule_file: str, out_base_wsl: str, k: int, seed: int
            ) -> tuple[float, int, str, float]:
     """`graph_prep sketch` wrapped with /usr/bin/time -v.
     Returns (algo_time_s, edge_count, actual_adj_wsl_path, peak_rss_mb)."""
-    cmd = (f"cd {PROJECT_WSL} && /usr/bin/time -v "
+    cmd = (f"/usr/bin/time -v "
            f"{GRAPH_PREP_BIN} sketch {data_dir} {rule_file} {out_base_wsl} {k} 1 {seed}")
-    r = subprocess.run(_wsl(cmd), capture_output=True, text=True, timeout=3600)
+    r = subprocess.run(_wsl(cmd), capture_output=True, text=True, timeout=3600, cwd=ROOT_STR)
     if r.returncode != 0:
         raise RuntimeError(f"graph_prep sketch failed (k={k}): {r.stderr[-300:]}")
     adj = f"{out_base_wsl}_0"
@@ -375,9 +381,9 @@ def run_kmv(data_dir: str, rule_file: str, out_base_wsl: str, k: int, seed: int
 
 def run_mprw(data_dir: str, rule_file: str, out_adj_wsl: str, w: int, seed: int
             ) -> tuple[float, int, float]:
-    cmd = (f"cd {PROJECT_WSL} && /usr/bin/time -v "
+    cmd = (f"/usr/bin/time -v "
            f"{MPRW_BIN} materialize {data_dir} {rule_file} {out_adj_wsl} {w} {seed}")
-    r = subprocess.run(_wsl(cmd), capture_output=True, text=True, timeout=7200)
+    r = subprocess.run(_wsl(cmd), capture_output=True, text=True, timeout=7200, cwd=ROOT_STR)
     if r.returncode != 0:
         raise RuntimeError(f"mprw_exec materialize failed (w={w}): {r.stderr[-300:]}")
     return _parse_time(r.stdout), _count_edges(out_adj_wsl), _parse_peak_kb(r.stderr) / 1024
@@ -385,9 +391,9 @@ def run_mprw(data_dir: str, rule_file: str, out_adj_wsl: str, w: int, seed: int
 
 def run_kgrw(data_dir: str, rule_file: str, out_adj_wsl: str, k: int, w: int,
              seed: int) -> tuple[float, int, float]:
-    cmd = (f"cd {PROJECT_WSL} && /usr/bin/time -v "
+    cmd = (f"/usr/bin/time -v "
            f"{MPRW_BIN} kgrw {data_dir} {rule_file} {out_adj_wsl} {k} {w} {seed}")
-    r = subprocess.run(_wsl(cmd), capture_output=True, text=True, timeout=3600)
+    r = subprocess.run(_wsl(cmd), capture_output=True, text=True, timeout=3600, cwd=ROOT_STR)
     if r.returncode != 0:
         raise RuntimeError(f"mprw_exec kgrw failed (k={k}, w={w}): {r.stderr[-300:]}")
     return _parse_time(r.stdout), _count_edges(out_adj_wsl), _parse_peak_kb(r.stderr) / 1024
@@ -395,9 +401,9 @@ def run_kgrw(data_dir: str, rule_file: str, out_adj_wsl: str, k: int, w: int,
 
 def run_exact(data_dir: str, rule_file: str, out_adj_wsl: str
              ) -> tuple[float, int, float]:
-    cmd = (f"cd {PROJECT_WSL} && /usr/bin/time -v "
+    cmd = (f"/usr/bin/time -v "
            f"{GRAPH_PREP_BIN} materialize {data_dir} {rule_file} {out_adj_wsl}")
-    r = subprocess.run(_wsl(cmd), capture_output=True, text=True, timeout=14400)
+    r = subprocess.run(_wsl(cmd), capture_output=True, text=True, timeout=14400, cwd=ROOT_STR)
     if r.returncode != 0:
         raise RuntimeError(f"graph_prep materialize failed: {r.stderr[-400:]}")
     return _parse_time(r.stdout), _count_edges(out_adj_wsl), _parse_peak_kb(r.stderr) / 1024
