@@ -476,6 +476,12 @@ def main() -> None:
                    help="In trained mode, skip Exact materialization (already done).")
     p.add_argument("--skip-restage", action="store_true",
                    help="Reuse existing staging dirs without re-subsampling.")
+    p.add_argument("--methods", nargs="+",
+                   choices=["KMV", "MPRW", "KGRW"],
+                   default=["KMV", "MPRW", "KGRW"],
+                   help="Only run these methods. Default: all three. "
+                        "Useful when KMV/MPRW are already done and you want "
+                        "to top up KGRW only: --methods KGRW")
     args = p.parse_args()
     if args.seeds is None:
         args.seeds = 5 if args.mode == "trained" else 1
@@ -529,6 +535,18 @@ def main() -> None:
     writer = csv.DictWriter(fout, fieldnames=fields)
     if out_csv.stat().st_size == 0:
         writer.writeheader()
+
+    # ── Resume summary: how many rows already in CSV per (Fraction, Method)
+    if existing:
+        from collections import Counter
+        tally = Counter((row[1], row[3]) for row in existing)  # (frac, method)
+        print(f"\n[resume] {len(existing)} rows already in CSV — breakdown:")
+        for frac in sorted({r[1] for r in existing}):
+            line = f"  frac={frac}: " + ", ".join(
+                f"{m}={tally.get((frac, m), 0)}"
+                for m in ("Exact", "KMV", "MPRW", "KGRW") if (frac, m) in tally)
+            print(line)
+        print(f"[resume] running methods: {args.methods}\n")
 
     weights_dir = ROOT / "results" / args.dataset / "weights"
     weights_dir.mkdir(parents=True, exist_ok=True)
@@ -659,7 +677,7 @@ def main() -> None:
                 print(f"  CKA error: {ex}"); return float("nan"), float("nan")
 
         # ── KMV sweep ────────────────────────────────────────────────────
-        for k in sorted(args.kmv_k):
+        for k in (sorted(args.kmv_k) if "KMV" in args.methods else []):
             for seed in seed_list:
                 run_key = (args.dataset, f"{frac:.4f}", str(args.L), "KMV", str(k), "", str(seed))
                 if run_key in existing:
@@ -706,7 +724,7 @@ def main() -> None:
                     print(f"[ref] using KMV k={k} as CKA/PA reference"); break
 
         # ── MPRW sweep ───────────────────────────────────────────────────
-        for w in sorted(args.mprw_w):
+        for w in (sorted(args.mprw_w) if "MPRW" in args.methods else []):
             for seed in seed_list:
                 run_key = (args.dataset, f"{frac:.4f}", str(args.L), "MPRW", "", str(w), str(seed))
                 if run_key in existing:
@@ -740,7 +758,12 @@ def main() -> None:
                       f"ram={ram:>6.0f}MB F1={f1:.4f} CKA={cka:.4f} PA={pa:.4f}")
 
         # ── KGRW sweep (two-slice fix-and-sweep, dedup'd) ────────────────
-        for k, w in kgrw_cells:
+        print(f"[KGRW] starting sweep over {len(kgrw_cells)} cells × {len(seed_list)} seeds "
+              f"(frac={frac:.4f})", flush=True)
+        if not kgrw_cells:
+            print("[KGRW] ⚠ kgrw_cells is empty — check --kgrw-fix-k-wps / --kgrw-fix-wp-ks",
+                  flush=True)
+        for k, w in (kgrw_cells if "KGRW" in args.methods else []):
             for seed in seed_list:
                 run_key = (args.dataset, f"{frac:.4f}", str(args.L), "KGRW", str(k), str(w), str(seed))
                 if run_key in existing:
