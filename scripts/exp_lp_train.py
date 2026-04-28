@@ -62,6 +62,96 @@ from scripts.exp2_train import _make_train_subgraph
 
 
 # ---------------------------------------------------------------------------
+# LP encoder wrapper — optional feature projection + SAGE
+# ---------------------------------------------------------------------------
+
+class LPEncoder(torch.nn.Module):
+    """SAGE encoder with an optional input feature projection.
+
+    HGB_IMDB has in_dim=3489 which makes the first SAGE layer's intermediate
+    [E, in_dim] message tensor blow past memory on dense graphs. When
+    proj_dim > 0 the input ``x`` is first projected to proj_dim via a
+    learned linear layer, after which SAGE runs in the smaller space.
+
+    The wrapper is backward-compatible: with proj_dim == 0 it is exactly
+    SAGE and the saved state_dict contains only ``sage.*`` keys, plus a
+    ``proj_dim`` metadata field stored alongside in :func:`save_lp_weights`.
+    """
+
+    def __init__(self, in_dim: int, proj_dim: int, embedding_dim: int,
+                 hidden_dim: int, num_layers: int):
+        super().__init__()
+        self.proj_dim = proj_dim
+        if proj_dim > 0:
+            self.proj = torch.nn.Linear(in_dim, proj_dim)
+            sage_in = proj_dim
+        else:
+            self.proj = None
+            sage_in = in_dim
+        self.sage = get_model("SAGE", sage_in, embedding_dim, hidden_dim,
+                              num_layers=num_layers)
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        if self.proj is not None:
+            x = F.relu(self.proj(x))
+        return self.sage(x, edge_index)
+
+
+def save_lp_weights(model: "LPEncoder", path: str, in_dim: int,
+                    embedding_dim: int, num_layers: int) -> None:
+    """Save full LPEncoder state plus rebuild metadata.
+
+    Inference loads via :func:`load_lp_weights` which reconstructs the
+    same wrapper from this metadata blob.
+    """
+    blob = {
+        "format_version": 1,
+        "proj_dim": int(model.proj_dim),
+        "in_dim": int(in_dim),
+        "embedding_dim": int(embedding_dim),
+        "num_layers": int(num_layers),
+        "state_dict": model.state_dict(),
+    }
+    torch.save(blob, path)
+
+
+def load_lp_weights(path: str, in_dim_actual: int, embedding_dim: int,
+                    num_layers: int, hidden_dim: int,
+                    map_location=None) -> "LPEncoder":
+    """Reconstruct an LPEncoder from a checkpoint, with backward compat.
+
+    The pilot weights (saved before LPEncoder existed) are plain SAGE
+    state_dicts under torch.save(model.state_dict(), ...). Detect that
+    case by sniffing the loaded object: if it's an OrderedDict / dict
+    without our ``format_version`` key, treat it as a legacy SAGE-only
+    save with proj_dim=0.
+    """
+    obj = torch.load(path, map_location=map_location)
+    if isinstance(obj, dict) and "format_version" in obj:
+        proj_dim = int(obj["proj_dim"])
+        in_dim = int(obj["in_dim"])
+        emb = int(obj["embedding_dim"])
+        L = int(obj["num_layers"])
+        sd = obj["state_dict"]
+    else:
+        # Legacy: plain SAGE state_dict.
+        proj_dim = 0
+        in_dim = in_dim_actual
+        emb = embedding_dim
+        L = num_layers
+        sd = obj
+
+    enc = LPEncoder(in_dim=in_dim, proj_dim=proj_dim, embedding_dim=emb,
+                    hidden_dim=hidden_dim, num_layers=L)
+
+    # Legacy state_dicts have layer keys at the top level; remap to sage.*
+    if proj_dim == 0 and not any(k.startswith("sage.") for k in sd.keys()):
+        sd = {f"sage.{k}": v for k, v in sd.items()}
+    enc.load_state_dict(sd)
+    return enc
+
+
+# ---------------------------------------------------------------------------
 # 2-hop negative sampling
 # ---------------------------------------------------------------------------
 
@@ -159,16 +249,22 @@ def _train_lp(
     rng: np.random.Generator,
     log: logging.Logger,
     max_pos_per_epoch: int = 10000,
+    feat_proj_dim: int = 0,
 ) -> Tuple[torch.nn.Module, list, int]:
     """Train SAGE encoder for LP on H_train.
 
     Out-of-architecture choice: model's output dim is embedding_dim (not num_classes).
     Score = dot(z_u, z_v). Loss = BCE(sigmoid(score), label).
 
+    When ``feat_proj_dim > 0`` an :class:`LPEncoder` wraps SAGE with a
+    learned input projection — this is needed for HGB_IMDB (in_dim=3489)
+    where the first SAGE layer otherwise OOMs on dense graphs.
+
     Returns (model, history, convergence_epoch).
     """
-    # SAGE with output = embedding_dim
-    model = get_model("SAGE", in_dim, embedding_dim, config.HIDDEN_DIM,
+    model = LPEncoder(in_dim=in_dim, proj_dim=feat_proj_dim,
+                      embedding_dim=embedding_dim,
+                      hidden_dim=config.HIDDEN_DIM,
                       num_layers=num_layers).to(device)
     opt   = torch.optim.Adam(model.parameters(),
                              lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
@@ -345,6 +441,9 @@ def main():
                         help="Output embedding dim for LP decoder")
     parser.add_argument("--max-pos-per-epoch", type=int, default=10000,
                         help="Subsample positives per epoch (dense graphs otherwise hang)")
+    parser.add_argument("--feat-proj-dim", type=int, default=0,
+                        help="If >0, project input features to this dim before SAGE. "
+                             "Required for HGB_IMDB (in_dim=3489 OOMs without).")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -439,6 +538,7 @@ def main():
                 model, history, conv_epoch = _train_lp(
                     g_h0, in_dim, args.embedding_dim, L, args.epochs,
                     device, rng, log, max_pos_per_epoch=args.max_pos_per_epoch,
+                    feat_proj_dim=args.feat_proj_dim,
                 )
             except RuntimeError as e:
                 if "CUDA" in str(e) and device.type == "cuda":
@@ -448,13 +548,16 @@ def main():
                     model, history, conv_epoch = _train_lp(
                         g_h0, in_dim, args.embedding_dim, L, args.epochs,
                         device, rng, log, max_pos_per_epoch=args.max_pos_per_epoch,
+                        feat_proj_dim=args.feat_proj_dim,
                     )
                 else:
                     raise
             t_train = time.perf_counter() - t0
 
             weights_path = str(weights_dir / f"{mp_safe}_L{L}.pt")
-            torch.save(model.state_dict(), weights_path)
+            save_lp_weights(model, weights_path,
+                            in_dim=in_dim, embedding_dim=args.embedding_dim,
+                            num_layers=L)
 
             best_val_auc = max((h["val_auc"] for h in history
                                 if isinstance(h.get("val_auc"), float)), default=float("nan"))

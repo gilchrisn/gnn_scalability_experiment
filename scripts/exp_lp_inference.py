@@ -69,7 +69,7 @@ from scripts.exp3_inference import (
     _rss_mb, _PeakRSSMonitor,
     _run_mprw_exec, _run_exact, _run_sketch, _count_edges, _graph_density, _load_adj,
 )
-from scripts.exp_lp_train import _build_adj_dict, _sample_neg_2hop
+from scripts.exp_lp_train import _build_adj_dict, _sample_neg_2hop, load_lp_weights
 
 
 # ---------------------------------------------------------------------------
@@ -519,9 +519,14 @@ def main():
         device = torch.device("cpu")
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = get_model("SAGE", in_dim, args.embedding_dim, config.HIDDEN_DIM,
-                      num_layers=args.depth).to(device)
-    model.load_state_dict(torch.load(weights_path, map_location=device))
+    model = load_lp_weights(
+        weights_path,
+        in_dim_actual=in_dim,
+        embedding_dim=args.embedding_dim,
+        num_layers=args.depth,
+        hidden_dim=config.HIDDEN_DIM,
+        map_location=device,
+    ).to(device)
     model.eval()
     log.info("  Loaded frozen encoder from %s (device=%s)", weights_path, device)
 
