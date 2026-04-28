@@ -97,6 +97,42 @@ def _macro_f1(y_pred: torch.Tensor, y_true: torch.Tensor, n_classes: int) -> flo
     return float(sum(f1s) / len(f1s)) if f1s else 0.0
 
 
+def _build_mp_edges_from_decoded(
+    decoded: torch.Tensor,
+    n_target: int,
+    add_self_loops: bool = True,
+) -> torch.Tensor:
+    """Build the meta-path-induced adjacency from a decoded sketch.
+
+    Each row v of ``decoded`` lists the bottom-k T_0 ids that v's meta-path
+    sketch retained. Treat each (v, decoded[v, j]) for valid slots as an
+    edge in the meta-path-induced graph, undirected (HANConv attends per
+    relation in one direction only, but symmetrising helps the encoder
+    see both ends).
+
+    This is the sketch-as-sparsifier construction in service of the
+    sketch-as-feature backbone: HAN gets meta-path-specific adjacencies
+    derived from the same sketch its target features came from.
+    """
+    n, k = decoded.shape
+    src = torch.arange(n).unsqueeze(1).expand(-1, k)              # [n, k]
+    dst = decoded                                                  # [n, k]
+    valid = dst >= 0
+    src = src[valid]
+    dst = dst[valid]
+
+    # Undirected + optional self-loops, with PyG's coalesce for dedup.
+    from torch_geometric.utils import coalesce, add_self_loops as _add_sl
+    ei = torch.stack([
+        torch.cat([src, dst]),
+        torch.cat([dst, src]),
+    ]).long()
+    if add_self_loops:
+        ei, _ = _add_sl(ei, num_nodes=n_target)
+    ei = coalesce(ei, num_nodes=n_target)
+    return ei
+
+
 def _macro_f1_multilabel(logits: torch.Tensor, y_true: torch.Tensor,
                          threshold: float = 0.5) -> float:
     """Per-class binary F1, averaged. logits: [N, C]; y_true: [N, C] in {0,1}."""
@@ -251,15 +287,20 @@ def main() -> int:
         agg=args.agg,
     )
 
-    # Synthetic per-meta-path edges: trivial self-loops. SketchHAN's per-mp
-    # encoder produces the per-view feature; HANConv's semantic attention
-    # then weighs across the M views. Self-loops let HANConv act as a
-    # per-meta-path linear + ReLU + softmax fusion.
+    # Per-meta-path edges decoded from the sketch — sketch-as-feature with
+    # the meta-path adjacency also derived from the sketch (so HANConv's
+    # per-relation attention has meaningful structure to attend over,
+    # and we don't smuggle in the original heterogeneous graph).
     edge_index_dict = {}
+    edge_counts = {}
     for mp in meta_paths:
         rel = "mp_" + SketchHAN._sanitize(mp)
-        ei = torch.stack([torch.arange(n_target), torch.arange(n_target)])
+        ei = _build_mp_edges_from_decoded(
+            decoded_by_mp[mp], n_target=n_target, add_self_loops=True
+        )
         edge_index_dict[(target_type, rel, target_type)] = ei
+        edge_counts[mp] = int(ei.size(1))
+    print(f"[edges] sketch-derived adjacency edge counts: {edge_counts}")
 
     sketch_inputs = {mp: (decoded_by_mp[mp], base_x) for mp in meta_paths}
 
