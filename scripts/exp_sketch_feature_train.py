@@ -69,6 +69,11 @@ _DEFAULT_META_PATHS = {
     "HGB_IMDB": [
         "movie_to_keyword,keyword_to_movie",
         "movie_to_actor,actor_to_movie",
+        "movie_to_director,director_to_movie",
+    ],
+    "HNE_PubMed": [
+        "disease_to_chemical,chemical_to_disease",
+        "disease_to_gene,gene_to_disease",
     ],
 }
 
@@ -82,6 +87,27 @@ def _macro_f1(y_pred: torch.Tensor, y_true: torch.Tensor, n_classes: int) -> flo
         tp = ((y_pred == c) & (y_true == c)).sum()
         fp = ((y_pred == c) & (y_true != c)).sum()
         fn = ((y_pred != c) & (y_true == c)).sum()
+        if tp + fp == 0 or tp + fn == 0:
+            continue
+        prec = tp / (tp + fp)
+        rec = tp / (tp + fn)
+        if prec + rec == 0:
+            continue
+        f1s.append(2 * prec * rec / (prec + rec))
+    return float(sum(f1s) / len(f1s)) if f1s else 0.0
+
+
+def _macro_f1_multilabel(logits: torch.Tensor, y_true: torch.Tensor,
+                         threshold: float = 0.5) -> float:
+    """Per-class binary F1, averaged. logits: [N, C]; y_true: [N, C] in {0,1}."""
+    pred = (torch.sigmoid(logits) >= threshold).int().cpu().numpy()
+    yt = y_true.int().cpu().numpy()
+    n_classes = pred.shape[1]
+    f1s = []
+    for c in range(n_classes):
+        tp = ((pred[:, c] == 1) & (yt[:, c] == 1)).sum()
+        fp = ((pred[:, c] == 1) & (yt[:, c] == 0)).sum()
+        fn = ((pred[:, c] == 0) & (yt[:, c] == 1)).sum()
         if tp + fp == 0 or tp + fn == 0:
             continue
         prec = tp / (tp + fp)
@@ -144,6 +170,19 @@ def main() -> int:
     train_mask = masks["train"].bool()
     val_mask = masks["val"].bool()
     test_mask = masks["test"].bool()
+
+    # Detect labelling regime.
+    multi_label = labels.dim() == 2 and labels.dtype in (torch.float32, torch.float64)
+    # Single-label datasets may use -100 as ignore-index (HNE_PubMed). Mask
+    # those out of every split so we never train / eval on them.
+    if not multi_label:
+        valid = labels != -100
+        train_mask = train_mask & valid
+        val_mask = val_mask & valid
+        test_mask = test_mask & valid
+    print(f"[labels] multi_label={multi_label}  "
+          f"train={int(train_mask.sum())}  val={int(val_mask.sum())}  "
+          f"test={int(test_mask.sum())}")
 
     # Extraction (cached).
     cache_path = Path(args.cache) if args.cache \
@@ -252,16 +291,29 @@ def main() -> int:
         han.train()
         opt.zero_grad()
         logits = han(sketch_inputs, edge_index_dict, n_by_type)
-        loss = F.cross_entropy(logits[train_mask], labels_d[train_mask])
+        if multi_label:
+            loss = F.binary_cross_entropy_with_logits(
+                logits[train_mask], labels_d[train_mask].float()
+            )
+        else:
+            loss = F.cross_entropy(logits[train_mask], labels_d[train_mask])
         loss.backward()
         opt.step()
 
         han.eval()
         with torch.no_grad():
             logits = han(sketch_inputs, edge_index_dict, n_by_type)
-            pred = logits.argmax(dim=-1)
-            train_f1 = _macro_f1(pred[train_mask], labels_d[train_mask], n_classes)
-            val_f1 = _macro_f1(pred[val_mask], labels_d[val_mask], n_classes)
+            if multi_label:
+                train_f1 = _macro_f1_multilabel(
+                    logits[train_mask], labels_d[train_mask]
+                )
+                val_f1 = _macro_f1_multilabel(
+                    logits[val_mask], labels_d[val_mask]
+                )
+            else:
+                pred = logits.argmax(dim=-1)
+                train_f1 = _macro_f1(pred[train_mask], labels_d[train_mask], n_classes)
+                val_f1 = _macro_f1(pred[val_mask], labels_d[val_mask], n_classes)
 
         if val_f1 > best_val_f1 + 1e-4:
             best_val_f1 = val_f1
@@ -285,8 +337,11 @@ def main() -> int:
     han.eval()
     with torch.no_grad():
         logits = han(sketch_inputs, edge_index_dict, n_by_type)
-        pred = logits.argmax(dim=-1)
-        test_f1 = _macro_f1(pred[test_mask], labels_d[test_mask], n_classes)
+        if multi_label:
+            test_f1 = _macro_f1_multilabel(logits[test_mask], labels_d[test_mask])
+        else:
+            pred = logits.argmax(dim=-1)
+            test_f1 = _macro_f1(pred[test_mask], labels_d[test_mask], n_classes)
     print(f"[result] val_f1={best_val_f1:.4f} (ep {best_epoch})  test_f1={test_f1:.4f}")
 
     # Persist a small results JSON next to the bundle.
