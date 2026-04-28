@@ -47,6 +47,7 @@ class SketchFeatureEncoder(nn.Module):
         agg: str = "mean",
         base_dim: int = 0,
         dropout: float = 0.0,
+        shared_embedding: Optional[nn.Embedding] = None,
     ) -> None:
         super().__init__()
         if agg not in {"mean", "sum", "attention"}:
@@ -60,7 +61,20 @@ class SketchFeatureEncoder(nn.Module):
         # gradients are zero — that row is never used after masking but the
         # safety belt avoids surprises if a downstream caller forgets the
         # mask.
-        self.embedding = nn.Embedding(n_t0 + 1, emb_dim, padding_idx=n_t0)
+        if shared_embedding is not None:
+            if shared_embedding.num_embeddings != n_t0 + 1:
+                raise ValueError(
+                    f"shared_embedding has {shared_embedding.num_embeddings} rows "
+                    f"but n_t0+1={n_t0 + 1} required (last row is padding)"
+                )
+            if shared_embedding.embedding_dim != emb_dim:
+                raise ValueError(
+                    f"shared_embedding dim {shared_embedding.embedding_dim} "
+                    f"!= emb_dim {emb_dim}"
+                )
+            self.embedding = shared_embedding
+        else:
+            self.embedding = nn.Embedding(n_t0 + 1, emb_dim, padding_idx=n_t0)
 
         if agg == "attention":
             self.attn = nn.Linear(emb_dim, 1, bias=False)

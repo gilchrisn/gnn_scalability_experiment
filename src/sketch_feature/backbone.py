@@ -84,6 +84,7 @@ class SketchHAN(nn.Module):
         n_heads: int = 4,
         dropout: float = 0.5,
         agg: str = "mean",
+        share_t0_embedding: bool = True,
     ) -> None:
         super().__init__()
 
@@ -94,9 +95,15 @@ class SketchHAN(nn.Module):
         self.node_types = list(node_types)
         base_dim_by_type = base_dim_by_type or {}
 
-        # One encoder per meta-path. They share the embedding table E only
-        # if the user passes the same n_t0 (typed identity universe per
-        # CURRENT_STATE.md §"Open architectural decisions" #3).
+        # Typed identity universe: by default share ONE embedding table E
+        # for the T_0 entities across every per-meta-path encoder. Same
+        # author id => same vector regardless of which sketch slot it
+        # appears in. Set share_t0_embedding=False to ablate.
+        if share_t0_embedding:
+            self._shared_t0 = nn.Embedding(n_t0 + 1, emb_dim, padding_idx=n_t0)
+        else:
+            self._shared_t0 = None
+
         target_base_dim = base_dim_by_type.get(target_type, 0)
         self.encoders = nn.ModuleDict({
             self._sanitize(mp): SketchFeatureEncoder(
@@ -105,6 +112,7 @@ class SketchHAN(nn.Module):
                 agg=agg,
                 base_dim=target_base_dim,
                 dropout=dropout,
+                shared_embedding=self._shared_t0,
             )
             for mp in self.meta_paths
         })
