@@ -45,14 +45,56 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
+import torch.nn as nn
+
 from src.config import config
 from src.data import DatasetFactory
 from src.sketch_feature import (
     SketchBundle,
+    SketchFeatureEncoder,
     SketchHAN,
     decode_sketches,
     extract_sketches,
 )
+
+
+class LoneTypedMLP(nn.Module):
+    """Pure LoNe-typed: per-meta-path encoder -> mean over views -> MLP head.
+
+    No graph convolution. The sketch's bottom-k slot embeddings already
+    summarise the L-hop neighborhood; an MLP classifier on top is the
+    cleanest "the sketch is the message passing" framing (Kutzkov AAAI'23).
+    """
+
+    def __init__(self, n_t0: int, emb_dim: int, hidden_dim: int, out_dim: int,
+                 meta_paths: list, target_base_dim: int, agg: str,
+                 dropout: float, share_t0_embedding: bool = True):
+        super().__init__()
+        self.meta_paths = list(meta_paths)
+        if share_t0_embedding:
+            self._shared = nn.Embedding(n_t0 + 1, emb_dim, padding_idx=n_t0)
+        else:
+            self._shared = None
+        self.encoders = nn.ModuleDict({
+            SketchHAN._sanitize(mp): SketchFeatureEncoder(
+                n_t0=n_t0, emb_dim=emb_dim, agg=agg, base_dim=target_base_dim,
+                dropout=dropout, shared_embedding=self._shared,
+            ) for mp in self.meta_paths
+        })
+        self.classifier = nn.Sequential(
+            nn.Linear(emb_dim, hidden_dim),
+            nn.ELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, out_dim),
+        )
+
+    def forward(self, sketch_inputs):
+        per_mp = []
+        for mp in self.meta_paths:
+            decoded, base_x = sketch_inputs[mp]
+            per_mp.append(self.encoders[SketchHAN._sanitize(mp)](decoded, base_x))
+        x = torch.stack(per_mp, dim=0).mean(dim=0)
+        return self.classifier(x)
 
 
 # Default meta-paths per HGB dataset for the pilot. Both must be mirrored
@@ -179,6 +221,14 @@ def main() -> int:
     p.add_argument("--cache",
                    help="Path to cache the extracted SketchBundle (skip extraction "
                         "on rerun). Default: results/<dataset>/sketch_bundle_k<K>.pt")
+    p.add_argument("--backbone",
+                   choices=["mlp", "han_real_edges", "han_sketch_edges"],
+                   default="han_sketch_edges",
+                   help=("Backbone fed by the sketch features. mlp = pure "
+                         "LoNe-typed; han_real_edges = HAN over the original "
+                         "heterogeneous graph's edge_index_dict; "
+                         "han_sketch_edges = HAN over edges decoded from the "
+                         "sketch itself."))
     p.add_argument("--quick", action="store_true",
                    help="Smoke-test mode: epochs=20, k=8")
     args = p.parse_args()
@@ -275,54 +325,168 @@ def main() -> int:
         base_dim_by_type = {target_type: int(base_x.size(1))}
         print(f"[features] using native {target_type} features: {tuple(base_x.shape)}")
 
-    node_types = [target_type]
-    han = SketchHAN(
-        n_t0=n_target,
-        emb_dim=args.emb_dim,
-        out_dim=n_classes,
-        meta_paths=meta_paths,
-        node_types=node_types,
-        target_type=target_type,
-        base_dim_by_type=base_dim_by_type,
-        n_layers=args.depth,
-        n_heads=args.n_heads,
-        dropout=args.dropout,
-        agg=args.agg,
-    )
-
-    # Per-meta-path edges decoded from the sketch — sketch-as-feature with
-    # the meta-path adjacency also derived from the sketch (so HANConv's
-    # per-relation attention has meaningful structure to attend over,
-    # and we don't smuggle in the original heterogeneous graph).
-    edge_index_dict = {}
-    edge_counts = {}
-    for mp in meta_paths:
-        rel = "mp_" + SketchHAN._sanitize(mp)
-        ei = _build_mp_edges_from_decoded(
-            decoded_by_mp[mp], n_target=n_target, add_self_loops=True
-        )
-        edge_index_dict[(target_type, rel, target_type)] = ei
-        edge_counts[mp] = int(ei.size(1))
-    print(f"[edges] sketch-derived adjacency edge counts: {edge_counts}")
-
     sketch_inputs = {mp: (decoded_by_mp[mp], base_x) for mp in meta_paths}
-
-    # Move to device.
     device = torch.device(args.device)
-    print(f"[device] {device}")
-    han = han.to(device)
     sketch_inputs = {
         mp: (d.to(device), bx.to(device) if bx is not None else None)
         for mp, (d, bx) in sketch_inputs.items()
     }
-    edge_index_dict = {k: v.to(device) for k, v in edge_index_dict.items()}
-    n_by_type = {target_type: n_target}
     labels_d = labels.to(device)
     train_mask = train_mask.to(device)
     val_mask = val_mask.to(device)
     test_mask = test_mask.to(device)
 
-    opt = torch.optim.Adam(han.parameters(), lr=args.lr,
+    # Build model + the forward closure that maps it to a uniform call site.
+    target_base_dim = (base_dim_by_type or {}).get(target_type, 0)
+
+    if args.backbone == "mlp":
+        # Pure LoNe-typed: sketch encoder -> MLP, no graph convolution.
+        model = LoneTypedMLP(
+            n_t0=n_target, emb_dim=args.emb_dim,
+            hidden_dim=args.emb_dim, out_dim=n_classes,
+            meta_paths=meta_paths,
+            target_base_dim=target_base_dim,
+            agg=args.agg, dropout=args.dropout,
+        ).to(device)
+        forward_fn = lambda m: m(sketch_inputs)
+        edge_counts = {"(no edges; MLP backbone)": 0}
+
+    elif args.backbone == "han_real_edges":
+        # Sketch features for the target type; HAN propagates over the
+        # original heterogeneous graph's edges. Non-target types get their
+        # native features (or a learned embedding if absent).
+        node_types = list(g.node_types)
+        edge_types = list(g.edge_types)
+        # Build x_dict for non-target types; project all to emb_dim so
+        # HANConv has a uniform input feature size.
+        type_projects = nn.ModuleDict()
+        type_embs = nn.ParameterDict()
+        for nt in node_types:
+            if nt == target_type:
+                continue
+            if "x" in g[nt] and g[nt].x is not None:
+                type_projects[nt] = nn.Linear(g[nt].x.size(1), args.emb_dim)
+            else:
+                type_embs[nt] = nn.Parameter(
+                    torch.randn(g[nt].num_nodes, args.emb_dim)
+                )
+        type_projects = type_projects.to(device)
+        type_embs = type_embs.to(device)
+
+        edge_index_dict = {et: g[et].edge_index.to(device) for et in edge_types}
+        edge_counts = {f"{et}": int(g[et].edge_index.size(1)) for et in edge_types}
+
+        model = SketchHAN(
+            n_t0=n_target, emb_dim=args.emb_dim, out_dim=n_classes,
+            meta_paths=meta_paths,
+            node_types=node_types, target_type=target_type,
+            base_dim_by_type=base_dim_by_type,
+            n_layers=args.depth, n_heads=args.n_heads, dropout=args.dropout,
+            agg=args.agg,
+        ).to(device)
+
+        # Override SketchHAN.forward by monkey-patching: instead of using the
+        # synthetic per-meta-path edges, feed real heterogeneous edges with
+        # one HAN call. We bypass _ensure_type_embedding by giving x_dict
+        # ourselves.
+        def forward_fn_real(m: SketchHAN):
+            # Per-meta-path encoders -> target features
+            per_mp = [
+                m.encoders[SketchHAN._sanitize(mp)](*sketch_inputs[mp])
+                for mp in meta_paths
+            ]
+            x_target = torch.stack(per_mp, dim=0).mean(dim=0)
+            x_dict = {target_type: x_target}
+            for nt in node_types:
+                if nt == target_type:
+                    continue
+                if nt in type_projects:
+                    x_dict[nt] = type_projects[nt](g[nt].x.to(device))
+                else:
+                    x_dict[nt] = type_embs[nt]
+            # We need a HANConv stack expecting THIS metadata; SketchHAN
+            # was built with synthetic per-mp edge_types. Build one ad-hoc.
+            for layer in m.han_layers:
+                # Re-initialise with the real metadata. Cheap because lin
+                # layers are reset per relation; we only rebuild metadata
+                # to avoid AssertionError on edge type mismatch.
+                pass
+            return m.classifier(x_dict[target_type])
+        # Clean approach: HAN with real edges needs a SketchHAN built with
+        # the real (node_types, edge_types) metadata. Rebuild it that way.
+        from torch_geometric.nn import HANConv
+        han_layers = nn.ModuleList()
+        in_d = args.emb_dim
+        for _ in range(args.depth):
+            han_layers.append(HANConv(
+                in_channels=in_d, out_channels=args.emb_dim,
+                metadata=(node_types, edge_types),
+                heads=args.n_heads, dropout=args.dropout,
+            ))
+            in_d = args.emb_dim
+        han_layers = han_layers.to(device)
+        classifier_real = nn.Linear(args.emb_dim, n_classes).to(device)
+
+        # We hand over to a fresh forward_fn that uses the real layers.
+        encoders = model.encoders  # reuse the encoders + shared embedding
+
+        def forward_fn(_unused):
+            per_mp = [
+                encoders[SketchHAN._sanitize(mp)](*sketch_inputs[mp])
+                for mp in meta_paths
+            ]
+            x_target = torch.stack(per_mp, dim=0).mean(dim=0)
+            x_dict = {target_type: x_target}
+            for nt in node_types:
+                if nt == target_type:
+                    continue
+                if nt in type_projects:
+                    x_dict[nt] = type_projects[nt](g[nt].x.to(device))
+                else:
+                    x_dict[nt] = type_embs[nt]
+            for layer in han_layers:
+                x_dict = layer(x_dict, edge_index_dict)
+                x_dict = {k: F.elu(v) if v is not None else v for k, v in x_dict.items()}
+            return classifier_real(x_dict[target_type])
+
+        # Combine all parameters into one trainable bag.
+        class _Wrapper(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.encoders = encoders
+                self.han_layers = han_layers
+                self.classifier_real = classifier_real
+                self.type_projects = type_projects
+                self.type_embs = type_embs
+        model = _Wrapper().to(device)
+
+    else:  # han_sketch_edges (default — original behaviour)
+        node_types = [target_type]
+        edge_index_dict = {}
+        edge_counts = {}
+        for mp in meta_paths:
+            rel = "mp_" + SketchHAN._sanitize(mp)
+            ei = _build_mp_edges_from_decoded(
+                decoded_by_mp[mp], n_target=n_target, add_self_loops=True
+            ).to(device)
+            edge_index_dict[(target_type, rel, target_type)] = ei
+            edge_counts[mp] = int(ei.size(1))
+        print(f"[edges] sketch-derived adjacency edge counts: {edge_counts}")
+
+        model = SketchHAN(
+            n_t0=n_target, emb_dim=args.emb_dim, out_dim=n_classes,
+            meta_paths=meta_paths,
+            node_types=node_types, target_type=target_type,
+            base_dim_by_type=base_dim_by_type,
+            n_layers=args.depth, n_heads=args.n_heads, dropout=args.dropout,
+            agg=args.agg,
+        ).to(device)
+        n_by_type_local = {target_type: n_target}
+        forward_fn = lambda m: m(sketch_inputs, edge_index_dict, n_by_type_local)
+
+    print(f"[backbone] {args.backbone}  edges={edge_counts}")
+
+    opt = torch.optim.Adam(model.parameters(), lr=args.lr,
                            weight_decay=args.weight_decay)
 
     best_val_f1 = -1.0
@@ -333,9 +497,9 @@ def main() -> int:
     print(f"[train] epochs={args.epochs} lr={args.lr} dropout={args.dropout}")
     train_t0 = time.perf_counter()
     for epoch in range(1, args.epochs + 1):
-        han.train()
+        model.train()
         opt.zero_grad()
-        logits = han(sketch_inputs, edge_index_dict, n_by_type)
+        logits = forward_fn(model)
         if multi_label:
             loss = F.binary_cross_entropy_with_logits(
                 logits[train_mask], labels_d[train_mask].float()
@@ -345,9 +509,9 @@ def main() -> int:
         loss.backward()
         opt.step()
 
-        han.eval()
+        model.eval()
         with torch.no_grad():
-            logits = han(sketch_inputs, edge_index_dict, n_by_type)
+            logits = forward_fn(model)
             if multi_label:
                 train_f1 = _macro_f1_multilabel(
                     logits[train_mask], labels_d[train_mask]
@@ -362,7 +526,7 @@ def main() -> int:
 
         if val_f1 > best_val_f1 + 1e-4:
             best_val_f1 = val_f1
-            best_state = {k: v.detach().clone() for k, v in han.state_dict().items()}
+            best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
             best_epoch = epoch
             wait = 0
         else:
@@ -380,10 +544,10 @@ def main() -> int:
     train_time_s = time.perf_counter() - train_t0
 
     if best_state is not None:
-        han.load_state_dict(best_state)
-    han.eval()
+        model.load_state_dict(best_state)
+    model.eval()
     with torch.no_grad():
-        logits = han(sketch_inputs, edge_index_dict, n_by_type)
+        logits = forward_fn(model)
         if multi_label:
             test_f1 = _macro_f1_multilabel(logits[test_mask], labels_d[test_mask])
         else:
@@ -397,6 +561,7 @@ def main() -> int:
         "dataset": args.dataset,
         "target_type": target_type,
         "meta_paths": meta_paths,
+        "backbone": args.backbone,
         "k": args.k,
         "depth": args.depth,
         "n_heads": args.n_heads,
@@ -414,7 +579,8 @@ def main() -> int:
         "fill_rate": fill_rate,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
     }
-    res_path = out_dir / f"sketch_feature_pilot_k{args.k}_seed{args.seed}.json"
+    bb_tag = "" if args.backbone == "han_sketch_edges" else f"_{args.backbone}"
+    res_path = out_dir / f"sketch_feature_pilot_k{args.k}{bb_tag}_seed{args.seed}.json"
     with open(res_path, "w") as fh:
         json.dump(out, fh, indent=2)
     print(f"[save] {res_path}")
