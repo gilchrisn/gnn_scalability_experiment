@@ -59,18 +59,32 @@ from src.sketch_feature import (
 
 
 class LoneTypedMLP(nn.Module):
-    """Pure LoNe-typed: per-meta-path encoder -> mean over views -> MLP head.
+    """Pure LoNe-typed: per-meta-path encoder -> fuse views -> MLP head.
 
     No graph convolution. The sketch's bottom-k slot embeddings already
     summarise the L-hop neighborhood; an MLP classifier on top is the
     cleanest "the sketch is the message passing" framing (Kutzkov AAAI'23).
+
+    View fusion (mp_fusion):
+        mean      — uniform average over meta-paths (default).
+        attention — learned scalar weight per meta-path, softmax-normalised.
+                    Helps when meta-paths differ in informativeness, e.g.
+                    HGB_IMDB where keyword/actor/director have very
+                    different fill rates.
+        node_attn — per-node attention over views (heavier; one logit per
+                    node per meta-path).
     """
 
     def __init__(self, n_t0: int, emb_dim: int, hidden_dim: int, out_dim: int,
                  meta_paths: list, target_base_dim: int, agg: str,
-                 dropout: float, share_t0_embedding: bool = True):
+                 dropout: float, share_t0_embedding: bool = True,
+                 mp_fusion: str = "mean"):
         super().__init__()
+        if mp_fusion not in {"mean", "attention", "node_attn"}:
+            raise ValueError(f"mp_fusion must be mean|attention|node_attn; got {mp_fusion!r}")
         self.meta_paths = list(meta_paths)
+        self.mp_fusion = mp_fusion
+        M = len(self.meta_paths)
         if share_t0_embedding:
             self._shared = nn.Embedding(n_t0 + 1, emb_dim, padding_idx=n_t0)
         else:
@@ -81,6 +95,10 @@ class LoneTypedMLP(nn.Module):
                 dropout=dropout, shared_embedding=self._shared,
             ) for mp in self.meta_paths
         })
+        if mp_fusion == "attention":
+            self.view_logits = nn.Parameter(torch.zeros(M))
+        elif mp_fusion == "node_attn":
+            self.view_attn = nn.Linear(emb_dim, 1, bias=False)
         self.classifier = nn.Sequential(
             nn.Linear(emb_dim, hidden_dim),
             nn.ELU(),
@@ -93,7 +111,20 @@ class LoneTypedMLP(nn.Module):
         for mp in self.meta_paths:
             decoded, base_x = sketch_inputs[mp]
             per_mp.append(self.encoders[SketchHAN._sanitize(mp)](decoded, base_x))
-        x = torch.stack(per_mp, dim=0).mean(dim=0)
+        stacked = torch.stack(per_mp, dim=0)               # [M, N, d]
+
+        if self.mp_fusion == "mean":
+            x = stacked.mean(dim=0)
+        elif self.mp_fusion == "attention":
+            # Global per-view weights — same for every node.
+            w = F.softmax(self.view_logits, dim=0)         # [M]
+            x = (stacked * w.view(-1, 1, 1)).sum(dim=0)    # [N, d]
+        else:                                              # node_attn
+            # Per-node attention over views.
+            scores = self.view_attn(stacked).squeeze(-1)   # [M, N]
+            w = F.softmax(scores, dim=0)                   # [M, N]
+            x = (stacked * w.unsqueeze(-1)).sum(dim=0)     # [N, d]
+
         return self.classifier(x)
 
 
@@ -221,6 +252,14 @@ def main() -> int:
     p.add_argument("--cache",
                    help="Path to cache the extracted SketchBundle (skip extraction "
                         "on rerun). Default: results/<dataset>/sketch_bundle_k<K>.pt")
+    p.add_argument("--mp-fusion",
+                   choices=["mean", "attention", "node_attn"],
+                   default="mean",
+                   help="How to fuse per-meta-path features in the MLP "
+                        "backbone. attention = global per-view softmax; "
+                        "node_attn = per-node attention over views. Helps "
+                        "on datasets with uneven meta-path fill rates "
+                        "(e.g. HGB_IMDB).")
     p.add_argument("--backbone",
                    choices=["mlp", "han_real_edges", "han_sketch_edges"],
                    default="han_sketch_edges",
@@ -347,6 +386,7 @@ def main() -> int:
             meta_paths=meta_paths,
             target_base_dim=target_base_dim,
             agg=args.agg, dropout=args.dropout,
+            mp_fusion=args.mp_fusion,
         ).to(device)
         forward_fn = lambda m: m(sketch_inputs)
         edge_counts = {"(no edges; MLP backbone)": 0}
