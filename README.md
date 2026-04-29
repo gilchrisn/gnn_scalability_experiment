@@ -6,13 +6,18 @@ Code accompanying the paper **"KMV Graph Reconstruction: Sketch-Based Approximat
 
 ```
 .
-├── src/                 # Python: bridge to C++ binaries, dataset loaders, GNN models
-├── scripts/             # experiment driver scripts (exp1..exp18, bench_*, run_*)
+├── src/
+│   ├── sketch_feature/  # Path 1 sketch-feature pipeline (LoNe-typed)
+│   ├── kernels/         # Python KMV propagation kernel
+│   ├── bridge/          # bridge to C++ binaries
+│   └── data/            # dataset loaders (HGB / HNE / OGB)
+├── scripts/             # experiment driver scripts (see CLAUDE.md for the catalog)
 ├── csrc/                # C++ source for the MPRW baseline
 ├── HUB/                 # C++ source for Exact + KMV (from the base paper, used unmodified)
 ├── tests/               # pytest unit tests
-├── main.py              # CLI entry point
+├── main.py              # CLI entry point (legacy, base-paper centrality)
 ├── Makefile             # builds bin/graph_prep and bin/mprw_exec
+├── RESULTS_REPRODUCING.md   # walkthrough from clone to every reported number
 └── requirements.txt
 ```
 
@@ -46,26 +51,28 @@ python main.py benchmark --dataset HGB_ACM --method kmv --k 16 --check-fidelity
 
 ## Reproducing the paper
 
-The experimental grid (KMV `k`-sweep, MPRW `w`-sweep, depth `L`-sweep) for one dataset:
+**Journal extension (current)**: full reproduction walkthrough in [`RESULTS_REPRODUCING.md`](RESULTS_REPRODUCING.md). The headline scripts:
 
 ```bash
-python scripts/run_full_pipeline.py \
-  --dataset HGB_DBLP \
-  --metapath "author_to_paper,paper_to_term,term_to_paper,paper_to_author" \
-  --target-type author \
-  --k-values 2 4 8 16 32 64 \
-  --w-values 1 2 4 8 16 32 64 128 256 512 \
-  --kmv-reps 50 \
-  --mprw-reps 10
+# Sketch-as-feature NC across HGB/HNE (3 seeds).
+python scripts/run_sketch_feature_sweep.py --num-seeds 3 --backbone mlp
+
+# Sketch-as-sparsifier NC across HGB/HNE (3 seeds).
+python scripts/run_sketch_sparsifier_sweep.py --num-seeds 3
+
+# Simple-HGN baseline.
+python scripts/exp_simple_hgn_baseline.py HGB_DBLP --num-seeds 3 \
+    --hidden-dim 64 --n-heads 4 --epochs 100
+
+# Multi-query amortisation cost breakdown.
+python scripts/exp_multi_query_amortization.py HGB_DBLP --k 32 --seed 42
+
+# Compile master tables + figures for the paper.
+python scripts/compile_master_results.py
+python scripts/plot_session_results.py
 ```
 
-Then regenerate the figures:
-
-```bash
-python scripts/exp4_visualize.py --dataset HGB_DBLP
-```
-
-Per-experiment scripts (`exp1_partition.py` through `exp18_rigor_check.py`) are individually invokable; each is documented in its own docstring.
+**Base-paper centrality (legacy)**: the experimental grid (KMV `k`-sweep, MPRW `w`-sweep, depth `L`-sweep) for one dataset is `scripts/run_full_pipeline.py` + `scripts/exp4_visualize.py`. See [`CLAUDE.md`](CLAUDE.md) §"Active Scripts" for the full catalog.
 
 ## Citation
 
