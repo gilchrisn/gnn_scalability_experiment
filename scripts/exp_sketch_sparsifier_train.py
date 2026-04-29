@@ -45,74 +45,17 @@ from src.data import DatasetFactory
 from src.models import get_model
 from src.sketch_feature import (
     SketchBundle,
+    build_mp_edges_from_decoded as _build_edges_from_decoded,
     decode_sketches,
     extract_sketches,
+    macro_f1 as _macro_f1,
+    macro_f1_multilabel as _macro_f1_multilabel,
 )
 
 
 # Reuse the meta-path defaults from exp_sketch_feature_train so both
 # consumer modes are evaluated on the same propagation pass.
 from scripts.exp_sketch_feature_train import _DEFAULT_META_PATHS  # noqa: E402
-
-
-def _macro_f1(y_pred: torch.Tensor, y_true: torch.Tensor, n_classes: int) -> float:
-    y_pred = y_pred.cpu().numpy()
-    y_true = y_true.cpu().numpy()
-    f1s = []
-    for c in range(n_classes):
-        tp = ((y_pred == c) & (y_true == c)).sum()
-        fp = ((y_pred == c) & (y_true != c)).sum()
-        fn = ((y_pred != c) & (y_true == c)).sum()
-        if tp + fp == 0 or tp + fn == 0:
-            continue
-        prec = tp / (tp + fp)
-        rec = tp / (tp + fn)
-        if prec + rec == 0:
-            continue
-        f1s.append(2 * prec * rec / (prec + rec))
-    return float(sum(f1s) / len(f1s)) if f1s else 0.0
-
-
-def _macro_f1_multilabel(logits: torch.Tensor, y_true: torch.Tensor,
-                         threshold: float = 0.5) -> float:
-    pred = (torch.sigmoid(logits) >= threshold).int().cpu().numpy()
-    yt = y_true.int().cpu().numpy()
-    n_classes = pred.shape[1]
-    f1s = []
-    for c in range(n_classes):
-        tp = ((pred[:, c] == 1) & (yt[:, c] == 1)).sum()
-        fp = ((pred[:, c] == 1) & (yt[:, c] == 0)).sum()
-        fn = ((pred[:, c] == 0) & (yt[:, c] == 1)).sum()
-        if tp + fp == 0 or tp + fn == 0:
-            continue
-        prec = tp / (tp + fp)
-        rec = tp / (tp + fn)
-        if prec + rec == 0:
-            continue
-        f1s.append(2 * prec * rec / (prec + rec))
-    return float(sum(f1s) / len(f1s)) if f1s else 0.0
-
-
-def _build_edges_from_decoded(
-    decoded: torch.Tensor, n_target: int, add_self_loops_flag: bool = True
-) -> torch.Tensor:
-    """Same construction as exp_sketch_feature_train but isolated here so
-    the sparsifier script doesn't import the feature script (fewer
-    cross-script dependencies)."""
-    n, k = decoded.shape
-    src = torch.arange(n).unsqueeze(1).expand(-1, k)
-    dst = decoded
-    valid = dst >= 0
-    src = src[valid]
-    dst = dst[valid]
-    ei = torch.stack([
-        torch.cat([src, dst]),
-        torch.cat([dst, src]),
-    ]).long()
-    if add_self_loops_flag:
-        ei, _ = add_self_loops(ei, num_nodes=n_target)
-    ei = coalesce(ei, num_nodes=n_target)
-    return ei
 
 
 def main() -> int:
@@ -195,7 +138,7 @@ def main() -> int:
         decoded = decode_sketches(
             bundle.sketches_by_mp[mp], bundle.sorted_hashes, bundle.sort_indices
         )
-        ei = _build_edges_from_decoded(decoded, n_target, add_self_loops_flag=False)
+        ei = _build_edges_from_decoded(decoded, n_target, add_self_loops=False)
         edge_counts[mp] = int(ei.size(1))
         union_src.append(ei[0])
         union_dst.append(ei[1])

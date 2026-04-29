@@ -53,6 +53,10 @@ sys.path.insert(0, project_root)
 
 from src.config import config
 from src.data import DatasetFactory
+from src.sketch_feature import (
+    macro_f1 as _macro_f1,
+    macro_f1_multilabel as _macro_f1_multilabel,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -160,44 +164,6 @@ class SimpleHGN(nn.Module):
 # ---------------------------------------------------------------------------
 # Metric helpers (same conventions as exp_sketch_feature_train.py)
 # ---------------------------------------------------------------------------
-
-
-def _macro_f1(y_pred: torch.Tensor, y_true: torch.Tensor, n_classes: int) -> float:
-    y_pred = y_pred.cpu().numpy()
-    y_true = y_true.cpu().numpy()
-    f1s = []
-    for c in range(n_classes):
-        tp = ((y_pred == c) & (y_true == c)).sum()
-        fp = ((y_pred == c) & (y_true != c)).sum()
-        fn = ((y_pred != c) & (y_true == c)).sum()
-        if tp + fp == 0 or tp + fn == 0:
-            continue
-        prec = tp / (tp + fp)
-        rec = tp / (tp + fn)
-        if prec + rec == 0:
-            continue
-        f1s.append(2 * prec * rec / (prec + rec))
-    return float(sum(f1s) / len(f1s)) if f1s else 0.0
-
-
-def _macro_f1_multilabel(logits: torch.Tensor, y_true: torch.Tensor,
-                         threshold: float = 0.5) -> float:
-    pred = (torch.sigmoid(logits) >= threshold).int().cpu().numpy()
-    yt = y_true.int().cpu().numpy()
-    n_classes = pred.shape[1]
-    f1s = []
-    for c in range(n_classes):
-        tp = ((pred[:, c] == 1) & (yt[:, c] == 1)).sum()
-        fp = ((pred[:, c] == 1) & (yt[:, c] == 0)).sum()
-        fn = ((pred[:, c] == 0) & (yt[:, c] == 1)).sum()
-        if tp + fp == 0 or tp + fn == 0:
-            continue
-        prec = tp / (tp + fp)
-        rec = tp / (tp + fn)
-        if prec + rec == 0:
-            continue
-        f1s.append(2 * prec * rec / (prec + rec))
-    return float(sum(f1s) / len(f1s)) if f1s else 0.0
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ from .decoder import decode_sketches, build_decode_table
 from .encoder import SketchFeatureEncoder
 from .backbone import SketchHAN, SketchSimpleHGN
 from .extractor import SketchBundle, extract_sketches
+from .utils import macro_f1, macro_f1_multilabel, build_mp_edges_from_decoded
 
 __all__ = [
     "decode_sketches",
@@ -27,4 +28,7 @@ __all__ = [
     "SketchSimpleHGN",
     "SketchBundle",
     "extract_sketches",
+    "macro_f1",
+    "macro_f1_multilabel",
+    "build_mp_edges_from_decoded",
 ]

@@ -53,8 +53,11 @@ from src.sketch_feature import (
     SketchBundle,
     SketchFeatureEncoder,
     SketchHAN,
+    build_mp_edges_from_decoded as _build_mp_edges_from_decoded,
     decode_sketches,
     extract_sketches,
+    macro_f1 as _macro_f1,
+    macro_f1_multilabel as _macro_f1_multilabel,
 )
 
 
@@ -152,82 +155,6 @@ _DEFAULT_META_PATHS = {
         "disease_to_gene,gene_to_disease",
     ],
 }
-
-
-def _macro_f1(y_pred: torch.Tensor, y_true: torch.Tensor, n_classes: int) -> float:
-    """Macro-F1 averaged across classes; ignores classes absent in y_true."""
-    y_pred = y_pred.cpu().numpy()
-    y_true = y_true.cpu().numpy()
-    f1s = []
-    for c in range(n_classes):
-        tp = ((y_pred == c) & (y_true == c)).sum()
-        fp = ((y_pred == c) & (y_true != c)).sum()
-        fn = ((y_pred != c) & (y_true == c)).sum()
-        if tp + fp == 0 or tp + fn == 0:
-            continue
-        prec = tp / (tp + fp)
-        rec = tp / (tp + fn)
-        if prec + rec == 0:
-            continue
-        f1s.append(2 * prec * rec / (prec + rec))
-    return float(sum(f1s) / len(f1s)) if f1s else 0.0
-
-
-def _build_mp_edges_from_decoded(
-    decoded: torch.Tensor,
-    n_target: int,
-    add_self_loops: bool = True,
-) -> torch.Tensor:
-    """Build the meta-path-induced adjacency from a decoded sketch.
-
-    Each row v of ``decoded`` lists the bottom-k T_0 ids that v's meta-path
-    sketch retained. Treat each (v, decoded[v, j]) for valid slots as an
-    edge in the meta-path-induced graph, undirected (HANConv attends per
-    relation in one direction only, but symmetrising helps the encoder
-    see both ends).
-
-    This is the sketch-as-sparsifier construction in service of the
-    sketch-as-feature backbone: HAN gets meta-path-specific adjacencies
-    derived from the same sketch its target features came from.
-    """
-    n, k = decoded.shape
-    src = torch.arange(n).unsqueeze(1).expand(-1, k)              # [n, k]
-    dst = decoded                                                  # [n, k]
-    valid = dst >= 0
-    src = src[valid]
-    dst = dst[valid]
-
-    # Undirected + optional self-loops, with PyG's coalesce for dedup.
-    from torch_geometric.utils import coalesce, add_self_loops as _add_sl
-    ei = torch.stack([
-        torch.cat([src, dst]),
-        torch.cat([dst, src]),
-    ]).long()
-    if add_self_loops:
-        ei, _ = _add_sl(ei, num_nodes=n_target)
-    ei = coalesce(ei, num_nodes=n_target)
-    return ei
-
-
-def _macro_f1_multilabel(logits: torch.Tensor, y_true: torch.Tensor,
-                         threshold: float = 0.5) -> float:
-    """Per-class binary F1, averaged. logits: [N, C]; y_true: [N, C] in {0,1}."""
-    pred = (torch.sigmoid(logits) >= threshold).int().cpu().numpy()
-    yt = y_true.int().cpu().numpy()
-    n_classes = pred.shape[1]
-    f1s = []
-    for c in range(n_classes):
-        tp = ((pred[:, c] == 1) & (yt[:, c] == 1)).sum()
-        fp = ((pred[:, c] == 1) & (yt[:, c] == 0)).sum()
-        fn = ((pred[:, c] == 0) & (yt[:, c] == 1)).sum()
-        if tp + fp == 0 or tp + fn == 0:
-            continue
-        prec = tp / (tp + fp)
-        rec = tp / (tp + fn)
-        if prec + rec == 0:
-            continue
-        f1s.append(2 * prec * rec / (prec + rec))
-    return float(sum(f1s) / len(f1s)) if f1s else 0.0
 
 
 def main() -> int:
@@ -416,89 +343,68 @@ def main() -> int:
         edge_index_dict = {et: g[et].edge_index.to(device) for et in edge_types}
         edge_counts = {f"{et}": int(g[et].edge_index.size(1)) for et in edge_types}
 
-        model = SketchHAN(
-            n_t0=n_target, emb_dim=args.emb_dim, out_dim=n_classes,
-            meta_paths=meta_paths,
-            node_types=node_types, target_type=target_type,
-            base_dim_by_type=base_dim_by_type,
-            n_layers=args.depth, n_heads=args.n_heads, dropout=args.dropout,
-            agg=args.agg,
-        ).to(device)
-
-        # Override SketchHAN.forward by monkey-patching: instead of using the
-        # synthetic per-meta-path edges, feed real heterogeneous edges with
-        # one HAN call. We bypass _ensure_type_embedding by giving x_dict
-        # ourselves.
-        def forward_fn_real(m: SketchHAN):
-            # Per-meta-path encoders -> target features
-            per_mp = [
-                m.encoders[SketchHAN._sanitize(mp)](*sketch_inputs[mp])
-                for mp in meta_paths
-            ]
-            x_target = torch.stack(per_mp, dim=0).mean(dim=0)
-            x_dict = {target_type: x_target}
-            for nt in node_types:
-                if nt == target_type:
-                    continue
-                if nt in type_projects:
-                    x_dict[nt] = type_projects[nt](g[nt].x.to(device))
-                else:
-                    x_dict[nt] = type_embs[nt]
-            # We need a HANConv stack expecting THIS metadata; SketchHAN
-            # was built with synthetic per-mp edge_types. Build one ad-hoc.
-            for layer in m.han_layers:
-                # Re-initialise with the real metadata. Cheap because lin
-                # layers are reset per relation; we only rebuild metadata
-                # to avoid AssertionError on edge type mismatch.
-                pass
-            return m.classifier(x_dict[target_type])
-        # Clean approach: HAN with real edges needs a SketchHAN built with
-        # the real (node_types, edge_types) metadata. Rebuild it that way.
+        # Build per-meta-path encoders sharing one T_0 embedding (typed
+        # identity universe). Then a HANConv stack that operates on the
+        # real heterogeneous edges; encoders feed only the target type's
+        # input features.
         from torch_geometric.nn import HANConv
-        han_layers = nn.ModuleList()
-        in_d = args.emb_dim
-        for _ in range(args.depth):
-            han_layers.append(HANConv(
-                in_channels=in_d, out_channels=args.emb_dim,
-                metadata=(node_types, edge_types),
-                heads=args.n_heads, dropout=args.dropout,
-            ))
-            in_d = args.emb_dim
-        han_layers = han_layers.to(device)
-        classifier_real = nn.Linear(args.emb_dim, n_classes).to(device)
 
-        # We hand over to a fresh forward_fn that uses the real layers.
-        encoders = model.encoders  # reuse the encoders + shared embedding
+        class _SketchFeatureHANRealEdges(nn.Module):
+            """Sketch-feature target encoders + HAN over real het edges.
 
-        def forward_fn(_unused):
-            per_mp = [
-                encoders[SketchHAN._sanitize(mp)](*sketch_inputs[mp])
-                for mp in meta_paths
-            ]
-            x_target = torch.stack(per_mp, dim=0).mean(dim=0)
-            x_dict = {target_type: x_target}
-            for nt in node_types:
-                if nt == target_type:
-                    continue
-                if nt in type_projects:
-                    x_dict[nt] = type_projects[nt](g[nt].x.to(device))
-                else:
-                    x_dict[nt] = type_embs[nt]
-            for layer in han_layers:
-                x_dict = layer(x_dict, edge_index_dict)
-                x_dict = {k: F.elu(v) if v is not None else v for k, v in x_dict.items()}
-            return classifier_real(x_dict[target_type])
-
-        # Combine all parameters into one trainable bag.
-        class _Wrapper(nn.Module):
+            Forward signature is uniform with the other backbones:
+                forward(sketch_inputs, edge_index_dict, n_by_type) -> logits
+            so the training loop can call it via ``forward_fn``.
+            """
             def __init__(self):
                 super().__init__()
-                self.encoders = encoders
-                self.han_layers = han_layers
-                self.classifier_real = classifier_real
+                self.shared_t0 = nn.Embedding(
+                    n_target + 1, args.emb_dim, padding_idx=n_target
+                )
+                self.encoders = nn.ModuleDict({
+                    SketchHAN._sanitize(mp): SketchFeatureEncoder(
+                        n_t0=n_target, emb_dim=args.emb_dim, agg=args.agg,
+                        base_dim=target_base_dim, dropout=args.dropout,
+                        shared_embedding=self.shared_t0,
+                    ) for mp in meta_paths
+                })
                 self.type_projects = type_projects
                 self.type_embs = type_embs
-        model = _Wrapper().to(device)
+                layers = []
+                in_d = args.emb_dim
+                for _ in range(args.depth):
+                    layers.append(HANConv(
+                        in_channels=in_d, out_channels=args.emb_dim,
+                        metadata=(node_types, edge_types),
+                        heads=args.n_heads, dropout=args.dropout,
+                    ))
+                    in_d = args.emb_dim
+                self.han_layers = nn.ModuleList(layers)
+                self.classifier = nn.Linear(args.emb_dim, n_classes)
+
+            def forward(self, sk_inputs, ei_dict, n_by_type):
+                per_mp = [
+                    self.encoders[SketchHAN._sanitize(mp)](*sk_inputs[mp])
+                    for mp in meta_paths
+                ]
+                x_target = torch.stack(per_mp, dim=0).mean(dim=0)
+                x_dict = {target_type: x_target}
+                for nt in node_types:
+                    if nt == target_type:
+                        continue
+                    if nt in self.type_projects:
+                        x_dict[nt] = self.type_projects[nt](g[nt].x.to(device))
+                    else:
+                        x_dict[nt] = self.type_embs[nt]
+                for layer in self.han_layers:
+                    x_dict = layer(x_dict, ei_dict)
+                    x_dict = {k: F.elu(v) if v is not None else v
+                              for k, v in x_dict.items()}
+                return self.classifier(x_dict[target_type])
+
+        model = _SketchFeatureHANRealEdges().to(device)
+        n_by_type_local = {nt: g[nt].num_nodes for nt in g.node_types}
+        forward_fn = lambda m: m(sketch_inputs, edge_index_dict, n_by_type_local)
 
     else:  # han_sketch_edges (default — original behaviour)
         node_types = [target_type]
