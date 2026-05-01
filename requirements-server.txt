@@ -1,0 +1,32 @@
+# Minimal server-side requirements.
+#
+# The full requirements.txt is a pip-freeze of the local Windows venv with
+# tons of transitive deps (aiohappyeyeballs, librosa, soundfile, ...) pinned
+# to versions that need Python >= 3.9. Most have nothing to do with this
+# project — they leak from other packages installed in the same env.
+#
+# This file lists only the packages actually imported by the runner-invoked
+# scripts (verified by greppinng `^import` / `^from` across scripts/ and src/).
+# torch / torch_geometric / torch_sparse / torchmetrics / pytorch_lightning
+# are typically installed manually on the server with CUDA-matched wheels —
+# left unpinned here so pip picks whatever's already present.
+#
+# Usage:
+#   pip install --user -r requirements-server.txt
+
+numpy
+pandas
+matplotlib
+seaborn
+scipy>=1.10              # required by exp_simple_hgn_multitask BFS vectorization
+scikit-learn
+tqdm
+
+# Deep-learning stack — install matching CUDA wheels manually on the server
+# if you don't already have them. Listed here for documentation; pip may
+# decline to upgrade if a working version is present.
+torch
+torch_geometric
+torch_sparse
+torchmetrics
+pytorch-lightning

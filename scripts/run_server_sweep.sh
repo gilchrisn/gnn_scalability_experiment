@@ -157,8 +157,11 @@ if [[ "${SKIP_FRACTION:-0}" != "1" ]]; then
     done
 
     # Phase 1a: HGB datasets in TRAINED mode (matches old transfer/ data).
+    # KGRW is excluded — only KMV and MPRW for the prof pitch comparison.
+    # Set FRACTION_METHODS="KMV MPRW KGRW" to add KGRW back.
+    FRACTION_METHODS="${FRACTION_METHODS:-KMV MPRW}"
     log ""
-    log "─── Phase 1a: HGB fraction sweep (mode=trained, ${FRACTION_SEEDS} seeds) ───"
+    log "─── Phase 1a: HGB fraction sweep (mode=trained, ${FRACTION_SEEDS} seeds, methods=${FRACTION_METHODS}) ───"
     for ds in ${HGB_DATASETS}; do
         log ""
         log "  --- ${ds} ---"
@@ -171,6 +174,7 @@ if [[ "${SKIP_FRACTION:-0}" != "1" ]]; then
             --mprw-w ${FRACTION_W_VALUES} \
             --seeds "${FRACTION_SEEDS}" \
             --seed-base "${SEED_BASE}" \
+            --methods ${FRACTION_METHODS} \
             2>&1 | tee "${ds_log}" | tail -20 >> "${MASTER_LOG}"; then
             log "  ${ds}: OK   (full log: ${ds_log})"
         else
