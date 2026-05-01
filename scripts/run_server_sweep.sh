@@ -7,6 +7,8 @@
 #   Phase 0   smoke test the unified edge counter
 #   Phase 1a  bench_fraction_sweep (HGB × 4, mode=trained)     ← MUST redo (old counter bad)
 #   Phase 1b  bench_fraction_sweep (OGB_MAG, mode=untrained)   ← scalability headline
+#                                                                (SKIPPED by default;
+#                                                                 set SKIP_OGB_MAG=0 to enable)
 #   Phase 2   sketch-feature NC × 4 HGB × 3 backbones × 3 seeds
 #   Phase 3   sketch-sparsifier NC × 4 HGB × 3 seeds
 #   Phase 4   simple-HGN baseline (per-task) × 4 HGB × 3 seeds
@@ -52,6 +54,7 @@ SEED_BASE="${SEED_BASE:-42}"
 K_VALUE="${K_VALUE:-32}"
 NUM_SEEDS="${NUM_SEEDS:-3}"
 FORCE_REDO="${FORCE_REDO:-0}"
+SKIP_OGB_MAG="${SKIP_OGB_MAG:-1}"   # OGB_MAG fraction sweep is the slowest phase; skipped by default
 
 # Per-seed list (shell loop) — used by per-task scripts that take --seed.
 SEEDS=()
@@ -101,6 +104,27 @@ log "k value:        ${K_VALUE}"
 log "FORCE_REDO:     ${FORCE_REDO}"
 
 # ════════════════════════════════════════════════════════════════════════
+# PHASE -1: build C++ binaries (graph_prep + mprw_exec)
+# Required before any C++ phase. Skipped if SKIP_BUILD=1.
+# ════════════════════════════════════════════════════════════════════════
+if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
+    section "PHASE -1 — build C++ binaries (make)"
+    if make 2>&1 | tee -a "${MASTER_LOG}" | tail -5; then
+        if [[ -x bin/graph_prep && -x bin/mprw_exec ]]; then
+            log "[build] OK — bin/graph_prep and bin/mprw_exec present"
+        else
+            log "[build] FAIL — make returned 0 but binaries missing"
+            exit 1
+        fi
+    else
+        log "[build] FAIL — make exited non-zero. Aborting."
+        exit 1
+    fi
+else
+    log "[skip] phase -1 (build) — assuming bin/graph_prep + bin/mprw_exec already present"
+fi
+
+# ════════════════════════════════════════════════════════════════════════
 # PHASE 0: smoke test
 # ════════════════════════════════════════════════════════════════════════
 if [[ "${SKIP_SMOKE:-0}" != "1" ]]; then
@@ -122,7 +146,9 @@ if [[ "${SKIP_FRACTION:-0}" != "1" ]]; then
     section "PHASE 1 — bench_fraction_sweep (force-redo, old counter was bad)"
 
     # Backup any existing CSVs once at phase start so we don't lose history.
-    for ds in ${HGB_DATASETS} OGB_MAG; do
+    backup_targets="${HGB_DATASETS}"
+    [[ "${SKIP_OGB_MAG}" != "1" ]] && backup_targets="${backup_targets} OGB_MAG"
+    for ds in ${backup_targets}; do
         old_csv="results/${ds}/kgrw_bench_fractions.csv"
         if [[ -f "${old_csv}" ]]; then
             mv "${old_csv}" "${old_csv}.pre_${TS}.bak"
@@ -153,23 +179,28 @@ if [[ "${SKIP_FRACTION:-0}" != "1" ]]; then
     done
 
     # Phase 1b: OGB-MAG in UNTRAINED mode (scalability headline).
-    log ""
-    log "─── Phase 1b: OGB-MAG fraction sweep (mode=untrained, ${FRACTION_SEEDS} seeds) ───"
-    log ""
-    log "  --- OGB_MAG ---"
-    ds_log="${LOG_DIR}/OGB_MAG/fraction_sweep_${TS}.log"
-    mkdir -p "${LOG_DIR}/OGB_MAG"
-    if python scripts/bench_fraction_sweep.py \
-        --dataset OGB_MAG \
-        --mode untrained \
-        --kmv-k ${FRACTION_K_VALUES} \
-        --mprw-w ${FRACTION_W_VALUES} \
-        --seeds "${FRACTION_SEEDS}" \
-        --seed-base "${SEED_BASE}" \
-        2>&1 | tee "${ds_log}" | tail -20 >> "${MASTER_LOG}"; then
-        log "  OGB_MAG: OK   (full log: ${ds_log})"
+    if [[ "${SKIP_OGB_MAG}" != "1" ]]; then
+        log ""
+        log "─── Phase 1b: OGB-MAG fraction sweep (mode=untrained, ${FRACTION_SEEDS} seeds) ───"
+        log ""
+        log "  --- OGB_MAG ---"
+        ds_log="${LOG_DIR}/OGB_MAG/fraction_sweep_${TS}.log"
+        mkdir -p "${LOG_DIR}/OGB_MAG"
+        if python scripts/bench_fraction_sweep.py \
+            --dataset OGB_MAG \
+            --mode untrained \
+            --kmv-k ${FRACTION_K_VALUES} \
+            --mprw-w ${FRACTION_W_VALUES} \
+            --seeds "${FRACTION_SEEDS}" \
+            --seed-base "${SEED_BASE}" \
+            2>&1 | tee "${ds_log}" | tail -20 >> "${MASTER_LOG}"; then
+            log "  OGB_MAG: OK   (full log: ${ds_log})"
+        else
+            log "  OGB_MAG: FAILED   (full log: ${ds_log})"
+        fi
     else
-        log "  OGB_MAG: FAILED   (full log: ${ds_log})"
+        log ""
+        log "[skip] phase 1b (OGB_MAG) — set SKIP_OGB_MAG=0 to enable"
     fi
 else
     log "[skip] phase 1 (fraction sweep)"
@@ -361,11 +392,30 @@ fi
 
 # ════════════════════════════════════════════════════════════════════════
 # PHASE 9: multi-query amortization × 4 HGB × 1 seed
+# Hard-depends on phases 2 (sketch-feature mlp), 4 (simple-hgn baseline),
+# and 8 (similarity) at seed=SEED_BASE. The amortization script reads
+# those JSONs to populate the cost-breakdown comparison; if any are
+# missing it crashes, so we precondition-skip per dataset.
 # ════════════════════════════════════════════════════════════════════════
 if [[ "${SKIP_AMORTIZATION:-0}" != "1" ]]; then
     section "PHASE 9 — multi-query amortization (1 seed)"
     for ds in ${HGB_DATASETS}; do
         json="results/${ds}/multi_query_amortization_k${K_VALUE}_seed${SEED_BASE}.json"
+        # Prerequisite JSONs that exp_multi_query_amortization.py expects
+        prereqs=(
+            "results/${ds}/sketch_feature_pilot_k${K_VALUE}_mlp_seed${SEED_BASE}.json"
+            "results/${ds}/simple_hgn_baseline_seed${SEED_BASE}.json"
+            "results/${ds}/sketch_similarity_pilot_k${K_VALUE}_seed${SEED_BASE}.json"
+        )
+        missing=()
+        for pq in "${prereqs[@]}"; do
+            [[ -f "${pq}" ]] || missing+=("${pq}")
+        done
+        if [[ ${#missing[@]} -gt 0 ]]; then
+            log "  ${ds}: SKIP — missing prerequisites:"
+            for m in "${missing[@]}"; do log "    - ${m}"; done
+            continue
+        fi
         run_or_skip "${ds} seed=${SEED_BASE}" "${json}" \
             python scripts/exp_multi_query_amortization.py "${ds}" \
                 --k "${K_VALUE}" --seed "${SEED_BASE}"
@@ -400,8 +450,10 @@ if [[ "${SKIP_PLOTS:-0}" != "1" ]]; then
     fi
 
     section "PHASE 12 — fraction-sweep aggregate plots"
+    plot_datasets="${HGB_DATASETS}"
+    [[ "${SKIP_OGB_MAG}" != "1" ]] && plot_datasets="${plot_datasets} OGB_MAG"
     if python scripts/aggregate_fractions.py \
-        --datasets ${HGB_DATASETS} OGB_MAG \
+        --datasets ${plot_datasets} \
         --root-dir results --out-dir figures/server_run \
         2>&1 | tee -a "${MASTER_LOG}"; then
         log "[fraction plots] OK"
