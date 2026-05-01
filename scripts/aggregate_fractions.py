@@ -46,8 +46,8 @@ def _flt(v):
     except ValueError: return None
 
 
-def _load(ds: str, csv_name: str) -> list[dict]:
-    p = ROOT / "results" / ds / csv_name
+def _load(ds: str, csv_name: str, root_dir: str = "results") -> list[dict]:
+    p = ROOT / root_dir / ds / csv_name
     if not p.exists():
         print(f"[skip] {p} not found")
         return []
@@ -213,12 +213,21 @@ def main() -> None:
     p.add_argument("--datasets", nargs="+",
                    default=["HNE_PubMed", "OGB_MAG"])
     p.add_argument("--csv-name", default="kgrw_bench_fractions.csv")
+    p.add_argument("--root-dir", default="results",
+                   help="Directory under project root containing per-dataset "
+                        "subfolders with the CSV (default: results)")
+    p.add_argument("--out-dir", default=None,
+                   help="Where to write figures and summary CSV "
+                        "(default: same as --root-dir)")
+    p.add_argument("--out-suffix", default="",
+                   help="Optional suffix appended to output filenames "
+                        "(e.g. '_transfer' → '3way_l2_scatter_fractions_transfer.pdf')")
     args = p.parse_args()
 
     agg: dict[str, list[dict]] = {}
     all_fracs: set[float] = set()
     for ds in args.datasets:
-        rows = _load(ds, args.csv_name)
+        rows = _load(ds, args.csv_name, args.root_dir)
         if not rows: continue
         agg[ds] = _agg_cells(rows)
         all_fracs.update(r["Fraction"] for r in agg[ds])
@@ -227,10 +236,12 @@ def main() -> None:
     if not fractions:
         print("No data to plot."); return
 
-    out_dir = ROOT / "results"
-    plot_3way(agg, fractions, out_dir / "3way_l2_scatter_fractions.pdf")
-    plot_saturation(agg, fractions, out_dir / "method_saturation_fractions.pdf")
-    write_summary_csv(agg, out_dir / "fractions_summary.csv")
+    out_dir = ROOT / (args.out_dir or args.root_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sfx = args.out_suffix
+    plot_3way(agg, fractions, out_dir / f"3way_l2_scatter_fractions{sfx}.pdf")
+    plot_saturation(agg, fractions, out_dir / f"method_saturation_fractions{sfx}.pdf")
+    write_summary_csv(agg, out_dir / f"fractions_summary{sfx}.csv")
 
 
 if __name__ == "__main__":

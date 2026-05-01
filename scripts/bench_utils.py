@@ -251,3 +251,91 @@ def run_cpp(
         print(out if out else "[no output]")
 
     return result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Unified edge counter (replaces the per-script `_count_edges` variants)
+# ---------------------------------------------------------------------------
+#
+# Why this is centralised:
+#   The three benchmark methods (Exact / KMV / MPRW) write their adjacency
+#   files with three DIFFERENT conventions, which made the old "sum of NF-1"
+#   counter return mutually-incomparable numbers and silently broke
+#   cross-method density plots:
+#
+#     Exact (HUB/hg.cpp:25-46)
+#         hidden_graph stored as std::vector<unsigned int> with push_back
+#         and NO dedup → multi-edges. Paper-pair sharing 3 authors via the
+#         meta-path appears 3 times in the adj. One-directional (only
+#         active source nodes get a row).
+#
+#     KMV (sketch decode)
+#         Bottom-k slots are deduped by hash value at merge time → set
+#         semantics. At most k unique entries per source. One-directional.
+#
+#     MPRW (csrc/mprw_exec.cpp:349-358)
+#         Sorted-vector dedup at every walk epoch → set semantics, AND
+#         explicitly symmetrised at the end (for every (u,v), inserts
+#         (v,u)). So sum-of-degrees is ≈ 2× unique-undirected-pair count.
+#
+# To make Edge_Count comparable across methods we collapse all three to
+# the same canonical metric: |{ unordered {u, v} : v ∈ adj[u], u ≠ v }|.
+# Self-loops are excluded because (a) MPRW already drops them, (b) Exact's
+# hidden-graph rarely emits self-loops via the standard meta-path, and
+# (c) they are never meaningful for the meta-path-induced density that
+# downstream plots claim to measure.
+
+def count_unique_undirected_edges(adj_path: str) -> int:
+    """Count unique undirected non-self-loop edges in an adjacency-list file.
+
+    File format: one line per source, "src nbr1 nbr2 ..." (whitespace-
+    separated integers).
+
+    The counter is uniform across Exact / KMV / MPRW outputs:
+      - Exact's multi-edges → set-deduped to unique pairs.
+      - KMV's set-edges → folded to undirected.
+      - MPRW's pre-symmetrised adj → folded back to undirected (no double
+        counting).
+
+    Returns 0 if the file does not exist.
+    """
+    if not os.path.exists(adj_path):
+        return 0
+    pairs: set[tuple[int, int]] = set()
+    with open(adj_path) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            try:
+                src = int(parts[0])
+            except ValueError:
+                continue
+            for nb in parts[1:]:
+                try:
+                    v = int(nb)
+                except ValueError:
+                    continue
+                if v == src:
+                    continue
+                pairs.add((src, v) if src < v else (v, src))
+    return len(pairs)
+
+
+# awk one-liner that produces the same canonical count as
+# count_unique_undirected_edges. Use this when the adj file lives on the
+# WSL side and Python iteration would be too slow (OGB_MAG full-fraction
+# adj files can be multi-GB). Plug it into the caller's _wsl() helper:
+#
+#     subprocess.run(_wsl(f"{AWK_UNIQUE_UNDIR_EDGES} {adj_wsl}"), ...)
+#
+# The associative array gives the same set semantics as the Python
+# fallback above.
+AWK_UNIQUE_UNDIR_EDGES = (
+    "awk '{ src = $1; "
+    "for (i = 2; i <= NF; i++) { v = $i; "
+    "if (v == src) continue; "
+    "key = (src+0 < v+0) ? src \"\\t\" v : v \"\\t\" src; "
+    "pairs[key] = 1 } } "
+    "END { print length(pairs)+0 }'"
+)

@@ -345,7 +345,15 @@ def _density(edges: int, n_target: int) -> float:
 
 
 def _count_edges(adj_wsl: str) -> int:
-    r = subprocess.run(_wsl(f"awk '{{s += NF-1}} END {{print s+0}}' {adj_wsl}"),
+    """Edges in the materialised adj — uniform across Exact/KMV/MPRW.
+
+    Returns |{ unordered {u, v} : v ∈ adj[u], u ≠ v }|. This is required
+    because the three methods write adj files with different conventions
+    (Exact: multi-edge; KMV: set; MPRW: pre-symmetrised). See
+    `bench_utils.count_unique_undirected_edges` for full rationale.
+    """
+    from bench_utils import AWK_UNIQUE_UNDIR_EDGES
+    r = subprocess.run(_wsl(f"{AWK_UNIQUE_UNDIR_EDGES} {adj_wsl}"),
                        capture_output=True, text=True)
     return int(r.stdout.strip()) if r.stdout.strip().isdigit() else 0
 

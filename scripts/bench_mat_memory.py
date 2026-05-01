@@ -43,16 +43,16 @@ DATASET_FOLDER = {
 # ---------------------------------------------------------------------------
 
 def _count_edges(filepath: str) -> int:
-    """Count total directed edges in an adjacency list file."""
-    n = 0
-    if not os.path.exists(filepath):
-        return 0
-    with open(filepath) as f:
-        for line in f:
-            parts = line.split()
-            if len(parts) > 1:
-                n += len(parts) - 1
-    return n
+    """Edges in the materialised adj — uniform across Exact/KMV/MPRW.
+
+    Returns |{ unordered {u, v} : v ∈ adj[u], u ≠ v }|. The three methods
+    write adj files with different conventions (Exact: multi-edge; KMV:
+    set; MPRW: pre-symmetrised); this counter collapses all three to the
+    same canonical metric so density numbers are comparable.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from bench_utils import count_unique_undirected_edges
+    return count_unique_undirected_edges(filepath)
 
 
 def _run(cmd: list, timeout: int = 600) -> Tuple[float, float]:

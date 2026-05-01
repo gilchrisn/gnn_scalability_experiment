@@ -123,9 +123,18 @@ def _run_timed(cmd_inner: str, timeout_s: int,
 
 
 def _count_edges(adj_path_wsl: str) -> int:
-    cmd = f"awk '{{s += NF-1}} END {{print s+0}}' {adj_path_wsl}"
+    """Edges in the materialised adj — uniform across Exact/KMV/MPRW.
+
+    Returns |{ unordered {u, v} : v ∈ adj[u], u ≠ v }|. See
+    `bench_utils.count_unique_undirected_edges` for full rationale on why
+    the per-method writer conventions force this canonicalisation.
+    """
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from bench_utils import AWK_UNIQUE_UNDIR_EDGES
     try:
-        r = subprocess.run(_wsl(cmd), capture_output=True, text=True, timeout=120)
+        r = subprocess.run(_wsl(f"{AWK_UNIQUE_UNDIR_EDGES} {adj_path_wsl}"),
+                           capture_output=True, text=True, timeout=120)
         s = r.stdout.strip()
         return int(s) if s.isdigit() else 0
     except Exception:

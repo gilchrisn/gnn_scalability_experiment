@@ -58,25 +58,20 @@ def _make_lp_train_test_edges(g, target: str, partition: dict, rng,
                               max_test_edges: int = 2000):
     """Build LP train / test edge sets from the heterogeneous graph.
 
-    Train edges = sketched-or-real meta-path adjacency restricted to
-    V_train ∩ V_train. We use a 1-hop relation that lives natively on
-    the target type if one exists; else we fall back to the densest
-    canonical meta-path's adjacency.
-
-    For DBLP author target: APA via author->paper->author. We compute
-    the meta-path adjacency exactly because it's small at HGB scale.
+    Computes the canonical 2-hop meta-path adjacency (target -> X -> target)
+    via sparse matrix multiplication: A @ B where A is the target->X
+    edge_index and B is the X->target edge_index, both as scipy CSR matrices.
+    The previous implementation used a triple-nested Python loop and was
+    intractable on PubMed/ACM/IMDB; sparse matmul handles those in seconds.
     """
-    # For simplicity here we use the existing C++ pipeline if available,
-    # but to keep this script self-contained, we compute the adjacency
-    # via Python BFS along the canonical meta-path.
-    from collections import defaultdict
+    from scipy.sparse import csr_matrix
+
     # Pick a canonical 2-hop meta-path: T_0 -> X -> T_0 where X is the
     # most-connected adjacent type via target_to_X edges.
     out_rels = [(et, g[et].edge_index) for et in g.edge_types
                 if et[0] == target and et[2] != target]
     if not out_rels:
         raise RuntimeError(f"No outgoing edges from {target} found")
-    # Pick relation with the most edges
     et_out, ei_out = max(out_rels, key=lambda r: r[1].size(1))
     intermediate = et_out[2]
     in_rels = [(et, g[et].edge_index) for et in g.edge_types
@@ -86,41 +81,43 @@ def _make_lp_train_test_edges(g, target: str, partition: dict, rng,
     et_in, ei_in = max(in_rels, key=lambda r: r[1].size(1))
     print(f"[lp_edges] using {et_out} -> {et_in} as canonical meta-path adjacency")
 
-    # Build adjacency T_0 -> intermediate -> T_0.
-    fwd = defaultdict(list)
-    for i in range(ei_out.size(1)):
-        fwd[int(ei_out[0, i])].append(int(ei_out[1, i]))
-    rev = defaultdict(list)
-    for i in range(ei_in.size(1)):
-        rev[int(ei_in[0, i])].append(int(ei_in[1, i]))
-
     n_target = g[target].num_nodes
-    edges = set()
-    for u in range(n_target):
-        for x in fwd.get(u, []):
-            for v in rev.get(x, []):
-                if u < v:
-                    edges.add((u, v))
+    n_inter = g[intermediate].num_nodes
 
-    edges_list = list(edges)
-    src = torch.tensor([e[0] for e in edges_list], dtype=torch.long)
-    dst = torch.tensor([e[1] for e in edges_list], dtype=torch.long)
-    full_ei = torch.stack([src, dst])
+    # Sparse A (n_target × n_inter), B (n_inter × n_target). C = A @ B is
+    # the meta-path adjacency. Boolean dtype so multiplicities don't blow
+    # up RAM on dense graphs.
+    a_np = ei_out.cpu().numpy()
+    b_np = ei_in.cpu().numpy()
+    A = csr_matrix(
+        (np.ones(a_np.shape[1], dtype=bool), (a_np[0], a_np[1])),
+        shape=(n_target, n_inter),
+    )
+    B = csr_matrix(
+        (np.ones(b_np.shape[1], dtype=bool), (b_np[0], b_np[1])),
+        shape=(n_inter, n_target),
+    )
+    C = (A @ B).tocoo()
 
-    v_train = set(int(x) for x in partition["train_node_ids"])
-    v_test = set(int(x) for x in partition["test_node_ids"])
+    # Keep upper triangle only (u < v) to dedup undirected pairs and drop
+    # self-loops in one step.
+    keep = C.row < C.col
+    src_np = C.row[keep].astype(np.int64)
+    dst_np = C.col[keep].astype(np.int64)
+    full_ei = torch.from_numpy(np.stack([src_np, dst_np]))
 
-    train_mask = np.array([(s in v_train) and (d in v_train)
-                           for s, d in zip(src.numpy(), dst.numpy())])
-    test_mask = np.array([((s in v_test) or (d in v_test))
-                          for s, d in zip(src.numpy(), dst.numpy())])
-    pos_train = full_ei[:, train_mask]
-    pos_test = full_ei[:, test_mask]
+    # Vectorised train/test mask via np.isin against the partition arrays.
+    train_arr = np.asarray(partition["train_node_ids"], dtype=np.int64)
+    test_arr  = np.asarray(partition["test_node_ids"],  dtype=np.int64)
+    in_train = np.isin(src_np, train_arr) & np.isin(dst_np, train_arr)
+    in_test  = np.isin(src_np, test_arr)  | np.isin(dst_np, test_arr)
+
+    pos_train = full_ei[:, torch.from_numpy(in_train)]
+    pos_test  = full_ei[:, torch.from_numpy(in_test)]
     if pos_test.size(1) > max_test_edges:
         idx = rng.choice(pos_test.size(1), size=max_test_edges, replace=False)
         pos_test = pos_test[:, torch.from_numpy(idx).long()]
 
-    # Adjacency for negative sampling.
     adj = _build_adj_dict(full_ei, n_target)
     return pos_train, pos_test, adj
 
