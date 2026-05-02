@@ -179,7 +179,12 @@ def run_one_seed(args, seed: int) -> dict:
         pos_train, pos_test_lp, adj_lp = _make_lp_train_test_edges(
             g, target, partition, rng, max_test_edges=args.max_test_edges)
         n_pos_train = pos_train.size(1)
-        n_val = max(1, int(0.1 * n_pos_train))
+        # Cap val set to 2000 — without this, dense meta-paths (ACM PTP)
+        # produce 65k+ val edges, and per-epoch ranking-metrics over them
+        # is the dominant per-epoch cost (Agent A diagnosis 2026-05-02:
+        # ACM seed 380s on GPU because val loop is pure-Python single-
+        # threaded; capping + gating cuts seed time ~10×).
+        n_val = min(2000, max(1, int(0.1 * n_pos_train)))
         perm = rng.permutation(n_pos_train)
         pos_val_lp = pos_train[:, torch.from_numpy(perm[:n_val]).long()]
         pos_train_lp = pos_train[:, torch.from_numpy(perm[n_val:]).long()]
@@ -250,11 +255,19 @@ def run_one_seed(args, seed: int) -> dict:
                 val_nc_f1 = macro_f1(pred[val_mask_d], labels_d[val_mask_d], n_classes)
 
             val_lp_mrr = float("nan")
-            if pos_val_lp is not None:
+            # Gate _ranking_metrics to every 5 epochs (or final) — it's
+            # pure-Python and dominates per-epoch cost on dense graphs.
+            # Combined-val score uses the most recent computed value.
+            if pos_val_lp is not None and (
+                epoch % 5 == 0 or epoch == 1 or epoch == args.epochs
+            ):
                 h_norm = F.normalize(h, dim=-1).cpu()
                 val_metrics = _ranking_metrics(
                     h_norm, pos_val_lp, adj_lp, rng, n_negs_per_pos=20)
                 val_lp_mrr = val_metrics["MRR"]
+                _last_val_lp_mrr = val_lp_mrr
+            elif pos_val_lp is not None:
+                val_lp_mrr = locals().get("_last_val_lp_mrr", float("nan"))
 
         combined = val_nc_f1 + (val_lp_mrr if val_lp_mrr == val_lp_mrr else 0.0)
         if combined > best_val_combined + 1e-4:
