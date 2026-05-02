@@ -187,11 +187,18 @@ def load_simple_hgn_multitask_results(ds: str) -> List[dict]:
 
 
 def load_sketch_lp_results(ds: str) -> List[dict]:
-    """Sketch-LP: bottom-k sketch features + dot-product LP decoder."""
+    """Sketch-LP: bottom-k sketch features + dot-product LP decoder.
+
+    Filtered to k=32 only — earlier sweep generated `k8_seed42` files with
+    fewer epochs that should not be averaged with the canonical k=32
+    results. Audit found this contaminates the DBLP row otherwise.
+    """
     rows = []
-    for p in sorted((RES / ds).glob("sketch_lp_pilot_k*_seed*.json")):
+    for p in sorted((RES / ds).glob("sketch_lp_pilot_k32_seed*.json")):
         b = _load_json(p)
         if not b:
+            continue
+        if b.get("k") != 32:
             continue
         m = b.get("test_metrics") or {}
         rows.append({
@@ -362,6 +369,64 @@ def amortization_table_md(amort_rows: List[dict],
         "On dense meta-paths (ACM PTP), MT-SHGN's joint training is the "
         "expensive step; KMV bypasses it via single propagation + "
         "lightweight per-task consumers.\n"
+    )
+
+    # ── Part 3: apples-to-apples KMV (NC+LP) vs MT-SHGN (NC+LP) ─────────
+    # Both methods do the SAME Q=2 workload. Rebuts the reviewer attack
+    # "you charge MT-SHGN for LP that KMV doesn't perform."
+    # KMV side: precompute + sketch-NC consume + sketch-LP train time.
+    # MT-SHGN side: joint NC+LP train time.
+    # Sim is dropped from this row because MT-SHGN doesn't natively
+    # serve set-Jaccard; this is the FAIR same-tasks-on-both-sides view.
+    lp_train_by_ds: Dict[str, List[float]] = {}
+    for p in sorted(RES.glob("HGB_*/sketch_lp_pilot_k32_seed*.json")) + \
+             sorted(RES.glob("HNE_*/sketch_lp_pilot_k32_seed*.json")):
+        b = _load_json(p)
+        if not b or b.get("k") != 32:
+            continue
+        ds_name = p.parent.name
+        if b.get("train_time_s") is not None:
+            lp_train_by_ds.setdefault(ds_name, []).append(float(b["train_time_s"]))
+
+    lines.append(
+        "## Part 3 — apples-to-apples KMV (NC+LP) vs MT-SHGN (NC+LP)\n"
+    )
+    lines.append(
+        "Same Q=2 workload on both sides. Rebuts the attack *\"you charge "
+        "MT-SHGN for LP that KMV doesn't perform.\"* KMV side: precompute "
+        "+ sketch-NC consume + sketch-LP train. MT-SHGN side: joint "
+        "NC+LP train.\n"
+    )
+    lines.append(
+        "| Dataset | KMV precompute | KMV NC | KMV LP train | KMV total | "
+        "MT-SHGN train | speedup |"
+    )
+    lines.append("|---|---:|---:|---:|---:|---:|---:|")
+    for r in amort_rows:
+        ds = r["dataset"]
+        lp_times = lp_train_by_ds.get(ds, [])
+        mt_times = mt_by_ds.get(ds, [])
+        if not lp_times or not mt_times:
+            lines.append(f"| {ds} | — | — | — | — | — | — |")
+            continue
+        kmv_lp = statistics.fmean(lp_times)
+        mt_train = statistics.fmean(mt_times)
+        kmv_total = (float(r["kmv_precompute_s"])
+                     + float(r["kmv_nc_s"]) + kmv_lp)
+        speedup = mt_train / kmv_total if kmv_total > 0 else float("inf")
+        lines.append(
+            f"| {ds} | {float(r['kmv_precompute_s']):.2f}s | "
+            f"{float(r['kmv_nc_s']):.2f}s | {kmv_lp:.2f}s | "
+            f"{kmv_total:.2f}s | {mt_train:.2f}s | "
+            f"**{speedup:.2f}×** |"
+        )
+    lines.append("")
+    lines.append(
+        "**Reading (Part 3)**: this is the strictly-fair version. KMV "
+        "still wins on dense graphs; on small/sparse graphs (DBLP, IMDB) "
+        "MT-SHGN is competitive or faster because joint training "
+        "converges in seconds. The honest summary is *amortization wins "
+        "compound with graph density*, not *KMV always wins*.\n"
     )
     return "\n".join(lines)
 
