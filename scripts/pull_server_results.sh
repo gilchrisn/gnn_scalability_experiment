@@ -29,7 +29,16 @@
 
 set -euo pipefail
 
-# ── Config (override via env) ───────────────────────────────────────────
+# Source local .env if present so SERVER / REMOTE_PATH / SSH_KEY can be
+# kept out of git. .env is already in .gitignore. Format:
+#   SERVER=user@host
+#   REMOTE_PATH=/path/to/scalability_experiment
+#   SSH_KEY=~/.ssh/id_rsa     # optional
+if [[ -f ".env" ]]; then
+    set -a; source .env; set +a
+fi
+
+# ── Config (override via env, or set in .env) ───────────────────────────
 SERVER="${SERVER:-user@your-server-hostname}"
 REMOTE_PATH="${REMOTE_PATH:-/path/to/scalability_experiment}"
 SSH_KEY="${SSH_KEY:-}"

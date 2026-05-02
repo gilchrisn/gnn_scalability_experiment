@@ -174,16 +174,20 @@ def _sample_neg_2hop(
     n_nodes: int,
     rng: np.random.Generator,
     max_tries: int = 40,
-    dense_threshold: float = 0.3,
+    dense_threshold: float = 0.0,    # default: always use fast path
 ) -> torch.Tensor:
-    """For each positive edge (u, v), sample negative v' ∈ N^2(u) \\ N^1(u) \\ {u}.
+    """For each positive edge (u, v), sample a negative v' such that
+    (u, v') is not a known positive edge.
 
-    Fast path: if graph is dense (mean_deg/n_nodes > threshold), use rejection
-    sampling from V \\ N^1(u) \\ {u} — on dense graphs the 2-hop reach essentially
-    covers all of V \\ N^1(u), making explicit 2-hop enumeration redundant and
-    O(deg^2) expensive.
+    Default behaviour: rejection sampling from V \\ N^1(u) \\ {u} — this
+    matches the standard HGB LP-evaluation negative-sampling protocol
+    (Lv et al. 2021).
 
-    Slow path (sparse): explicitly compute 2-hop set union, sample from it.
+    The legacy "sparse path" (sample from N^2(u) \\ N^1(u)) was preserved
+    behind ``dense_threshold > 0``; it produces *harder* negatives but is
+    O(deg^2) per source, which on dense meta-paths like ACM PTP becomes
+    intractable (5h+ per seed). Default 0.0 forces the fast path
+    unconditionally.
     """
     src = pos_edges[0].numpy()
     n_pos = len(src)

@@ -45,6 +45,16 @@ set -uo pipefail
 export PYTHONIOENCODING=utf-8
 export PYTHONUTF8=1
 
+# Limit PyTorch CPU thread count. On many-core GPU servers PyTorch's
+# default (== num CPU cores) thrashes badly during multi-task training
+# where many small GPU↔CPU sync points happen per step. Symptom hit on
+# 2026-05-02: 100+ python threads, GPU memory allocated, 0% GPU
+# utilisation for 30+ minutes on ACM. Setting these here propagates to
+# every python process the runner launches.
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"
+
 # ── Defaults ────────────────────────────────────────────────────────────
 HGB_DATASETS="${HGB_DATASETS:-HGB_DBLP HGB_ACM HGB_IMDB HNE_PubMed}"
 FRACTION_K_VALUES="${FRACTION_K_VALUES:-2 4 8 16 32 64}"

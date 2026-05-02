@@ -78,3 +78,7 @@ figures/
 hub-conf/
 bench*/
 
+
+# Project-local SSH key for the GPU server (NEVER commit)
+.ssh/
+
