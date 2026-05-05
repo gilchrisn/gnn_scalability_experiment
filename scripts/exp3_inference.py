@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gc
+import hashlib
 import json
 import logging
 import os
@@ -313,6 +314,8 @@ def _run_inference_worker(
     timeout: int,
     log: logging.Logger,
     label: str = "",
+    arch: str = "SAGE",
+    gat_heads: int = 8,
 ) -> Optional[dict]:
     """
     Runs inference_worker.py in a fresh subprocess.
@@ -333,6 +336,8 @@ def _run_inference_worker(
         "--in-dim",      str(in_dim),
         "--num-classes", str(num_classes),
         "--num-layers",  str(num_layers),
+        "--arch",        arch,
+        "--gat-heads",   str(gat_heads),
     ]
     try:
         res = subprocess.run(cmd, check=True, capture_output=True, text=True,
@@ -381,6 +386,7 @@ def _pred_agreement(z_a: torch.Tensor, z_b: torch.Tensor,
 
 _FIELDS = [
     "Dataset", "MetaPath", "L", "Method", "k_value", "w_value", "Seed",
+    "Arch",              # GNN architecture (SAGE / GCN / GAT). Default SAGE for legacy rows.
     "Materialization_Time", "Inference_Time",
     "Mat_RAM_MB",        # subprocess-isolated materialization peak
     "Inf_RAM_MB",        # subprocess-isolated inference peak
@@ -391,19 +397,46 @@ _FIELDS = [
 
 
 def _open_csv(path: Path) -> Tuple:
-    # If the file exists but was written with an old schema, back it up and
-    # start fresh — new rows will be written with current _FIELDS.
+    # If the file exists but was written with an old schema, decide whether to
+    # tolerate it or back it up.  A purely additive change (e.g. adding the
+    # 'Arch' column for backward-compat with SAGE-only legacy rows) is
+    # tolerated in-place: old rows are read with Arch defaulting to 'SAGE',
+    # new rows are written with the full current schema.  Any non-additive
+    # change (column rename or removal) still triggers a backup.
     if path.exists() and path.stat().st_size > 0:
         with open(path, newline="", encoding="utf-8") as _f:
             existing_fields = csv.DictReader(_f).fieldnames or []
-        if set(existing_fields) != set(_FIELDS):
+        existing_set = set(existing_fields)
+        current_set  = set(_FIELDS)
+        if existing_set == current_set:
+            is_new = False
+        elif existing_set.issubset(current_set):
+            # Purely additive — keep the file in place. csv.DictWriter writes
+            # the new wider header for any *new* rows we'll append below by
+            # rewriting the file with the union schema.
+            logging.getLogger("exp3").info(
+                "CSV schema additive-extended (%s new column(s)); rewriting "
+                "header in place to current schema.",
+                sorted(current_set - existing_set))
+            # Re-read all rows, then rewrite the file with the new header.
+            with open(path, newline="", encoding="utf-8") as _f:
+                rows = list(csv.DictReader(_f))
+            with open(path, "w", newline="", encoding="utf-8") as _f:
+                _w = csv.DictWriter(_f, fieldnames=_FIELDS)
+                _w.writeheader()
+                for r in rows:
+                    # Default missing columns (e.g. Arch) — SAGE for legacy.
+                    if "Arch" not in r or not r.get("Arch"):
+                        r["Arch"] = "SAGE"
+                    _w.writerow({f: r.get(f, "") for f in _FIELDS})
+            is_new = False
+        else:
             backup = path.with_suffix(".csv.bak")
             path.rename(backup)
             logging.getLogger("exp3").warning(
-                "CSV schema changed — old file backed up to %s", backup)
+                "CSV schema changed (non-additive) — old file backed up to %s",
+                backup)
             is_new = True
-        else:
-            is_new = False
     else:
         is_new = not path.exists() or path.stat().st_size == 0
 
@@ -415,18 +448,24 @@ def _open_csv(path: Path) -> Tuple:
 
 
 def _done_runs(path: Path) -> set:
-    """Return set of (metapath, L, method, k_value, w_value, seed) already in CSV."""
+    """Return set of (metapath, L, method, k_value, w_value, seed, arch) in CSV.
+
+    Legacy rows that pre-date the Arch column default to Arch='SAGE' so a
+    pre-existing SAGE result does NOT block a new GCN/GAT run for the same
+    (metapath, L, method, k, w, seed)."""
     done = set()
     if not path.exists():
         return done
     with open(path, newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
+            arch = (row.get("Arch") or "SAGE").upper()
             done.add((row.get("MetaPath", ""),
                       row.get("L", ""),
                       row.get("Method", ""),
                       row.get("k_value", ""),
                       row.get("w_value", ""),
-                      row.get("Seed", "0")))
+                      row.get("Seed", "0"),
+                      arch))
     return done
 
 
@@ -476,8 +515,13 @@ def main():
                         help="Skip the entire ExactD block (materialization + inference). "
                              "Use when exact results are already present in the CSV and "
                              "you only want to (re-)run KMV and MPRW sweeps.")
-    parser.add_argument("--skip-mprw", action="store_true",
-                        help="Skip the entire MPRW w-sweep.")
+    # Approach A (2026-05-05) defaults MPRW OFF.  Pass --include-mprw to
+    # restore the legacy behaviour (sweep w-values, write MPRW rows).
+    parser.add_argument("--skip-mprw", dest="skip_mprw", action="store_true",
+                        default=True,
+                        help="Skip the entire MPRW w-sweep (default: True).")
+    parser.add_argument("--include-mprw", dest="skip_mprw", action="store_false",
+                        help="Re-enable the MPRW w-sweep (legacy behaviour).")
     parser.add_argument("--skip-kmv", action="store_true",
                         help="Skip the entire KMV sweep (still runs Exact and MPRW).")
     parser.add_argument("--run-id", type=int, default=0,
@@ -488,6 +532,14 @@ def main():
                         default=[1, 2, 4, 8, 16, 32, 64, 128, 256, 512],
                         help="MPRW walk-budget sweep values (default: 1 2 4 ... 512). "
                              "Each w is one independent mprw_exec materialize call.")
+    parser.add_argument("--arch", type=str, default="SAGE",
+                        choices=["SAGE", "GCN", "GAT"],
+                        help="GNN architecture (default SAGE — must match exp2).")
+    parser.add_argument("--gat-heads", type=int, default=8,
+                        help="Attention heads for --arch GAT (default 8)")
+    parser.add_argument("--spec-json-dir", type=str, default=None,
+                        help="Override the per-cell JSON output dir "
+                             "(default: results/approach_a_2026_05_05/<dataset>/<arch>)")
     args = parser.parse_args()
     # Resolve inference timeout: explicit --inf-timeout overrides --timeout
     args.inf_timeout = args.inf_timeout if args.inf_timeout is not None else args.timeout
@@ -519,8 +571,10 @@ def main():
     # ------------------------------------------------------------------
     # Load partition + dataset
     # ------------------------------------------------------------------
-    with open(args.partition_json) as f:
-        part = json.load(f)
+    with open(args.partition_json, "rb") as fh_raw:
+        partition_bytes = fh_raw.read()
+    partition_hash = "sha256:" + hashlib.sha256(partition_bytes).hexdigest()
+    part = json.loads(partition_bytes.decode("utf-8"))
 
     # Seed from partition.json so exp3 is bit-for-bit reproducible with exp2
     _master_seed = part.get("seed", 42)
@@ -576,11 +630,81 @@ def main():
     # CSV setup
     # ------------------------------------------------------------------
     csv_fh, csv_w = _open_csv(csv_path)
-    # Auto-inject Seed into every row so callers never forget it.
+    # Auto-inject Seed and Arch into every row so callers never forget them.
     _orig_writerow   = csv_w.writerow
-    csv_w.writerow   = lambda row: _orig_writerow({**row, "Seed": args.run_id})
+    _arch_str        = args.arch.upper()
+    csv_w.writerow   = lambda row: _orig_writerow(
+        {**row, "Seed": args.run_id, "Arch": _arch_str})
     done_runs        = _done_runs(csv_path)
     mp_safe          = args.metapath.replace(",", "_").replace("/", "_")
+
+    # ------------------------------------------------------------------
+    # Resolve arch-specific weight filenames + partition-hash check.
+    # SAGE keeps the legacy `<mp>_L<L>.pt` filename; GCN/GAT use a suffix.
+    # We re-hash the partition.json passed to exp3 and assert it matches
+    # the hash that exp2 stored in the sidecar meta JSON for each L.
+    # ------------------------------------------------------------------
+    def _weights_path_for(L: int) -> Path:
+        suffix = "" if args.arch.upper() == "SAGE" else f"_{args.arch.upper()}"
+        return weights_dir / f"{mp_safe}_L{L}{suffix}.pt"
+
+    for _L in args.depth:
+        wp = _weights_path_for(_L)
+        meta_p = wp.with_suffix(".meta.json")
+        if not wp.exists():
+            log.warning("[partition-hash] weights not yet trained for L=%d (%s) — skipping check",
+                        _L, wp)
+            continue
+        if not meta_p.exists():
+            log.warning("[partition-hash] no sidecar meta for %s (legacy weights from "
+                        "pre-arch exp2). Skipping hash check for L=%d.", wp.name, _L)
+            continue
+        try:
+            with open(meta_p, "r", encoding="utf-8") as mfh:
+                meta = json.load(mfh)
+            if meta.get("partition_hash") and meta["partition_hash"] != partition_hash:
+                raise RuntimeError(
+                    f"[partition-hash MISMATCH] L={_L} arch={args.arch}\n"
+                    f"  exp2 sidecar:  {meta['partition_hash']}\n"
+                    f"  exp3 current:  {partition_hash}\n"
+                    f"  partition.json was mutated between training and inference. "
+                    f"Halt — re-run exp1+exp2 with the current partition.json or revert.")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            log.warning("[partition-hash] sidecar load failed (%s) — proceeding without check", e)
+
+    log.info("[partition-hash] %s — OK", partition_hash)
+
+    # ------------------------------------------------------------------
+    # SPEC §9 per-cell JSON writer.  One file per (arch, dataset, mp, seed)
+    # at results/approach_a_2026_05_05/<dataset>/<arch>/<mp_safe>_seed<seed>.json.
+    # Disambiguator suffix `_L<L>_k<k>` is appended only when exp3 sweeps
+    # multiple Ls or ks; the smoke test (single L, single k) writes the
+    # un-suffixed filename so the spec sanity-gate path matches verbatim.
+    # ------------------------------------------------------------------
+    if args.spec_json_dir:
+        spec_json_dir = Path(args.spec_json_dir)
+    else:
+        spec_json_dir = (Path("results") / "approach_a_2026_05_05"
+                         / args.dataset / args.arch.upper())
+    spec_json_dir.mkdir(parents=True, exist_ok=True)
+
+    def _spec_json_path(L: int, k: int) -> Path:
+        if len(args.depth) == 1 and len(args.k_values) == 1:
+            return spec_json_dir / f"{mp_safe}_seed{args.run_id}.json"
+        return spec_json_dir / f"{mp_safe}_seed{args.run_id}_L{L}_k{k}.json"
+
+    # Lookup table for exp2 sidecar metadata (training_time_s, conv_epoch, etc.)
+    def _read_exp2_meta(L: int) -> dict:
+        meta_p = _weights_path_for(L).with_suffix(".meta.json")
+        if meta_p.exists():
+            try:
+                with open(meta_p, "r", encoding="utf-8") as mfh:
+                    return json.load(mfh)
+            except Exception:
+                pass
+        return {}
 
     # ------------------------------------------------------------------
     # Persist auxiliary tensors to disk once — inference_worker loads them.
@@ -605,17 +729,38 @@ def main():
         res = _run_inference_worker(
             graph_file=graph_file, graph_type=graph_type,
             feat_file=feat_file,
-            weights_path=str(weights_dir / f"{mp_safe}_L{L}.pt"),
+            weights_path=str(_weights_path_for(L)),
             z_out=z_out,
             labels_file=labels_file, mask_file=mask_file,
             n_target=n_target, node_offset=node_offset,
             in_dim=in_dim, num_classes=num_classes, num_layers=L,
             timeout=args.inf_timeout, log=log, label=f"{label}_L{L}",
+            arch=args.arch.upper(), gat_heads=args.gat_heads,
         )
         layers_path = z_out.replace(".pt", "_layers.pt")
         if not os.path.exists(layers_path):
             layers_path = None
         return res, z_out, layers_path
+
+    def _cka_per_layer(layers_exact_path, layers_approx_path, L) -> list:
+        """Return list of L floats (per-layer Linear CKA on V_test rows).
+
+        Returns empty list if either path is missing/unreadable."""
+        out: list = []
+        if not (layers_exact_path and os.path.exists(layers_exact_path)
+                and layers_approx_path and os.path.exists(layers_approx_path)):
+            return out
+        try:
+            le_list = torch.load(layers_exact_path, weights_only=True)
+            la_list = torch.load(layers_approx_path, weights_only=True)
+            mask_dev = test_mask.to(device)
+            for le, la in zip(le_list, la_list):
+                val = cka_calc.calculate(le.to(device)[mask_dev],
+                                         la.to(device)[mask_dev])
+                out.append(float(val))
+        except Exception as e:
+            log.warning("  [CKA per-layer L=%d] failed: %s", L, e)
+        return out
 
     def _cka_from_disk(z_exact_path, layers_exact_path, z_approx_path,
                        layers_approx_path, L, label):
@@ -660,6 +805,7 @@ def main():
     exact_mat_mb: Optional[float] = None
     z_exact_by_L: dict      = {}   # L → z_path (for comparison)
     layers_exact_by_L: dict = {}   # L → layers_path
+    exact_stats_by_L: dict  = {}   # L → {f1, inf_time, mat_time, edges}
 
     if args.skip_exact:
         log.info("--skip-exact: skipping entire ExactD block (Exact results assumed in CSV).")
@@ -693,11 +839,11 @@ def main():
             exact_inf_cascade: Optional[str] = None  # set to status string on first failure
 
             for L in args.depth:
-                weights_path = weights_dir / f"{mp_safe}_L{L}.pt"
+                weights_path = _weights_path_for(L)
                 if not weights_path.exists():
                     log.warning("  [Exact L=%d] weights not found — skipping", L)
                     continue
-                if (args.metapath, str(L), "Exact", "", "", str(args.run_id)) in done_runs:
+                if (args.metapath, str(L), "Exact", "", "", str(args.run_id), _arch_str) in done_runs:
                     log.info("  [Exact L=%d] already in CSV — skipping", L)
                     # Still populate z paths from disk so KMV/MPRW can compute CKA
                     _z = str(scratch_dir / f"z_exact_L{L}.pt")
@@ -766,6 +912,14 @@ def main():
 
                 z_exact_by_L[L]      = z_path
                 layers_exact_by_L[L] = layers_path
+                exact_stats_by_L[L]  = {
+                    "f1":       inf_res.get("inf_f1"),
+                    "inf_time": inf_res.get("inf_time"),
+                    "mat_time": t_exact_mat,
+                    "mat_ram":  exact_mat_mb,
+                    "inf_ram":  inf_res.get("inf_peak_ram_mb"),
+                    "edges":    exact_edge_count,
+                }
 
                 cka_cols = {f"CKA_L{i+1}": "" for i in range(4)}
                 csv_w.writerow({
@@ -858,10 +1012,10 @@ def main():
         kmv_inf_cascade: Optional[str] = None  # L-cascade flag for this k
 
         for L in args.depth:
-            if (args.metapath, str(L), "KMV", str(k), "", str(args.run_id)) in done_runs:
+            if (args.metapath, str(L), "KMV", str(k), "", str(args.run_id), _arch_str) in done_runs:
                 log.info("  [KMV k=%d L=%d] already in CSV — skipping", k, L)
                 continue
-            weights_path = weights_dir / f"{mp_safe}_L{L}.pt"
+            weights_path = _weights_path_for(L)
             if not weights_path.exists():
                 log.warning("  [KMV k=%d L=%d] weights not found — skipping", k, L)
                 continue
@@ -936,6 +1090,78 @@ def main():
             })
             csv_fh.flush()
 
+            # ------------------------------------------------------------------
+            # SPEC §9 — write per-cell JSON for (arch, dataset, mp, seed, L, k)
+            # ------------------------------------------------------------------
+            try:
+                cka_list = _cka_per_layer(
+                    layers_exact_by_L.get(L), layers_kmv_path, L)
+                ex_stats = exact_stats_by_L.get(L, {})
+                exp2_meta = _read_exp2_meta(L)
+                f1_exact_val = ex_stats.get("f1")
+                f1_kmv_val   = inf_res.get("inf_f1")
+                f1_gap = (None
+                          if (f1_exact_val is None or f1_kmv_val is None)
+                          else float(f1_kmv_val) - float(f1_exact_val))
+
+                # PA: try to get from already-computed pred_sim string
+                try:
+                    pa_val = float(pred_sim) if pred_sim not in ("", None) else None
+                except (TypeError, ValueError):
+                    pa_val = None
+
+                arch_status = "OK"
+                # Sanity gate (smoke test): final-layer CKA > 0.85, |F1 gap| < 0.02
+                if cka_list and (cka_list[-1] <= 0.85 or
+                                 (f1_gap is not None and abs(f1_gap) >= 0.02)):
+                    arch_status = "SANITY_GATE_FAIL"
+
+                spec_payload = {
+                    "spec_version":         "approach_a_2026_05_05",
+                    "dataset":              args.dataset,
+                    "meta_path":            args.metapath,
+                    "target_type":          target_ntype,
+                    "arch":                 args.arch.upper(),
+                    "n_layers":             L,
+                    "hidden_dim":           config.HIDDEN_DIM,
+                    "gat_heads":            (args.gat_heads
+                                             if args.arch.upper() == "GAT" else None),
+                    "seed":                 args.run_id,
+                    "kmv_k":                k,
+                    "kmv_hash_seed":        kmv_seed,
+                    "partition_hash":       partition_hash,
+                    "n_target_nodes":       int(n_target),
+                    "n_test_nodes":         int(test_mask.sum().item()),
+                    "n_edges_exact":        ex_stats.get("edges"),
+                    "n_edges_kmv":          int(kmv_edge_count),
+                    "cka_per_layer":        cka_list,
+                    "pred_agreement":       pa_val,
+                    "macro_f1_exact":       (None if f1_exact_val is None
+                                             else float(f1_exact_val)),
+                    "macro_f1_kmv":         (None if f1_kmv_val is None
+                                             else float(f1_kmv_val)),
+                    "f1_gap":               f1_gap,
+                    "inference_time_exact_s": ex_stats.get("inf_time"),
+                    "inference_time_kmv_s":   inf_res.get("inf_time"),
+                    "mat_time_exact_s":     ex_stats.get("mat_time"),
+                    "mat_time_kmv_s":       float(t_kmv_mat),
+                    "training_time_s":      exp2_meta.get("training_time_s"),
+                    "convergence_epoch":    exp2_meta.get("convergence_epoch"),
+                    "device_used":          "cpu",
+                    "arch_status":          arch_status,
+                    "timestamp":            datetime.utcnow().strftime(
+                                                "%Y-%m-%dT%H:%M:%SZ"),
+                }
+                jp = _spec_json_path(L, k)
+                with open(jp, "w", encoding="utf-8") as jfh:
+                    json.dump(spec_payload, jfh, indent=2)
+                log.info("  [SPEC JSON] %s  arch_status=%s  CKA[-1]=%.4f  f1_gap=%s",
+                         jp, arch_status,
+                         cka_list[-1] if cka_list else float("nan"),
+                         f"{f1_gap:+.4f}" if f1_gap is not None else "n/a")
+            except Exception as e:
+                log.warning("  [SPEC JSON] write failed (k=%d L=%d): %s", k, L, e)
+
     if args.skip_mprw:
         log.info("--skip-mprw: skipping MPRW w-sweep.")
         csv_fh.close()
@@ -1005,10 +1231,10 @@ def main():
         mprw_inf_cascade: Optional[str] = None
 
         for L in args.depth:
-            if (args.metapath, str(L), "MPRW", "", str(w), str(args.run_id)) in done_runs:
+            if (args.metapath, str(L), "MPRW", "", str(w), str(args.run_id), _arch_str) in done_runs:
                 log.info("  [MPRW w=%d L=%d] already in CSV — skipping", w, L)
                 continue
-            weights_path = weights_dir / f"{mp_safe}_L{L}.pt"
+            weights_path = _weights_path_for(L)
             if not weights_path.exists():
                 log.warning("  [MPRW w=%d L=%d] weights not found — skipping", w, L)
                 continue

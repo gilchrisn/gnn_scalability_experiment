@@ -5,7 +5,7 @@ Provides a factory function for model instantiation with variable depth support.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, SAGEConv, GATConv
+from torch_geometric.nn import GCNConv, SAGEConv, GATv2Conv as GATConv
 
 
 class GCN(nn.Module):

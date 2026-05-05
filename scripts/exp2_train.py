@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gc
+import hashlib
 import json
 import logging
 import os
@@ -179,10 +180,12 @@ def _train(
     epochs: int,
     device: torch.device,
     log: logging.Logger,
+    arch: str = "SAGE",
+    gat_heads: int = 8,
 ) -> Tuple[torch.nn.Module, List[dict], int]:
-    """Train SAGE(num_layers) with early stopping. Returns (model, history, conv_epoch)."""
-    model = get_model("SAGE", in_dim, num_classes, config.HIDDEN_DIM,
-                      num_layers=num_layers).to(device)
+    """Train ``arch`` with early stopping. Returns (model, history, conv_epoch)."""
+    model = get_model(arch, in_dim, num_classes, config.HIDDEN_DIM,
+                      gat_heads=gat_heads, num_layers=num_layers).to(device)
     opt   = torch.optim.Adam(model.parameters(),
                              lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
 
@@ -273,14 +276,39 @@ def _train(
 # ---------------------------------------------------------------------------
 
 _LOG_FIELDS = [
-    "dataset", "metapath", "L",
+    "dataset", "metapath", "L", "arch",
     "epoch", "train_loss", "val_loss", "train_f1", "val_f1",
     "convergence_epoch", "t_train", "weights_path", "note",
 ]
 
 
 def _open_log(path: Path) -> Tuple:
-    is_new = not path.exists() or path.stat().st_size == 0
+    """Open the training log CSV with backward-compat for legacy schema.
+
+    Legacy logs lack the 'arch' column (SAGE-only era).  If detected, rewrite
+    the file in place defaulting old rows to arch='SAGE' so resume logic
+    works correctly under the new arch-aware scheme.
+    """
+    if path.exists() and path.stat().st_size > 0:
+        with open(path, newline="", encoding="utf-8") as _f:
+            existing_fields = csv.DictReader(_f).fieldnames or []
+        existing_set = set(existing_fields)
+        current_set  = set(_LOG_FIELDS)
+        if existing_set != current_set and existing_set.issubset(current_set):
+            # Additive change — rewrite in place defaulting arch=SAGE.
+            with open(path, newline="", encoding="utf-8") as _f:
+                rows = list(csv.DictReader(_f))
+            with open(path, "w", newline="", encoding="utf-8") as _f:
+                _w = csv.DictWriter(_f, fieldnames=_LOG_FIELDS)
+                _w.writeheader()
+                for r in rows:
+                    if "arch" not in r or not r.get("arch"):
+                        r["arch"] = "SAGE"
+                    _w.writerow({fld: r.get(fld, "") for fld in _LOG_FIELDS})
+        is_new = False
+    else:
+        is_new = True
+
     fh     = open(path, "a", newline="", encoding="utf-8")
     w      = csv.DictWriter(fh, fieldnames=_LOG_FIELDS)
     if is_new:
@@ -289,13 +317,18 @@ def _open_log(path: Path) -> Tuple:
 
 
 def _done_runs(log_path: Path) -> set:
+    """Return set of (metapath, L, arch) tuples that have a DONE row.
+
+    Legacy DONE rows without the 'arch' column default to 'SAGE' so a
+    pre-existing SAGE training does NOT block GCN/GAT for the same (mp, L)."""
     done = set()
     if not log_path.exists():
         return done
     with open(log_path, newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
             if row.get("note", "").startswith("DONE"):
-                done.add((row["metapath"], row["L"]))
+                arch = (row.get("arch") or "SAGE").upper()
+                done.add((row["metapath"], row["L"], arch))
     return done
 
 
@@ -316,13 +349,20 @@ def main():
     parser.add_argument("--partition-json", required=True)
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for weight init + training (default 42)")
+    parser.add_argument("--arch", type=str, default="SAGE",
+                        choices=["SAGE", "GCN", "GAT"],
+                        help="GNN architecture (default SAGE — legacy default)")
+    parser.add_argument("--gat-heads", type=int, default=8,
+                        help="Attention heads for --arch GAT (default 8)")
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
     # Load partition + dataset
     # ------------------------------------------------------------------
-    with open(args.partition_json) as f:
-        part = json.load(f)
+    with open(args.partition_json, "rb") as fh_raw:
+        partition_bytes = fh_raw.read()
+    partition_hash = "sha256:" + hashlib.sha256(partition_bytes).hexdigest()
+    part = json.loads(partition_bytes.decode("utf-8"))
 
     cfg          = config.get_dataset_config(args.dataset)
     folder       = config.get_folder_name(args.dataset)
@@ -345,8 +385,9 @@ def main():
     log.addHandler(ch)
     log.addHandler(fh)
 
-    log.info("Exp2 | dataset=%s  metapath=%s  depth=%s  seed=%d",
-             args.dataset, args.metapath, args.depth, args.seed)
+    log.info("Exp2 | dataset=%s  metapath=%s  depth=%s  seed=%d  arch=%s",
+             args.dataset, args.metapath, args.depth, args.seed, args.arch)
+    log.info("       partition_hash=%s", partition_hash)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -411,38 +452,68 @@ def main():
     done_runs = _done_runs(log_path)
     log_fh, log_w = _open_log(log_path)
 
+    arch_key = args.arch.upper()
     try:
         for L in args.depth:
-            if (args.metapath, str(L)) in done_runs:
-                log.info("[L=%d] already done — skipping", L)
+            if (args.metapath, str(L), arch_key) in done_runs:
+                log.info("[L=%d arch=%s] already done — skipping", L, arch_key)
                 continue
 
-            log.info("\n[L=%d] Training SAGE(%d)...", L, L)
+            log.info("\n[L=%d] Training %s(%d)...", L, args.arch, L)
             t0 = time.perf_counter()
             try:
                 model, history, conv_epoch = _train(
-                    g_h0, in_dim, info["num_classes"], L, args.epochs, device, log
+                    g_h0, in_dim, info["num_classes"], L, args.epochs, device, log,
+                    arch=args.arch, gat_heads=args.gat_heads,
                 )
             except RuntimeError as e:
-                if "CUDA" in str(e) and device.type == "cuda":
+                if ("CUDA" in str(e) or "out of memory" in str(e).lower()) \
+                   and device.type == "cuda":
                     log.warning("  [L=%d] GPU OOM — retrying on CPU", L)
                     torch.cuda.empty_cache()
                     device = torch.device("cpu")
                     model, history, conv_epoch = _train(
-                        g_h0, in_dim, info["num_classes"], L, args.epochs, device, log
+                        g_h0, in_dim, info["num_classes"], L, args.epochs, device, log,
+                        arch=args.arch, gat_heads=args.gat_heads,
                     )
                 else:
                     raise
             t_train = time.perf_counter() - t0
 
-            weights_path = str(weights_dir / f"{mp_safe}_L{L}.pt")
+            # Arch-specific weight filename so SAGE/GCN/GAT runs don't clobber
+            # one another.  SAGE retains the legacy `<mp>_L<L>.pt` name to
+            # remain backward-compatible with the existing weights/results.
+            if args.arch.upper() == "SAGE":
+                weights_path = str(weights_dir / f"{mp_safe}_L{L}.pt")
+            else:
+                weights_path = str(weights_dir / f"{mp_safe}_L{L}_{args.arch.upper()}.pt")
             torch.save(model.state_dict(), weights_path)
+
+            # Sidecar metadata JSON for exp3 to validate partition_hash + arch
+            meta_path = weights_path.replace(".pt", ".meta.json")
+            with open(meta_path, "w", encoding="utf-8") as mfh:
+                json.dump({
+                    "spec_version":      "approach_a_2026_05_05",
+                    "dataset":           args.dataset,
+                    "metapath":          args.metapath,
+                    "arch":              args.arch.upper(),
+                    "n_layers":          L,
+                    "hidden_dim":        config.HIDDEN_DIM,
+                    "gat_heads":         args.gat_heads if args.arch.upper() == "GAT" else None,
+                    "seed":              args.seed,
+                    "partition_hash":    partition_hash,
+                    "convergence_epoch": conv_epoch,
+                    "training_time_s":   round(t_train, 4),
+                    "timestamp":         datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }, mfh, indent=2)
+
             log.info("  Saved θ* → %s  (conv_epoch=%d  t=%.2fs)",
                      weights_path, conv_epoch, t_train)
 
             for h in history:
                 log_w.writerow({
                     "dataset": args.dataset, "metapath": args.metapath, "L": L,
+                    "arch": arch_key,
                     "epoch": h["epoch"], "train_loss": h["train_loss"],
                     "val_loss": h["val_loss"], "train_f1": h["train_f1"],
                     "val_f1": h.get("val_f1", ""),
@@ -451,6 +522,7 @@ def main():
             done_h = history[conv_epoch - 1] if history else {}
             log_w.writerow({
                 "dataset": args.dataset, "metapath": args.metapath, "L": L,
+                "arch": arch_key,
                 "epoch": "DONE", "train_loss": "", "val_loss": "",
                 "train_f1": done_h.get("train_f1", ""),
                 "val_f1":   done_h.get("val_f1", ""),

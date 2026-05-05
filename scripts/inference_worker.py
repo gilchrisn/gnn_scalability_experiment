@@ -226,6 +226,11 @@ def main() -> None:
     p.add_argument("--in-dim",      type=int, required=True)
     p.add_argument("--num-classes", type=int, required=True)
     p.add_argument("--num-layers",  type=int, required=True)
+    p.add_argument("--arch",        type=str, default="SAGE",
+                   choices=["SAGE", "GCN", "GAT"],
+                   help="GNN architecture (default: SAGE for legacy compatibility)")
+    p.add_argument("--gat-heads",   type=int, default=8,
+                   help="Number of attention heads (only used when --arch GAT)")
     args = p.parse_args()
 
     device = torch.device("cpu")
@@ -264,26 +269,66 @@ def main() -> None:
     x = F.pad(x, (0, max(0, args.in_dim - x.size(1))))
 
     # ── Model ────────────────────────────────────────────────────────────
-    model = get_model("SAGE", args.in_dim, args.num_classes,
-                      config.HIDDEN_DIM, num_layers=args.num_layers).to(device)
+    model = get_model(args.arch, args.in_dim, args.num_classes,
+                      config.HIDDEN_DIM, gat_heads=args.gat_heads,
+                      num_layers=args.num_layers).to(device)
     model.load_state_dict(torch.load(args.weights, weights_only=True,
                                      map_location=device))
     model.eval()
     for param in model.parameters():
         param.requires_grad_(False)
 
-    # ── Build D^{-1}A CSR — O(N+E), no dense buffer ──────────────────────
-    # Self-loops were added above (adj format) or are expected in .pt files;
-    # normalization includes them in the degree count.
+    # ── Forward + per-layer activation capture ───────────────────────────
+    # SAGE uses the fast strict-SpMM path (lin_l/lin_r decomposition) — no
+    # dense [|E|, d] buffer is allocated.  GCN/GAT use the model's native
+    # PyG forward with forward-hooks to capture per-layer outputs.
     n = args.n_target
-    adj_csr = _build_normalized_adj_csr(ei, n, device)
-
-    # ── Inference — strict SpMM ───────────────────────────────────────────
     x_dev = x.to(device)
-    t0 = time.perf_counter()
-    with torch.no_grad():
-        z = _sage_spmm_forward(model, x_dev, adj_csr)
-    inf_time = time.perf_counter() - t0
+    intermediates: list = []
+
+    if args.arch.upper() == "SAGE":
+        adj_csr = _build_normalized_adj_csr(ei, n, device)
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            z = _sage_spmm_forward(model, x_dev, adj_csr)
+        inf_time = time.perf_counter() - t0
+    else:
+        ei_dev = ei.to(device)
+        # Forward hook captures each layer's post-conv output (BEFORE the
+        # activation/dropout). For consistency with the SAGE layerwise path
+        # we capture the per-layer output AFTER the activation (matching
+        # what flows into the next layer).  Easiest: register hook on each
+        # GNN layer and apply ReLU/ELU manually to the captured tensor.
+        layer_outputs: list = []
+
+        def _make_hook(idx, total):
+            def _h(_mod, _inp, out):
+                # Re-create the activation that the next layer sees.
+                # GCN uses ReLU, GAT uses ELU (matches src/models.py).
+                # Final layer is left raw (no activation).
+                if idx < total - 1:
+                    if args.arch.upper() == "GCN":
+                        layer_outputs.append(F.relu(out).detach().cpu().clone())
+                    elif args.arch.upper() == "GAT":
+                        layer_outputs.append(F.elu(out).detach().cpu().clone())
+                    else:
+                        layer_outputs.append(out.detach().cpu().clone())
+                else:
+                    layer_outputs.append(out.detach().cpu().clone())
+            return _h
+
+        handles = []
+        for i, layer in enumerate(model.layers):
+            handles.append(layer.register_forward_hook(_make_hook(i, args.num_layers)))
+
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            z = model(x_dev, ei_dev)
+        inf_time = time.perf_counter() - t0
+
+        for h in handles:
+            h.remove()
+        intermediates = layer_outputs
     # Peak RSS of this subprocess since start — captured after the forward
     # pass so the high-water mark includes graph loading + model + adj_csr +
     # all forward-pass intermediates.  Comparable to /usr/bin/time -v for C++.
@@ -323,9 +368,12 @@ def main() -> None:
     # ── Layerwise intermediates for CKA ──────────────────────────────────
     layers_out = args.z_out.replace(".pt", "_layers.pt")
     try:
-        with torch.no_grad():
-            intermediates = _sage_spmm_layerwise(model, x_dev, adj_csr)
-        torch.save(intermediates, layers_out)
+        if args.arch.upper() == "SAGE":
+            with torch.no_grad():
+                intermediates = _sage_spmm_layerwise(model, x_dev, adj_csr)
+        # else: intermediates were already populated by forward hooks above
+        if intermediates:
+            torch.save(intermediates, layers_out)
     except Exception:
         pass
 
