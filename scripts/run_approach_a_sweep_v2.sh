@@ -185,6 +185,7 @@ while IFS='|' read -r ds arch mp_short; do
         --k-values "$k" \
         --partition-json "results/$ds/partition.json" \
         --weights-dir "results/$ds/weights" \
+        --output "results/$ds/master_results_v2.csv" \
         --arch "$arch" \
         --skip-mprw \
         --run-id "$seed" \
