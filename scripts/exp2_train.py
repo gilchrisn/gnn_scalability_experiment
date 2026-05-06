@@ -182,8 +182,10 @@ def _train(
     log: logging.Logger,
     arch: str = "SAGE",
     gat_heads: int = 8,
+    no_early_stop: bool = False,
 ) -> Tuple[torch.nn.Module, List[dict], int]:
-    """Train ``arch`` with early stopping. Returns (model, history, conv_epoch)."""
+    """Train ``arch`` with early stopping (disabled if no_early_stop=True).
+    Returns (model, history, conv_epoch)."""
     model = get_model(arch, in_dim, num_classes, config.HIDDEN_DIM,
                       gat_heads=gat_heads, num_layers=num_layers).to(device)
     opt   = torch.optim.Adam(model.parameters(),
@@ -259,7 +261,7 @@ def _train(
                 wait = 0
             else:
                 wait += 1
-                if wait >= patience:
+                if wait >= patience and not no_early_stop:
                     log.info("  [L=%d] Early stop at ep %d", num_layers, epoch)
                     break
 
@@ -354,6 +356,8 @@ def main():
                         help="GNN architecture (default SAGE — legacy default)")
     parser.add_argument("--gat-heads", type=int, default=8,
                         help="Attention heads for --arch GAT (default 8)")
+    parser.add_argument("--no-early-stop", action="store_true",
+                        help="Disable patience-based early stopping; train full --epochs.")
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
@@ -465,6 +469,7 @@ def main():
                 model, history, conv_epoch = _train(
                     g_h0, in_dim, info["num_classes"], L, args.epochs, device, log,
                     arch=args.arch, gat_heads=args.gat_heads,
+                    no_early_stop=args.no_early_stop,
                 )
             except RuntimeError as e:
                 if ("CUDA" in str(e) or "out of memory" in str(e).lower()) \
