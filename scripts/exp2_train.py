@@ -350,7 +350,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for weight init + training (default 42)")
     parser.add_argument("--arch", type=str, default="SAGE",
-                        choices=["SAGE", "GCN", "GAT"],
+                        choices=["SAGE", "GCN", "GAT", "GIN"],
                         help="GNN architecture (default SAGE — legacy default)")
     parser.add_argument("--gat-heads", type=int, default=8,
                         help="Attention heads for --arch GAT (default 8)")

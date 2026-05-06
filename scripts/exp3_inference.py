@@ -533,7 +533,7 @@ def main():
                         help="MPRW walk-budget sweep values (default: 1 2 4 ... 512). "
                              "Each w is one independent mprw_exec materialize call.")
     parser.add_argument("--arch", type=str, default="SAGE",
-                        choices=["SAGE", "GCN", "GAT"],
+                        choices=["SAGE", "GCN", "GAT", "GIN"],
                         help="GNN architecture (default SAGE — must match exp2).")
     parser.add_argument("--gat-heads", type=int, default=8,
                         help="Attention heads for --arch GAT (default 8)")
