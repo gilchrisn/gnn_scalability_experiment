@@ -227,7 +227,7 @@ def main() -> None:
     p.add_argument("--num-classes", type=int, required=True)
     p.add_argument("--num-layers",  type=int, required=True)
     p.add_argument("--arch",        type=str, default="SAGE",
-                   choices=["SAGE", "GCN", "GAT"],
+                   choices=["SAGE", "GCN", "GAT", "GIN"],
                    help="GNN architecture (default: SAGE for legacy compatibility)")
     p.add_argument("--gat-heads",   type=int, default=8,
                    help="Number of attention heads (only used when --arch GAT)")
