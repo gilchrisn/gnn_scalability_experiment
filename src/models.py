@@ -5,7 +5,7 @@ Provides a factory function for model instantiation with variable depth support.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, SAGEConv, GATv2Conv as GATConv
+from torch_geometric.nn import GCNConv, SAGEConv, GATv2Conv as GATConv, GINConv
 
 
 class GCN(nn.Module):
@@ -132,42 +132,80 @@ class GAT(nn.Module):
         return x
 
 
-def get_model(model_name: str, 
-              in_dim: int, 
-              out_dim: int, 
-              h_dim: int, 
+class GIN(nn.Module):
+    """Graph Isomorphism Network (Xu et al. ICLR 2019).
+
+    Sum aggregation + MLP per layer. No normalization → robust on dense
+    saturated meta-paths where GCN's Laplacian collapses.
+    """
+
+    def __init__(self, in_feats: int, h_feats: int, num_classes: int, num_layers: int = 2):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        self.num_layers = num_layers
+
+        def _mlp(d_in: int, d_out: int) -> nn.Sequential:
+            return nn.Sequential(
+                nn.Linear(d_in, d_out),
+                nn.ReLU(),
+                nn.Linear(d_out, d_out),
+            )
+
+        if num_layers == 1:
+            self.layers.append(GINConv(_mlp(in_feats, num_classes), train_eps=True))
+        else:
+            self.layers.append(GINConv(_mlp(in_feats, h_feats), train_eps=True))
+            for _ in range(num_layers - 2):
+                self.layers.append(GINConv(_mlp(h_feats, h_feats), train_eps=True))
+            self.layers.append(GINConv(_mlp(h_feats, num_classes), train_eps=True))
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        for i, layer in enumerate(self.layers):
+            x = layer(x, edge_index)
+            if i < self.num_layers - 1:
+                x = F.relu(x)
+                x = F.dropout(x, p=0.5, training=self.training)
+        return x
+
+
+def get_model(model_name: str,
+              in_dim: int,
+              out_dim: int,
+              h_dim: int,
               gat_heads: int = 8,
               num_layers: int = 2) -> nn.Module:
     """
     Factory function to instantiate GNN models with variable depth.
-    
+
     Args:
-        model_name: Model type ('GCN', 'SAGE', 'GAT')
+        model_name: Model type ('GCN', 'SAGE', 'GAT', 'GIN')
         in_dim: Input feature dimension
         out_dim: Number of output classes
         h_dim: Hidden dimension
         gat_heads: Number of attention heads (only for GAT)
         num_layers: Number of GNN layers (default: 2)
-        
+
     Returns:
         Initialized model
-        
+
     Raises:
         ValueError: If model_name is not recognized
-        
+
     Example:
         >>> model = get_model('GCN', 128, 10, 64, num_layers=3)
     """
     model_name = model_name.upper()
-    
+
     if model_name == 'GCN':
         return GCN(in_dim, h_dim, out_dim, num_layers=num_layers)
     elif model_name == 'SAGE':
         return SAGE(in_dim, h_dim, out_dim, num_layers=num_layers)
     elif model_name == 'GAT':
         return GAT(in_dim, h_dim, out_dim, num_layers=num_layers, heads=gat_heads)
+    elif model_name == 'GIN':
+        return GIN(in_dim, h_dim, out_dim, num_layers=num_layers)
     else:
         raise ValueError(
             f"Unknown model: '{model_name}'. "
-            f"Available models: GCN, SAGE, GAT"
+            f"Available models: GCN, SAGE, GAT, GIN"
         )

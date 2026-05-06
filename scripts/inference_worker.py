@@ -307,7 +307,7 @@ def main() -> None:
                 # GCN uses ReLU, GAT uses ELU (matches src/models.py).
                 # Final layer is left raw (no activation).
                 if idx < total - 1:
-                    if args.arch.upper() == "GCN":
+                    if args.arch.upper() in ("GCN", "GIN"):
                         layer_outputs.append(F.relu(out).detach().cpu().clone())
                     elif args.arch.upper() == "GAT":
                         layer_outputs.append(F.elu(out).detach().cpu().clone())
