@@ -30,6 +30,7 @@ Stdout lines (parsed by exp3_inference.py)
     inf_peak_ram_mb: X.XX    — peak tracemalloc allocation during forward (MB)
     inf_time: X.XXXXXX       — wall-clock seconds for forward pass
     inf_f1: X.XXXXXX         — macro-F1 on test nodes
+    inf_micro_f1: X.XXXXXX   — micro-F1 on test nodes
     inf_de: X.XXXXXX         — Dirichlet energy of embeddings
 
 Usage (internal — called by exp3_inference.py)
@@ -343,16 +344,24 @@ def main() -> None:
             f1 = _f1(preds, labels[valid].long(),
                      task="multilabel", num_labels=args.num_classes,
                      average="macro").item()
+            f1_micro = _f1(preds, labels[valid].long(),
+                           task="multilabel", num_labels=args.num_classes,
+                           average="micro").item()
         else:
             f1 = 0.0
+            f1_micro = 0.0
     else:
         valid = mask & (labels >= 0)
         if valid.sum() > 0:
             f1 = _f1(z[valid].argmax(1), labels[valid],
                      task="multiclass", num_classes=args.num_classes,
                      average="macro").item()
+            f1_micro = _f1(z[valid].argmax(1), labels[valid],
+                           task="multiclass", num_classes=args.num_classes,
+                           average="micro").item()
         else:
             f1 = 0.0
+            f1_micro = 0.0
 
     # ── Dirichlet energy ──────────────────────────────────────────────────
     de_metric = DirichletEnergyMetric()
@@ -380,6 +389,7 @@ def main() -> None:
     print(f"inf_peak_ram_mb: {inf_peak:.2f}")
     print(f"inf_time: {inf_time:.6f}")
     print(f"inf_f1: {f1:.6f}")
+    print(f"inf_micro_f1: {f1_micro:.6f}")
     print(f"inf_de: {de:.6f}")
 
 

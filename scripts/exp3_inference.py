@@ -358,7 +358,7 @@ def _run_inference_worker(
     out: dict = {}
     for line in res.stdout.split("\n"):
         line = line.strip()
-        for key in ("inf_peak_ram_mb", "inf_time", "inf_f1", "inf_de"):
+        for key in ("inf_peak_ram_mb", "inf_time", "inf_f1", "inf_micro_f1", "inf_de"):
             if line.lower().startswith(f"{key}:"):
                 try:
                     out[key] = float(line.split(":", 1)[1].strip())
@@ -379,6 +379,146 @@ def _pred_agreement(z_a: torch.Tensor, z_b: torch.Tensor,
     return (z_a[mask].argmax(1) == z_b[mask].argmax(1)).float().mean().item()
 
 
+# ---------------------------------------------------------------------------
+# v2 metrics (SPEC 2026-05-07 §5)
+# ---------------------------------------------------------------------------
+
+def _unbiased_cka(X: torch.Tensor, Y: torch.Tensor,
+                  cka_calc: LinearCKA) -> float:
+    """Davari-corrected unbiased linear CKA on V_test rows.
+
+    Falls back to biased CKA if n <= 4 or denominator <= 0.
+    Operates on already-masked tensors X [n, d_x], Y [n, d_y].
+    """
+    n = X.size(0)
+    if n <= 4:
+        return float(cka_calc.calculate(X, Y))
+    Xc = X - X.mean(dim=0, keepdim=True)
+    Yc = Y - Y.mean(dim=0, keepdim=True)
+    K = Xc @ Xc.T
+    L = Yc @ Yc.T
+    K = K - torch.diag(torch.diagonal(K))
+    L = L - torch.diag(torch.diagonal(L))
+    ones = torch.ones(n, 1, dtype=K.dtype, device=K.device)
+
+    def _uhsic(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+        tr_AB = (A * B).sum()
+        sumA  = (ones.T @ A @ ones).squeeze()
+        sumB  = (ones.T @ B @ ones).squeeze()
+        cross = (ones.T @ A @ B @ ones).squeeze()
+        return (tr_AB
+                + sumA * sumB / ((n - 1) * (n - 2))
+                - 2.0 / (n - 2) * cross) / (n * (n - 3))
+
+    hxy = _uhsic(K, L)
+    hxx = _uhsic(K, K)
+    hyy = _uhsic(L, L)
+    denom = hxx * hyy
+    if float(denom) <= 0:
+        return float(cka_calc.calculate(X, Y))
+    return float(hxy / torch.sqrt(denom))
+
+
+def _compute_v2_metrics(z_exact_path: Optional[str],
+                        layers_exact_path: Optional[str],
+                        z_kmv_path: Optional[str],
+                        layers_kmv_path: Optional[str],
+                        mask: torch.Tensor,
+                        device: torch.device,
+                        cka_calc: LinearCKA) -> dict:
+    """Compute SPEC v2 metrics restricted to V_test rows.
+
+    Returns a dict with per-layer lists for:
+      row_cosine_per_layer_{mean,std}
+      row_rel_l2_per_layer_{mean,std}
+      frob_recon_err_per_layer
+      procrustes_q_eq_i_per_layer  (alias for frob_recon_err)
+      procrustes_q_orth_per_layer  (None per-layer if SVD fails)
+      cka_unbiased_per_layer
+
+    If layer files are missing, falls back to using the final z files only and
+    returns single-element lists.
+    """
+    out = {
+        "row_cosine_per_layer_mean": [],
+        "row_cosine_per_layer_std":  [],
+        "row_rel_l2_per_layer_mean": [],
+        "row_rel_l2_per_layer_std":  [],
+        "frob_recon_err_per_layer":  [],
+        "procrustes_q_eq_i_per_layer":  [],
+        "procrustes_q_orth_per_layer": [],
+        "cka_unbiased_per_layer":   [],
+    }
+
+    pairs: List[Tuple[torch.Tensor, torch.Tensor]] = []
+    try:
+        if (layers_exact_path and os.path.exists(layers_exact_path)
+                and layers_kmv_path and os.path.exists(layers_kmv_path)):
+            le_list = torch.load(layers_exact_path, weights_only=True)
+            la_list = torch.load(layers_kmv_path, weights_only=True)
+            for le, la in zip(le_list, la_list):
+                pairs.append((le, la))
+        elif (z_exact_path and os.path.exists(z_exact_path)
+              and z_kmv_path and os.path.exists(z_kmv_path)):
+            ze = torch.load(z_exact_path, weights_only=True)
+            zk = torch.load(z_kmv_path,   weights_only=True)
+            pairs.append((ze, zk))
+    except Exception:
+        return out
+
+    if not pairs:
+        return out
+
+    mask_dev = mask.to(device)
+    eps = 1e-10
+    for le, la in pairs:
+        Z_e = le.to(device)
+        Z_k = la.to(device)
+        Z_e_v = Z_e[mask_dev]
+        Z_k_v = Z_k[mask_dev]
+
+        # Per-row cosine
+        cos_per_row = F.cosine_similarity(Z_e_v, Z_k_v, dim=1)
+        out["row_cosine_per_layer_mean"].append(float(cos_per_row.mean().item()))
+        out["row_cosine_per_layer_std"].append(float(cos_per_row.std().item()))
+
+        # Per-row rel L2
+        num = (Z_e_v - Z_k_v).norm(dim=1)
+        den = Z_e_v.norm(dim=1).clamp(min=eps)
+        rel = num / den
+        out["row_rel_l2_per_layer_mean"].append(float(rel.mean().item()))
+        out["row_rel_l2_per_layer_std"].append(float(rel.std().item()))
+
+        # Frobenius reconstruction error
+        frob_num = (Z_e_v - Z_k_v).norm()
+        frob_den = Z_e_v.norm().clamp(min=eps)
+        frob = float((frob_num / frob_den).item())
+        out["frob_recon_err_per_layer"].append(frob)
+        out["procrustes_q_eq_i_per_layer"].append(frob)
+
+        # Procrustes Q-orth via SVD
+        try:
+            M = Z_e_v.T @ Z_k_v
+            U, _S, Vt = torch.linalg.svd(M, full_matrices=False)
+            Q = (U @ Vt).T
+            resid = (Z_e_v @ Q.T - Z_k_v).norm() / Z_e_v.norm().clamp(min=eps)
+            out["procrustes_q_orth_per_layer"].append(float(resid.item()))
+        except Exception:
+            out["procrustes_q_orth_per_layer"].append(None)
+
+        # Unbiased CKA
+        try:
+            out["cka_unbiased_per_layer"].append(
+                _unbiased_cka(Z_e_v, Z_k_v, cka_calc))
+        except Exception:
+            try:
+                out["cka_unbiased_per_layer"].append(
+                    float(cka_calc.calculate(Z_e_v, Z_k_v)))
+            except Exception:
+                out["cka_unbiased_per_layer"].append(None)
+
+    return out
+
 
 # ---------------------------------------------------------------------------
 # CSV
@@ -392,7 +532,13 @@ _FIELDS = [
     "Inf_RAM_MB",        # subprocess-isolated inference peak
     "Edge_Count", "Graph_Density",
     "CKA_L1", "CKA_L2", "CKA_L3", "CKA_L4",
-    "Pred_Similarity", "Macro_F1", "Dirichlet_Energy", "exact_status",
+    "Pred_Similarity", "Macro_F1", "Micro_F1", "Dirichlet_Energy",
+    # SPEC v2 (2026-05-07) — populated for KMV rows only; empty for Exact.
+    "Row_Cosine_L1", "Row_Cosine_L2", "Row_Cosine_L3", "Row_Cosine_L4",
+    "Row_RelL2_L1", "Row_RelL2_L2", "Row_RelL2_L3", "Row_RelL2_L4",
+    "Frob_Recon_L1", "Frob_Recon_L2", "Frob_Recon_L3", "Frob_Recon_L4",
+    "CKA_Unbiased_L1", "CKA_Unbiased_L2", "CKA_Unbiased_L3", "CKA_Unbiased_L4",
+    "exact_status",
 ]
 
 
@@ -686,13 +832,15 @@ def main():
     if args.spec_json_dir:
         spec_json_dir = Path(args.spec_json_dir)
     else:
-        spec_json_dir = (Path("results") / "approach_a_2026_05_05"
+        spec_json_dir = (Path("results") / "approach_a_2026_05_07"
                          / args.dataset / args.arch.upper())
     spec_json_dir.mkdir(parents=True, exist_ok=True)
 
     def _spec_json_path(L: int, k: int) -> Path:
-        if len(args.depth) == 1 and len(args.k_values) == 1:
-            return spec_json_dir / f"{mp_safe}_seed{args.run_id}.json"
+        # v2 always sweeps k, so always include _k<k>.  L is included only when
+        # multiple depths are swept (single-L runs keep the legacy short name).
+        if len(args.depth) == 1:
+            return spec_json_dir / f"{mp_safe}_seed{args.run_id}_k{k}.json"
         return spec_json_dir / f"{mp_safe}_seed{args.run_id}_L{L}_k{k}.json"
 
     # Lookup table for exp2 sidecar metadata (training_time_s, conv_epoch, etc.)
@@ -914,6 +1062,7 @@ def main():
                 layers_exact_by_L[L] = layers_path
                 exact_stats_by_L[L]  = {
                     "f1":       inf_res.get("inf_f1"),
+                    "micro_f1": inf_res.get("inf_micro_f1"),
                     "inf_time": inf_res.get("inf_time"),
                     "mat_time": t_exact_mat,
                     "mat_ram":  exact_mat_mb,
@@ -938,6 +1087,7 @@ def main():
                     **cka_cols,
                     "Pred_Similarity":      "",
                     "Macro_F1":             _fmt(inf_res.get("inf_f1")),
+                    "Micro_F1":             _fmt(inf_res.get("inf_micro_f1")),
                     "Dirichlet_Energy":     _fmt(inf_res.get("inf_de")),
                     "exact_status":         exact_status_flag,
                 })
@@ -1062,6 +1212,27 @@ def main():
                 z_exact_by_L.get(L), layers_exact_by_L.get(L),
                 z_kmv_path, layers_kmv_path, L, f"KMV k={k}")
 
+            # SPEC v2 metrics on V_test rows (per-row cosine/L2, Frob, Procrustes,
+            # unbiased CKA).  Computed once here and reused for the CSV row +
+            # the SPEC JSON payload below.
+            v2 = _compute_v2_metrics(
+                z_exact_by_L.get(L), layers_exact_by_L.get(L),
+                z_kmv_path, layers_kmv_path,
+                test_mask, device, cka_calc)
+
+            def _v2_col(name: str, idx: int):
+                vals = v2.get(name) or []
+                if idx < len(vals) and vals[idx] is not None:
+                    return _fmt(vals[idx])
+                return ""
+
+            v2_cols = {}
+            for i in range(4):
+                v2_cols[f"Row_Cosine_L{i+1}"]    = _v2_col("row_cosine_per_layer_mean", i)
+                v2_cols[f"Row_RelL2_L{i+1}"]     = _v2_col("row_rel_l2_per_layer_mean", i)
+                v2_cols[f"Frob_Recon_L{i+1}"]    = _v2_col("frob_recon_err_per_layer", i)
+                v2_cols[f"CKA_Unbiased_L{i+1}"]  = _v2_col("cka_unbiased_per_layer", i)
+
             log.info("  [KMV k=%d L=%d] F1=%.4f  DE=%.4f  inf=%.2fs  inf_ram=%s  mat_ram=%s  pred_sim=%s",
                      k, L, inf_res.get("inf_f1", 0), inf_res.get("inf_de", 0),
                      inf_res.get("inf_time", 0),
@@ -1085,7 +1256,9 @@ def main():
                 **cka_cols,
                 "Pred_Similarity":       pred_sim,
                 "Macro_F1":              _fmt(inf_res.get("inf_f1")),
+                "Micro_F1":              _fmt(inf_res.get("inf_micro_f1")),
                 "Dirichlet_Energy":      _fmt(inf_res.get("inf_de")),
+                **v2_cols,
                 "exact_status":          exact_status_flag,
             })
             csv_fh.flush()
@@ -1104,20 +1277,43 @@ def main():
                           if (f1_exact_val is None or f1_kmv_val is None)
                           else float(f1_kmv_val) - float(f1_exact_val))
 
+                micro_exact_val = ex_stats.get("micro_f1")
+                micro_kmv_val   = inf_res.get("inf_micro_f1")
+                micro_gap = (None
+                             if (micro_exact_val is None or micro_kmv_val is None)
+                             else float(micro_kmv_val) - float(micro_exact_val))
+
                 # PA: try to get from already-computed pred_sim string
                 try:
                     pa_val = float(pred_sim) if pred_sim not in ("", None) else None
                 except (TypeError, ValueError):
                     pa_val = None
 
+                row_cos_mean = v2.get("row_cosine_per_layer_mean") or []
+                frob_list    = v2.get("frob_recon_err_per_layer") or []
+
                 arch_status = "OK"
-                # Sanity gate (smoke test): final-layer CKA > 0.85, |F1 gap| < 0.02
-                if cka_list and (cka_list[-1] <= 0.85 or
-                                 (f1_gap is not None and abs(f1_gap) >= 0.02)):
+                # Sanity gate (v2): final-layer CKA > 0.85, |F1 gap| < 0.02,
+                # final-layer per-row cosine >= 0.85, final-layer Frob recon <= 0.20.
+                # Non-fatal — log warning, continue.
+                gate_fail_reasons = []
+                if cka_list and cka_list[-1] <= 0.85:
+                    gate_fail_reasons.append(f"CKA[-1]={cka_list[-1]:.4f}<=0.85")
+                if f1_gap is not None and abs(f1_gap) >= 0.02:
+                    gate_fail_reasons.append(f"|f1_gap|={abs(f1_gap):.4f}>=0.02")
+                if row_cos_mean and row_cos_mean[-1] < 0.85:
+                    gate_fail_reasons.append(
+                        f"row_cos[-1]={row_cos_mean[-1]:.4f}<0.85")
+                if frob_list and frob_list[-1] > 0.20:
+                    gate_fail_reasons.append(
+                        f"frob[-1]={frob_list[-1]:.4f}>0.20")
+                if gate_fail_reasons:
                     arch_status = "SANITY_GATE_FAIL"
+                    log.warning("  [SANITY GATE] k=%d L=%d failed: %s",
+                                k, L, "; ".join(gate_fail_reasons))
 
                 spec_payload = {
-                    "spec_version":         "approach_a_2026_05_05",
+                    "spec_version":         "approach_a_2026_05_07",
                     "dataset":              args.dataset,
                     "meta_path":            args.metapath,
                     "target_type":          target_ntype,
@@ -1135,16 +1331,35 @@ def main():
                     "n_edges_exact":        ex_stats.get("edges"),
                     "n_edges_kmv":          int(kmv_edge_count),
                     "cka_per_layer":        cka_list,
+                    "row_cosine_per_layer_mean": v2.get("row_cosine_per_layer_mean", []),
+                    "row_cosine_per_layer_std":  v2.get("row_cosine_per_layer_std", []),
+                    "row_rel_l2_per_layer_mean": v2.get("row_rel_l2_per_layer_mean", []),
+                    "row_rel_l2_per_layer_std":  v2.get("row_rel_l2_per_layer_std", []),
+                    "frob_recon_err_per_layer":  v2.get("frob_recon_err_per_layer", []),
+                    "procrustes_q_eq_i_per_layer":  v2.get("procrustes_q_eq_i_per_layer", []),
+                    "procrustes_q_orth_per_layer": v2.get("procrustes_q_orth_per_layer", []),
+                    "cka_unbiased_per_layer":   v2.get("cka_unbiased_per_layer", []),
                     "pred_agreement":       pa_val,
                     "macro_f1_exact":       (None if f1_exact_val is None
                                              else float(f1_exact_val)),
                     "macro_f1_kmv":         (None if f1_kmv_val is None
                                              else float(f1_kmv_val)),
-                    "f1_gap":               f1_gap,
+                    "macro_f1_gap":         f1_gap,
+                    "f1_gap":               f1_gap,   # kept for backward-compat
+                    "micro_f1_exact":       (None if micro_exact_val is None
+                                             else float(micro_exact_val)),
+                    "micro_f1_kmv":         (None if micro_kmv_val is None
+                                             else float(micro_kmv_val)),
+                    "micro_f1_gap":         micro_gap,
                     "inference_time_exact_s": ex_stats.get("inf_time"),
                     "inference_time_kmv_s":   inf_res.get("inf_time"),
                     "mat_time_exact_s":     ex_stats.get("mat_time"),
                     "mat_time_kmv_s":       float(t_kmv_mat),
+                    "mat_peak_rss_mb_exact": ex_stats.get("mat_ram"),
+                    "mat_peak_rss_mb_kmv":   (float(kmv_mat_mb)
+                                              if kmv_mat_mb else None),
+                    "inf_peak_rss_mb_exact": ex_stats.get("inf_ram"),
+                    "inf_peak_rss_mb_kmv":   inf_res.get("inf_peak_ram_mb"),
                     "training_time_s":      exp2_meta.get("training_time_s"),
                     "convergence_epoch":    exp2_meta.get("convergence_epoch"),
                     "device_used":          "cpu",
@@ -1304,6 +1519,7 @@ def main():
                 **cka_cols,
                 "Pred_Similarity":       pred_sim,
                 "Macro_F1":              _fmt(inf_res.get("inf_f1")),
+                "Micro_F1":              _fmt(inf_res.get("inf_micro_f1")),
                 "Dirichlet_Energy":      _fmt(inf_res.get("inf_de")),
                 "exact_status":          exact_status_flag,
             })
