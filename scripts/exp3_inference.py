@@ -387,10 +387,12 @@ def _unbiased_cka(X: torch.Tensor, Y: torch.Tensor,
                   cka_calc: LinearCKA) -> float:
     """Davari-corrected unbiased linear CKA on V_test rows.
 
-    Falls back to biased CKA if n <= 4 or denominator <= 0.
+    Falls back to biased CKA if n <= 4 or denominator <= 0 / NaN.
     Operates on already-masked tensors X [n, d_x], Y [n, d_y].
     """
     n = X.size(0)
+    # Defensive: unbiased estimator requires n > 3 (denominator n*(n-3)).
+    # Fall back to the biased CKA in that regime.
     if n <= 4:
         return float(cka_calc.calculate(X, Y))
     Xc = X - X.mean(dim=0, keepdim=True)
@@ -399,6 +401,10 @@ def _unbiased_cka(X: torch.Tensor, Y: torch.Tensor,
     L = Yc @ Yc.T
     K = K - torch.diag(torch.diagonal(K))
     L = L - torch.diag(torch.diagonal(L))
+    # Property: diagonal-zeroing is the Davari correction.  Verify here so
+    # downstream code can rely on it (cheap O(n)).
+    assert torch.diagonal(K).abs().max().item() < 1e-6, "K_tilde diagonal not zeroed"
+    assert torch.diagonal(L).abs().max().item() < 1e-6, "L_tilde diagonal not zeroed"
     ones = torch.ones(n, 1, dtype=K.dtype, device=K.device)
 
     def _uhsic(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
@@ -414,9 +420,17 @@ def _unbiased_cka(X: torch.Tensor, Y: torch.Tensor,
     hxx = _uhsic(K, K)
     hyy = _uhsic(L, L)
     denom = hxx * hyy
-    if float(denom) <= 0:
+    # Defensive: denom non-finite or non-positive → fall back.  hxx/hyy can
+    # underflow to slightly negative values when n is tiny; in that case the
+    # unbiased estimator is undefined and we return the biased one.
+    denom_f = float(denom)
+    if not (denom_f == denom_f) or denom_f <= 0:  # NaN-safe (NaN != NaN)
         return float(cka_calc.calculate(X, Y))
-    return float(hxy / torch.sqrt(denom))
+    out = float(hxy / torch.sqrt(denom))
+    # NaN/inf guard.
+    if not (out == out) or out in (float("inf"), float("-inf")):
+        return float(cka_calc.calculate(X, Y))
+    return out
 
 
 def _compute_v2_metrics(z_exact_path: Optional[str],
@@ -516,6 +530,48 @@ def _compute_v2_metrics(z_exact_path: Optional[str],
                     float(cka_calc.calculate(Z_e_v, Z_k_v)))
             except Exception:
                 out["cka_unbiased_per_layer"].append(None)
+
+        # ------------------------------------------------------------------
+        # Property assertions — surface true bugs at runtime.  Tolerances are
+        # generous so single-cell numerical noise does not crash the pipeline;
+        # the goal is to catch impossible values (cos = 5.7, frob = -0.3) that
+        # indicate a math error, not borderline fp imprecision.
+        # ------------------------------------------------------------------
+        rc  = out["row_cosine_per_layer_mean"][-1]
+        rl2 = out["row_rel_l2_per_layer_mean"][-1]
+        fr  = out["frob_recon_err_per_layer"][-1]
+        qei = out["procrustes_q_eq_i_per_layer"][-1]
+        qor = out["procrustes_q_orth_per_layer"][-1]
+        cu  = out["cka_unbiased_per_layer"][-1]
+
+        # Bounds checks.
+        assert -1.05 <= rc <= 1.05, f"row_cosine out of [-1,1]: {rc}"
+        assert rl2 is None or rl2 >= 0, f"row_rel_l2 negative: {rl2}"
+        assert fr  >= 0, f"frob_recon_err negative: {fr}"
+        assert qei >= 0, f"procrustes_q_eq_i negative: {qei}"
+        # Procrustes-Q-orth <= Q=I (rotation can only help, not hurt).
+        if qor is not None:
+            assert qor <= qei + 1e-3, (
+                f"Q-orth ({qor}) exceeds Q=I ({qei}) — rotation should "
+                f"reduce residual, not increase it."
+            )
+            assert qor >= 0, f"procrustes_q_orth negative: {qor}"
+        # Unbiased CKA can drift slightly negative numerically; bound generously.
+        if cu is not None:
+            assert -0.1 <= cu <= 1.05, f"cka_unbiased out of expected range: {cu}"
+
+        # NaN/inf guard.  Log a clear error and continue (do not crash) — a
+        # downstream aggregator will treat None / NaN as missing.
+        for name, val in (("row_cosine", rc), ("row_rel_l2", rl2),
+                           ("frob_recon_err", fr),
+                           ("procrustes_q_eq_i", qei),
+                           ("procrustes_q_orth", qor),
+                           ("cka_unbiased", cu)):
+            if val is None:
+                continue
+            if val != val or val in (float("inf"), float("-inf")):
+                logging.error(
+                    "[v2-metric] non-finite value detected: %s = %r", name, val)
 
     return out
 
