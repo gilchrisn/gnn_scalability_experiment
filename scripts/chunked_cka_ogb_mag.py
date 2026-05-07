@@ -334,9 +334,18 @@ def two_hop_extract(
 
     ei = torch.tensor([src, dst], dtype=torch.long)
     from torch_geometric.utils import coalesce, add_self_loops
+    # Symmetrize: pass 1 captures (S -> H1) and pass 2 captures (H1 -> H2 / H1).
+    # The .adj file represents undirected edges twice (once per endpoint), but
+    # we only read the lines for nodes in S (pass 1) and H1 (pass 2). Edges
+    # (w, u) where w in H2 \ H1 are NOT read because pass 2 doesn't process w's
+    # line. To recover the full undirected adjacency on the localised subgraph,
+    # we explicitly add the reverse of every captured edge before coalesce.
+    # This is correct because the source graph is undirected.
+    ei_rev = ei.flip(0)
+    ei = torch.cat([ei, ei_rev], dim=1)
     ei = coalesce(ei, num_nodes=n_target)
     ei, _ = add_self_loops(ei, num_nodes=n_target)
-    log.info("[Stage B] coalesced + self-looped edge_index: %d edges", ei.size(1))
+    log.info("[Stage B] symmetrized + coalesced + self-looped edge_index: %d edges", ei.size(1))
     return ei
 
 
