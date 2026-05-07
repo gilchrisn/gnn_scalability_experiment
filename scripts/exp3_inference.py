@@ -615,6 +615,64 @@ def _done_runs(path: Path) -> set:
     return done
 
 
+def _load_exact_stats_from_csv(csv_path: Path, metapath: str, L: int,
+                               run_id: int, arch_str: str) -> dict:
+    """Backfill exact_stats_by_L[L] from a prior CSV row.
+
+    Used when Exact inference was already run in a previous invocation (or
+    skipped via --skip-exact / CSV resume) but the per-k SPEC JSONs we are
+    about to write still need scalar Exact metrics (f1, edges, time, RAM).
+    Reads the matching (metapath, L, "Exact", k="", w="", run_id, arch)
+    row and converts populated columns into the dict shape that the JSON
+    writer block consumes via exact_stats_by_L.get(L, {}).
+
+    Returns an empty dict if the row is missing or unreadable.
+    """
+    out: dict = {}
+    if not csv_path.exists():
+        return out
+
+    def _f(v):
+        if v in (None, ""):
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def _i(v):
+        if v in (None, ""):
+            return None
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return None
+
+    try:
+        with open(csv_path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                if (row.get("MetaPath", "") == metapath
+                        and row.get("L", "") == str(L)
+                        and row.get("Method", "") == "Exact"
+                        and row.get("k_value", "") == ""
+                        and row.get("w_value", "") == ""
+                        and row.get("Seed", "0") == str(run_id)
+                        and (row.get("Arch") or "SAGE").upper() == arch_str.upper()):
+                    out = {
+                        "f1":       _f(row.get("Macro_F1")),
+                        "micro_f1": _f(row.get("Micro_F1")),
+                        "inf_time": _f(row.get("Inference_Time")),
+                        "mat_time": _f(row.get("Materialization_Time")),
+                        "mat_ram":  _f(row.get("Mat_RAM_MB")),
+                        "inf_ram":  _f(row.get("Inf_RAM_MB")),
+                        "edges":    _i(row.get("Edge_Count")),
+                    }
+                    break
+    except Exception:
+        return {}
+    return out
+
+
 def _fmt(val, digits: int = 6):
     return round(val, digits) if val is not None else ""
 
@@ -958,6 +1016,8 @@ def main():
     if args.skip_exact:
         log.info("--skip-exact: skipping entire ExactD block (Exact results assumed in CSV).")
         # Still populate z_exact_by_L from scratch so KMV/MPRW can compute CKA.
+        # Also backfill exact_stats_by_L from the prior CSV row so each per-k
+        # SPEC JSON written below carries f1_exact / edges / time / RAM scalars.
         for L in args.depth:
             _z      = str(scratch_dir / f"z_exact_L{L}.pt")
             _layers = _z.replace(".pt", "_layers.pt")
@@ -965,6 +1025,10 @@ def main():
                 z_exact_by_L[L] = _z
             if os.path.exists(_layers):
                 layers_exact_by_L[L] = _layers
+            _stats = _load_exact_stats_from_csv(
+                csv_path, args.metapath, L, args.run_id, _arch_str)
+            if _stats:
+                exact_stats_by_L[L] = _stats
     else:
         log.info("\n--- Running ExactD on full graph ---")
         try:
@@ -993,13 +1057,20 @@ def main():
                     continue
                 if (args.metapath, str(L), "Exact", "", "", str(args.run_id), _arch_str) in done_runs:
                     log.info("  [Exact L=%d] already in CSV — skipping", L)
-                    # Still populate z paths from disk so KMV/MPRW can compute CKA
+                    # Still populate z paths from disk so KMV/MPRW can compute CKA.
+                    # Also backfill exact_stats_by_L from the prior CSV row so
+                    # each per-k SPEC JSON written below carries f1_exact /
+                    # edges / time / RAM scalars (cached-Exact-Z bug fix).
                     _z = str(scratch_dir / f"z_exact_L{L}.pt")
                     _layers = _z.replace(".pt", "_layers.pt")
                     if os.path.exists(_z):
                         z_exact_by_L[L] = _z
                     if os.path.exists(_layers):
                         layers_exact_by_L[L] = _layers
+                    _stats = _load_exact_stats_from_csv(
+                        csv_path, args.metapath, L, args.run_id, _arch_str)
+                    if _stats:
+                        exact_stats_by_L[L] = _stats
                     continue
 
                 if exact_inf_cascade is not None:

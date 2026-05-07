@@ -374,6 +374,20 @@ def _weights_path_for(weights_dir: Path, mp_safe: str, L: int, arch: str) -> Pat
     return weights_dir / f"{mp_safe}_L{L}{suffix}.pt"
 
 
+def _resolve_kmv_hash_seed(args, fx: dict, replicate_seed: int) -> int:
+    """Pick the KMV hash seed for a single replicate.
+
+    With --vary-hash-seed (default), the sketch hash seed equals the
+    replicate seed value, mirroring exp3_inference.py's --hash-seed flag
+    so per-seed std on KMV-side metrics is non-zero.  With --no-vary-hash-seed
+    the legacy fixed value from fx['kmv_seed'] is reused across all
+    replicate seeds (kept for reproducing earlier sanity audit numbers).
+    """
+    if getattr(args, "vary_hash_seed", True):
+        return int(replicate_seed)
+    return int(fx["kmv_seed"])
+
+
 # ---------------------------------------------------------------------------
 # Mode implementations
 # ---------------------------------------------------------------------------
@@ -504,11 +518,13 @@ def mode_random_theta(args, fx: dict, sanity_dir: Path, cka_calc: LinearCKA,
                 log.info("[skip] %s", out_path.name)
                 continue
 
-            log.info("\n[random_theta] seed=%d k=%d", seed, k)
+            kmv_hash_seed = _resolve_kmv_hash_seed(args, fx, seed)
+            log.info("\n[random_theta] seed=%d k=%d  kmv_hash_seed=%d",
+                     seed, k, kmv_hash_seed)
 
-            # KMV at this k (one materialization per k)
+            # KMV at this k (one materialization per k, varied per replicate seed)
             kmv_file, kmv_mat_time, kmv_mat_mb, kmv_edges = _materialize_kmv_once(
-                args, fx, k, fx["kmv_seed"], log)
+                args, fx, k, kmv_hash_seed, log)
             if kmv_file is None:
                 log.warning("  KMV k=%d failed — skipping", k)
                 continue
@@ -539,7 +555,7 @@ def mode_random_theta(args, fx: dict, sanity_dir: Path, cka_calc: LinearCKA,
             payload.update({
                 "seed":               seed,
                 "kmv_k":              k,
-                "kmv_hash_seed":      fx["kmv_seed"],
+                "kmv_hash_seed":      kmv_hash_seed,
                 "n_edges_exact":      exact_edges,
                 "n_edges_kmv":        kmv_edges,
                 "macro_f1_exact":     ex_inf.get("inf_f1"),
@@ -690,10 +706,12 @@ def mode_density_matched_random(args, fx: dict, sanity_dir: Path,
                 log.info("[skip] %s", out_path.name)
                 continue
 
-            log.info("\n[density_matched_random] seed=%d k=%d", seed, k)
+            kmv_hash_seed = _resolve_kmv_hash_seed(args, fx, seed)
+            log.info("\n[density_matched_random] seed=%d k=%d  kmv_hash_seed=%d",
+                     seed, k, kmv_hash_seed)
             try:
                 kmv_file, kmv_mat_time, kmv_mat_mb, kmv_edges = (
-                    _materialize_kmv_once(args, fx, k, fx["kmv_seed"], log))
+                    _materialize_kmv_once(args, fx, k, kmv_hash_seed, log))
                 if kmv_file is None:
                     continue
             except Exception as e:
@@ -741,7 +759,7 @@ def mode_density_matched_random(args, fx: dict, sanity_dir: Path,
             payload.update({
                 "seed":              seed,
                 "kmv_k":             k,
-                "kmv_hash_seed":     fx["kmv_seed"],
+                "kmv_hash_seed":     kmv_hash_seed,
                 "n_edges_exact":     exact_edges,
                 "n_edges_kmv":       kmv_edges,
                 "n_edges_random":    rand_edges_actual,
@@ -832,6 +850,7 @@ def mode_layer_permutation(args, fx: dict, sanity_dir: Path,
             payload.update({
                 "seed":                       seed,
                 "kmv_k":                      k,
+                "kmv_hash_seed":              _resolve_kmv_hash_seed(args, fx, seed),
                 "cka_cross_exactL1_vs_kmvL2": cka_cross,
                 "cka_aligned_L1":             cka_aligned_l1,
                 "cka_aligned_L2":             cka_aligned_l2,
@@ -876,6 +895,18 @@ def main() -> None:
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--force", action="store_true",
                         help="Overwrite existing JSONs instead of skipping.")
+    parser.add_argument("--vary-hash-seed", dest="vary_hash_seed",
+                        action="store_true", default=True,
+                        help="Set the KMV hash seed used for sketching equal "
+                             "to the current replicate seed (default True). "
+                             "Without this, modes 1/3/4 reused a single fixed "
+                             "kmv_hash_seed across all 'seeds' which made the "
+                             "KMV-side per-seed std artifactually zero.")
+    parser.add_argument("--no-vary-hash-seed", dest="vary_hash_seed",
+                        action="store_false",
+                        help="Legacy behaviour: use the fixed kmv_hash_seed "
+                             "from --hash-seed / partition.json across all "
+                             "replicate seeds.")
     args = parser.parse_args()
 
     if args.weights_dir is None:
