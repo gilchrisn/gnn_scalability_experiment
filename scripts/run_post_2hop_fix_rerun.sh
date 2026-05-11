@@ -53,7 +53,19 @@ if [[ $RESUME -eq 0 ]]; then
         rm -f "results/$ds/weights/"*.meta.json 2>/dev/null || true
         rm -rf "results/$ds/inf_scratch" 2>/dev/null || true
         rm -f "results/$ds/training_log.csv" 2>/dev/null || true
+        # CRITICAL: wipe per-dataset master_results_v2.csv too, otherwise
+        # exp3_inference's "already in CSV" short-circuit causes the entire
+        # inference sweep to skip every (cell, seed, k) silently.
+        rm -f "results/$ds/master_results_v2.csv" 2>/dev/null || true
+        rm -f "results/$ds/master_results.csv" 2>/dev/null || true
     done
+    # OGB-MAG cost files (used by fig1_ogb_cost.pdf and tab:ogb-mag) — snapshot
+    # rather than delete, since these are the "before" baseline we'll diff
+    # against the post-fix numbers.
+    if [[ -f results/OGB_MAG/exact_attempt_165329.log ]]; then
+        mv results/OGB_MAG/exact_attempt_165329.log \
+           results/OGB_MAG/exact_attempt_165329_PRE_2HOP_FIX.log
+    fi
     for stg in staging/HGBn-DBLP staging/HGBn-ACM staging/HGBn-IMDB staging/HNE_PubMed staging/OGB_MAG; do
         rm -f "$stg/mat_exact.adj" "$stg/mat_sketch" "$stg/mat_sketch_"* 2>/dev/null || true
     done
@@ -137,10 +149,25 @@ python scripts/aggregate_approach_a_v2.py 2>&1 | tee -a results/post_2hop_fix_ag
 python scripts/emit_v2_tables.py 2>&1 | tee -a results/post_2hop_fix_agg.log
 python scripts/plot_v2_paper_figures.py 2>&1 | tee -a results/post_2hop_fix_agg.log
 
+echo "[$(date '+%H:%M:%S')] HGB stages done. Now running OGB-MAG (Stage 8)."
+
+# ---- 8. OGB-MAG cost story (fig1_ogb_cost.pdf, tab:ogb-mag) ---------------
+# OGB-MAG also uses materialize, so the old cost numbers (2.86B edges,
+# 23 GB Exact mat RAM, inf OOM) were computed on the 2-hop substrate and
+# are wrong. The 1-hop substrate may give wildly different cost story.
+# This is a separate ~2-4h run.
+if [[ -f scripts/run_ogb_mag_v2.sh ]]; then
+    echo "[$(date '+%H:%M:%S')] launching OGB-MAG re-run"
+    bash scripts/run_ogb_mag_v2.sh 2>&1 | tee -a results/post_2hop_fix_ogb.log
+    # Re-run plotting after OGB data lands
+    python scripts/plot_v2_paper_figures.py 2>&1 | tee -a results/post_2hop_fix_agg.log
+fi
+
 echo "[$(date '+%H:%M:%S')] DONE. Review:"
 echo "  results/convergence_matrix.csv"
 echo "  results/master_table_approach_a_v2.md"
 echo "  results/equivalence_tests_v2.csv"
+echo "  results/OGB_MAG/master_results_v2.csv  (NEW OGB-MAG cost numbers — likely very different from old)"
 echo "  springer/tables/tab_sage_8cell.tex"
 echo "  springer/tables/tab_arch_2cell.tex"
 echo "  springer/figure/exp/hgnn_v2/fig{1,2,4,5}*.pdf"
