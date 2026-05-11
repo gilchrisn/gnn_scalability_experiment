@@ -21,6 +21,13 @@
 std::vector<std::vector<unsigned int>*>* hidden_graph_construction(unsigned int meta_layer, Pattern *qp, HeterGraph *g,
                                                                    std::vector<std::vector<bool>*>* visited,
                                                                    std::vector<std::vector<unsigned int>*>* ractive){
+    // BUG FIX: the relational graph H_P (per Definition 3 in PVLDB) has edge
+    // (u, v) iff some meta-path instance has M(x_0)=u and M(x_L)=v -- i.e.
+    // the 1-hop neighbourhood of u is exactly MidHop(u) = the V_L frontier
+    // reachable from u through the matching graph. The previous version
+    // composed MidHop + rMidHop, which yields the 2-hop relational graph
+    // (co-co-authors for APA, etc). Deduplicate and emit midfrontiers
+    // directly to recover the intended 1-hop semantics.
     auto visited_mod = new std::vector<std::pair<unsigned int, unsigned int>>();
     auto hidden_graph = new std::vector<std::vector<unsigned int>*>();
 
@@ -31,14 +38,13 @@ std::vector<std::vector<unsigned int>*>* hidden_graph_construction(unsigned int 
             for(auto &it: *visited_mod) visited->at(it.first)->at(it.second) = false;
             visited_mod->clear();
 
+            // Dedup midfrontiers (BFS may push duplicates before the visited
+            // check fires) and copy directly into hidden_graph[u].
+            std::set<unsigned int> seen;
             for(unsigned int f: *midfrontiers){
-                auto peers_new = rMidHop(f, qp, g, meta_layer, visited, visited_mod, ractive);
-                for(unsigned int p: *peers_new) hidden_graph->at(u)->push_back(p);
-                delete peers_new;
+                if(seen.insert(f).second) hidden_graph->at(u)->push_back(f);
             }
 
-            for(auto &it: *visited_mod) visited->at(it.first)->at(it.second) = false;
-            visited_mod->clear();
             delete midfrontiers;
         }
     }

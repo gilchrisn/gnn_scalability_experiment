@@ -152,6 +152,11 @@ class CppEngine(ExecutionEngine):
 
         edge_index = torch.tensor([srcs, dsts], dtype=torch.long)
         edge_index = pyg_utils.coalesce(edge_index, num_nodes=num_nodes)
+        # Symmetric meta-paths produce undirected relational graphs; the C++
+        # binary emits one direction per matching instance, so we mirror here
+        # to bring the bridge in line with src/kernels/{kmv,exact,random,mprw}.py
+        # and to make Z_kmv comparable to Z_exact under the same symmetry.
+        edge_index = pyg_utils.to_undirected(edge_index, num_nodes=num_nodes)
         edge_index, _ = pyg_utils.add_self_loops(edge_index, num_nodes=num_nodes)
 
         return Data(edge_index=edge_index, num_nodes=num_nodes)
